@@ -406,6 +406,7 @@ export interface VideoGenerationDiagnostics {
   fullPrompt: string;
   videoModel: string;
   useReferenceImages: boolean;
+  masterImagesSentCount?: number;
   engine: 'omni_flash' | 'veo_31';
   timestamp: number;
 }

@@ -22,6 +22,7 @@ describe('M2-1 Character Identity Lock Pipeline & Gates', () => {
   test('1. Direct character image bypasses rebuild (DIRECT_CHARACTER_IMAGE)', async () => {
     const sourceMode = IdentityLockService.determineIdentitySourceMode({
       sceneMode: 'animate_existing_character',
+      imageIsTargetCharacter: true,
     });
 
     expect(sourceMode).toBe('DIRECT_CHARACTER_IMAGE');
@@ -31,6 +32,7 @@ describe('M2-1 Character Identity Lock Pipeline & Gates', () => {
       sceneMimeType: 'image/jpeg',
       identitySpec: dummyIdentitySpec,
       sceneMode: 'animate_existing_character',
+      imageIsTargetCharacter: true,
     });
 
     expect(result.sourceMode).toBe('DIRECT_CHARACTER_IMAGE');
@@ -141,6 +143,9 @@ describe('M2-1 Character Identity Lock Pipeline & Gates', () => {
   });
 
   test('8. Save character identity profile metadata with GCS paths', async () => {
+    const { gcsArtifactStore } = await import('../server/storage/gcsArtifactStore');
+    gcsArtifactStore.setMockMode(true);
+
     const profile = await IdentityLockService.saveIdentityProfile({
       characterId: 'char_test_123',
       characterName: 'Aria',

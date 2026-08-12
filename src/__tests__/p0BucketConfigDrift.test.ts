@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { resolveVeoOutputBucket, resolveVeoStorageUri, getVeoBucketName, getVeoStorageUri, gcsArtifactStore } from '../server/storage/gcsArtifactStore';
+import { resolveVeoOutputBucket, resolveVeoStorageUri, getVeoBucketName, getVeoStorageUri, gcsArtifactStore, assertProductionStorageConfig } from '../server/storage/gcsArtifactStore';
 import { VertexClient } from '../services/google/vertexClient';
 import { VideoGenerator } from '../services/video/videoGenerator';
 import { type ActiveSession } from '../services/google/credentialService';
@@ -74,6 +74,7 @@ describe('P0-2 Bucket Configuration Drift & Enforced GCS Storage Requirements', 
 
   it('4. GCS artifact upload verifies existence and metadata before completing', async () => {
     process.env.VEO_OUTPUT_BUCKET = 'ai-studio-bucket-89614354864-asia-south1';
+    gcsArtifactStore.setMockMode(true);
 
     const validMp4Buf = Buffer.alloc(2048, 0);
     validMp4Buf.write('ftypmp42', 4);
@@ -102,18 +103,8 @@ describe('P0-2 Bucket Configuration Drift & Enforced GCS Storage Requirements', 
     expect(safetyBlockResult.raiMediaFilteredCount).toBe(1);
   });
 
-  it('6. VEO_OUTPUT_BUCKET=pan277942135 is respected and passed as storageUri for predictLongRunning', async () => {
+  it('6. VEO_OUTPUT_BUCKET=pan277942135 is rejected as bucket drift guard', async () => {
     process.env.VEO_OUTPUT_BUCKET = 'pan277942135';
-
-    let capturedBody: any = null;
-    const mockFetch = vi.fn().mockImplementation((_url, opts) => {
-      capturedBody = JSON.parse(opts.body);
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({ name: 'projects/123/locations/us-central1/operations/op_pan_override' }),
-      });
-    });
-    vi.stubGlobal('fetch', mockFetch);
 
     const session = {
       type: 'vertex_ai',
@@ -124,26 +115,28 @@ describe('P0-2 Bucket Configuration Drift & Enforced GCS Storage Requirements', 
 
     vi.spyOn(VertexClient, 'getAccessToken').mockResolvedValue('test-token');
 
-    const result = await VertexClient.predictLongRunning(session, {
-      prompt: 'a cinematic scene',
-      imageBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
-      mimeType: 'image/png',
-      taskId: 'task_pan_override',
-    });
-
-    expect(result.operationName).toBe('projects/123/locations/us-central1/operations/op_pan_override');
-    expect(capturedBody.parameters.storageUri).toBe('gs://pan277942135/veo/task_pan_override/');
+    await expect(
+      VertexClient.predictLongRunning(session, {
+        prompt: 'a cinematic scene',
+        imageBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        mimeType: 'image/png',
+        taskId: 'task_pan_override',
+      })
+    ).rejects.toThrow('storage_configuration_drift');
   });
 
-  it('7. Consecutive publish simulation: pan277942135 injected repeatedly resolves consistently', () => {
-    // Publish 1 simulation: platform injects pan277942135
+  it('7. Consecutive publish simulation: pan277942135 rejected consistently', () => {
     process.env.VEO_OUTPUT_BUCKET = 'pan277942135';
-    expect(resolveVeoOutputBucket()).toBe('pan277942135');
-    expect(resolveVeoStorageUri('task_pub1')).toBe('gs://pan277942135/veo/task_pub1/');
+    const config1 = assertProductionStorageConfig();
+
+    expect(config1.valid).toBe(false);
+    expect(config1.bucketDriftDetected).toBe(true);
+    expect(config1.error).toBe('storage_configuration_drift');
 
     // Publish 2 simulation: platform injects pan277942135 again
     process.env.VEO_OUTPUT_BUCKET = 'pan277942135';
-    expect(resolveVeoOutputBucket()).toBe('pan277942135');
-    expect(resolveVeoStorageUri('task_pub2')).toBe('gs://pan277942135/veo/task_pub2/');
+    const config2 = assertProductionStorageConfig();
+    expect(config2.valid).toBe(false);
+    expect(config2.bucketDriftDetected).toBe(true);
   });
 });

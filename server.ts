@@ -1055,14 +1055,102 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         console.log(`[Video Start] 未提交单独角色母板图，以首帧原图直通模式运行 (sceneMode: ${sceneMode || 'animate_existing_character'})`);
       }
 
-      const approvedFirstFrameBuf = ffFile ? ffFile.buffer : sceneFile!.buffer;
-      const approvedFirstFrameMime = ffFile ? (ffFile.mimetype || 'image/jpeg') : (sceneFile!.mimetype || 'image/jpeg');
+      const imageIsTargetCharacter = req.body.imageIsTargetCharacter === 'true' || req.body.imageIsTargetCharacter === true || req.body.isTargetCharacter === 'true' || req.body.isTargetCharacter === true;
+      const manualApproved = req.body.manualApproved === 'true' || req.body.manualApproved === true;
+
+      // Identity Lock Step 1: Determine Identity Source Mode
+      const sourceMode = IdentityLockService.determineIdentitySourceMode({
+        sceneMode,
+        imageIsTargetCharacter,
+      });
+
+      const rawSceneBuf = sceneFile ? sceneFile.buffer : ffFile!.buffer;
+      const rawSceneMime = sceneFile ? (sceneFile.mimetype || 'image/jpeg') : (ffFile!.mimetype || 'image/jpeg');
+
+      // Identity Lock Step 2: Rebuild First Frame if required
+      let approvedFirstFrameBuf = rawSceneBuf;
+      let approvedFirstFrameMime = rawSceneMime;
+      let rebuildExecuted = false;
+
+      if (sourceMode === 'IDENTITY_REBUILD_REQUIRED') {
+        const rebuildResult = await IdentityLockService.rebuildFirstFrame({
+          ai,
+          imageModelName: models.imageModel || 'gemini-3.1-flash-image',
+          sceneImageBuffer: rawSceneBuf,
+          sceneMimeType: rawSceneMime,
+          identitySpec,
+          masterBuffers,
+          masterMimeTypes,
+          sceneMode,
+          userPrompt: rawUserPrompt || compiledPrompt,
+          imageIsTargetCharacter,
+        });
+        approvedFirstFrameBuf = Buffer.from(await rebuildResult.candidateFirstFrame.blob.arrayBuffer());
+        approvedFirstFrameMime = rebuildResult.candidateFirstFrame.mimeType;
+        rebuildExecuted = rebuildResult.rebuildExecuted;
+      }
 
       // First frame local rules inspection
       const ffCheck = FirstFrameChecker.checkBuffer(approvedFirstFrameBuf, approvedFirstFrameMime);
       if (!ffCheck.valid) {
         return res.status(400).json({ error: ffCheck.errors.join('; ') });
       }
+
+      // Identity Lock Step 3: Evaluate First Frame Identity Gate
+      const masterBufForQa = masterBuffers[0];
+      const masterMimeForQa = masterMimeTypes[0];
+
+      const gateResult = await IdentityLockService.evaluateIdentityGate({
+        ai,
+        analysisModel: session.analysisModel || 'gemini-3.6-flash',
+        masterImageBuffer: masterBufForQa,
+        masterMimeType: masterMimeForQa,
+        sceneImageBuffer: rawSceneBuf,
+        sceneMimeType: rawSceneMime,
+        candidateBuffer: approvedFirstFrameBuf,
+        candidateMimeType: approvedFirstFrameMime,
+        identitySpec,
+        sceneMode,
+        imageIsTargetCharacter,
+        manualApproved,
+      });
+
+      if (!gateResult.canStartVeo) {
+        console.warn(`[Video Start] 拒绝启动 Veo: Identity Gate 未通过 (status: ${gateResult.status}, score: ${gateResult.identityQaScore})`);
+        const isReview = gateResult.status === 'review';
+        const failureReason = isReview ? 'identity_qa_review_required' : 'identity_qa_failed';
+        const httpStatus = isReview ? 422 : 400;
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'submit',
+          httpStatus,
+          customUserMessage: isReview
+            ? '角色一致性处于人工复核区间 (REVIEW)，需要明确人工批准后方可提交 Veo 渲染。'
+            : '角色一致性质检未通过 (Identity QA failed)，拒绝启动 Veo 渲染。',
+          endpointPathRedacted: '/api/videos/start',
+        });
+
+        return res.status(httpStatus).json({
+          accepted: false,
+          serverPersisted: false,
+          status: 'failed',
+          submissionState: 'not_submitted',
+          failureReason,
+          error: errObj.userMessage,
+          qaReport: gateResult.identityQaReport,
+          requiresManualApproval: isReview,
+          predictLongRunningCalls: 0,
+          structuredError: errObj,
+        });
+      }
+
+      // Identity Lock Step 4: Prepare Motion-First I2V submission
+      const submissionPrep = IdentityLockService.prepareI2VSubmission({
+        userPrompt: compiledPrompt || rawUserPrompt,
+        durationSeconds,
+        cameraPreset,
+        identityGatePassed: gateResult.canStartVeo,
+      });
 
       const firstFrameHash = crypto.createHash('sha256').update(approvedFirstFrameBuf).digest('hex');
       const promptHash = crypto.createHash('sha256').update(normalizedPrompt).digest('hex');
@@ -1242,7 +1330,11 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
 
       // 异步后台发起 Google Veo 提单与提示词处理，不阻塞 HTTP 响应
       (async () => {
-        let finalVeoPrompt = normalizedPrompt;
+        let finalVeoPrompt = submissionPrep.compiledMotionPrompt || PromptCompiler.compileI2VMotionPrompt({
+          userMotionPrompt: normalizedPrompt,
+          durationSeconds,
+          cameraPreset,
+        });
         if (/[\u4e00-\u9fa5]/.test(finalVeoPrompt)) {
           try {
             const cleanPrompt = PromptCompiler.cleanUserMotionPrompt(finalVeoPrompt);
@@ -2728,6 +2820,20 @@ ${cleanPrompt}`
           if (vSession) {
             accessToken = await VertexClient.getAccessToken(vSession).catch(() => undefined);
           }
+        }
+        if (!accessToken) {
+          try {
+            const { GoogleAuth } = await import('google-auth-library');
+            const auth = new GoogleAuth({
+              scopes: [
+                'https://www.googleapis.com/auth/cloud-platform',
+                'https://www.googleapis.com/auth/devstorage.read_only',
+              ],
+            });
+            const client = await auth.getClient();
+            const tRes = await client.getAccessToken();
+            accessToken = typeof tRes === 'string' ? tRes : tRes?.token || undefined;
+          } catch {}
         }
 
         let videoBuffer: Buffer | null = null;

@@ -81,17 +81,14 @@ export class VideoGenerator {
     const charDesc = characterDescription || identitySpec.identityLockPromptEnglish || identitySpec.identityLockPromptChinese || '';
     const lockedTraitsJson = JSON.stringify(identitySpec?.lockedTraits || []);
 
-    // Clean, positive, safe prompt structure optimized for Veo 3.1 & Vertex AI without triggering RAI safety filters
-    let fullPrompt = `A high quality, realistic video based on the uploaded first frame image.
-Subject action: ${normalizedPromptEnglish || 'Natural posture with subtle expression and smooth motion'}.
-Maintain character identity, facial features, original composition, framing, outfit, and background environment.
-Ensure steady focused gaze, natural facial motion, consistent lighting, and clean camera movement.`;
-
-    if (charDesc && charDesc.trim()) {
-      const cleanCharDesc = PromptCompiler.cleanUserMotionPrompt(charDesc.trim());
-      if (cleanCharDesc && !cleanCharDesc.includes('角色呈自然动态')) {
-        fullPrompt += `\nCharacter details: ${cleanCharDesc}`;
-      }
+    // Motion-First prompt structure: relies on uploaded first frame for WHO/WHAT/WHERE.
+    // Does NOT re-describe physical character details (Asian female, young woman, face shape, etc.).
+    let fullPrompt = normalizedPromptEnglish;
+    if (!fullPrompt || !fullPrompt.includes('uploaded image')) {
+      fullPrompt = PromptCompiler.compileI2VMotionPrompt({
+        userMotionPrompt: normalizedPromptEnglish || 'Natural subtle breathing motion and gentle posture shift.',
+        durationSeconds,
+      });
     }
 
     if (directionalRepairInstruction) {
@@ -123,6 +120,9 @@ Ensure steady focused gaze, natural facial motion, consistent lighting, and clea
       })),
     ];
 
+    const masterImagesSentCount = isOmni ? masterSlice.length : 0;
+    const useReferenceImages = isOmni && masterSlice.length > 0;
+
     const diagnostics: VideoGenerationDiagnostics = {
       firstFrame: {
         role: 'Approved First Frame',
@@ -136,7 +136,8 @@ Ensure steady focused gaze, natural facial motion, consistent lighting, and clea
       inputImages: inputDiagList,
       fullPrompt,
       videoModel: modelName || (isOmni ? 'gemini-omni-flash-preview' : 'veo-3.1-fast-generate-001'),
-      useReferenceImages: masterSlice.length > 0,
+      useReferenceImages,
+      masterImagesSentCount,
       engine: isOmni ? 'omni_flash' : 'veo_31',
       timestamp: Date.now(),
     };
@@ -609,9 +610,11 @@ Ensure steady focused gaze, natural facial motion, consistent lighting, and clea
         downloadUrl += (downloadUrl.includes('?') ? '&' : '?') + `key=${apiKey}`;
       }
 
+      const isGcsUrl = downloadUrl.includes('storage.googleapis.com') || downloadUrl.includes('storage.cloud.google.com');
+
       const headers: Record<string, string> = {};
       if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
-      if (apiKey) headers['x-goog-api-key'] = apiKey;
+      if (!isGcsUrl && apiKey) headers['x-goog-api-key'] = apiKey;
 
       for (let attempt = 0; attempt < backoffDelays.length; attempt++) {
         if (attempt > 0) await new Promise((r) => setTimeout(r, backoffDelays[attempt - 1]));
@@ -666,12 +669,13 @@ Ensure steady focused gaze, natural facial motion, consistent lighting, and clea
       for (const rawUrl of candidateUrls) {
         try {
           let url = rawUrl;
-          if (apiKey && !url.includes('key=')) {
+          const isGcsUrl = url.includes('storage.googleapis.com') || url.includes('storage.cloud.google.com');
+          if (!isGcsUrl && apiKey && !url.includes('key=')) {
             url += (url.includes('?') ? '&' : '?') + `key=${apiKey}`;
           }
           const headers: Record<string, string> = {};
           if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
-          if (apiKey) headers['x-goog-api-key'] = apiKey;
+          if (!isGcsUrl && apiKey) headers['x-goog-api-key'] = apiKey;
 
           const res = await fetch(url, { headers });
           if (res.ok) {

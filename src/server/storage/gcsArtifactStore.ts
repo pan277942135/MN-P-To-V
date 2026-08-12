@@ -22,15 +22,37 @@ export function resolveVeoOutputBucket(): string {
 }
 
 export function assertProductionStorageConfig(): ProductionStorageConfig {
-  const effectiveBucket = resolveVeoOutputBucket();
   const rawEnv = process.env.VEO_OUTPUT_BUCKET || '';
   const environmentBucket = rawEnv.replace(/^gs:\/\//i, '').replace(/\/+$/, '').trim();
+  const expectedBucket = EXPECTED_PRODUCTION_VEO_BUCKET;
+
+  if (!environmentBucket) {
+    return {
+      valid: false,
+      expectedBucket,
+      environmentBucket: 'missing',
+      effectiveBucket: expectedBucket,
+      bucketDriftDetected: false,
+      error: 'storage_configuration_missing',
+    };
+  }
+
+  if (environmentBucket !== expectedBucket) {
+    return {
+      valid: false,
+      expectedBucket,
+      environmentBucket,
+      effectiveBucket: environmentBucket,
+      bucketDriftDetected: true,
+      error: 'storage_configuration_drift',
+    };
+  }
 
   return {
-    valid: Boolean(effectiveBucket),
-    expectedBucket: EXPECTED_PRODUCTION_VEO_BUCKET,
-    environmentBucket: environmentBucket || 'missing',
-    effectiveBucket,
+    valid: true,
+    expectedBucket,
+    environmentBucket,
+    effectiveBucket: environmentBucket,
     bucketDriftDetected: false,
   };
 }
@@ -129,16 +151,19 @@ export class GcsArtifactStore {
       };
     } catch (err: any) {
       console.error(`[GcsArtifactStore Error] Uploading image artifact ${objectPath} failed:`, err?.message || err);
-      this.mockStore.set(key, { buffer, contentType });
-      return {
-        outputBucket: bucketName,
-        outputObjectPath: objectPath,
-        videoUri: `gs://${bucketName}/${objectPath}`,
-        sizeBytes: buffer.length,
-        contentType,
-        artifactPersisted: true,
-        artifactPersistedAt: Date.now(),
-      };
+      if (this.useMock || process.env.NODE_ENV === 'test') {
+        this.mockStore.set(key, { buffer, contentType });
+        return {
+          outputBucket: bucketName,
+          outputObjectPath: objectPath,
+          videoUri: `gs://${bucketName}/${objectPath}`,
+          sizeBytes: buffer.length,
+          contentType,
+          artifactPersisted: true,
+          artifactPersistedAt: Date.now(),
+        };
+      }
+      throw err;
     }
   }
 
@@ -206,17 +231,19 @@ export class GcsArtifactStore {
       };
     } catch (err: any) {
       console.error(`[GcsArtifactStore Error] Uploading artifact for task ${taskId} failed:`, err?.message || err);
-      // Fall back to mock store if in non-production/test
-      this.mockStore.set(key, { buffer: videoBuffer, contentType });
-      return {
-        outputBucket: bucketName,
-        outputObjectPath: objectPath,
-        videoUri: `gs://${bucketName}/${objectPath}`,
-        sizeBytes: videoBuffer.length,
-        contentType,
-        artifactPersisted: true,
-        artifactPersistedAt: Date.now(),
-      };
+      if (this.useMock || process.env.NODE_ENV === 'test') {
+        this.mockStore.set(key, { buffer: videoBuffer, contentType });
+        return {
+          outputBucket: bucketName,
+          outputObjectPath: objectPath,
+          videoUri: `gs://${bucketName}/${objectPath}`,
+          sizeBytes: videoBuffer.length,
+          contentType,
+          artifactPersisted: true,
+          artifactPersistedAt: Date.now(),
+        };
+      }
+      throw err;
     }
   }
 
@@ -335,11 +362,25 @@ export class GcsArtifactStore {
         try {
           const { CredentialService } = await import('../../services/google/credentialService');
           const { VertexClient } = await import('../../services/google/vertexClient');
-          const sessions = CredentialService.listSessions();
-          const vSession = sessions.find((s: any) => s.type === 'vertex_ai');
-          if (vSession) {
-            token = await VertexClient.getAccessToken(vSession);
+          const session = CredentialService.getSession();
+          if (session && session.type === 'vertex_ai') {
+            token = await VertexClient.getAccessToken(session).catch(() => undefined);
           }
+        } catch {}
+      }
+
+      if (!token) {
+        try {
+          const { GoogleAuth } = await import('google-auth-library');
+          const auth = new GoogleAuth({
+            scopes: [
+              'https://www.googleapis.com/auth/cloud-platform',
+              'https://www.googleapis.com/auth/devstorage.read_only',
+            ],
+          });
+          const client = await auth.getClient();
+          const tRes = await client.getAccessToken();
+          token = typeof tRes === 'string' ? tRes : tRes?.token || undefined;
         } catch {}
       }
 
@@ -361,7 +402,7 @@ export class GcsArtifactStore {
       console.debug('[GcsArtifactStore Notice] REST fallback token resolution skipped:', tokenErr?.message || tokenErr);
     }
 
-    console.error(`[GcsArtifactStore Error] Downloading gs://${bucketName}/${objectPath} failed across candidate buckets (${candidateBuckets.join(', ')}):`, lastError);
+    console.warn(`[GcsArtifactStore Warning] Downloading gs://${bucketName}/${objectPath} failed across candidate buckets (${candidateBuckets.join(', ')}):`, lastError);
     throw new Error(`Cloud Storage 视频产物不存在或读取失败: gs://${bucketName}/${objectPath}`);
   }
 

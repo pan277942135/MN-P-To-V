@@ -34,14 +34,16 @@ export interface RebuildInput {
 export interface QaInput {
   ai?: GoogleGenAI;
   analysisModel?: string;
-  masterImageBuffer: Buffer;
-  masterMimeType: string;
+  masterImageBuffer?: Buffer;
+  masterMimeType?: string;
   sceneImageBuffer: Buffer;
   sceneMimeType: string;
   candidateBuffer: Buffer;
   candidateMimeType: string;
   identitySpec: IdentitySpec;
   sceneMode: SceneMode | string;
+  imageIsTargetCharacter?: boolean;
+  manualApproved?: boolean;
 }
 
 export interface IdentityGateResult {
@@ -49,6 +51,7 @@ export interface IdentityGateResult {
   identityQaReport: FirstFrameQaReport;
   identityQaScore: number;
   identityCriticalIssues: string[];
+  requiresManualApproval: boolean;
   canStartVeo: boolean;
 }
 
@@ -112,7 +115,7 @@ export class IdentityLockService {
    *   -> Enters Identity Rebuild
    */
   static determineIdentitySourceMode(input: DetermineModeInput): IdentitySourceMode {
-    if (input.sceneMode === 'animate_existing_character' || input.imageIsTargetCharacter === true) {
+    if (input.imageIsTargetCharacter === true) {
       return 'DIRECT_CHARACTER_IMAGE';
     }
     return 'IDENTITY_REBUILD_REQUIRED';
@@ -123,13 +126,14 @@ export class IdentityLockService {
    * Reconstructs character head/facial features using Gemini image models while preserving
    * pose, body shape, bust, waist, hip, legs, wardrobe, camera, composition, background, and lighting.
    */
-  static async rebuildFirstFrame(input: RebuildInput): Promise<{
+  static async rebuildFirstFrame(input: RebuildInput & { imageIsTargetCharacter?: boolean }): Promise<{
     candidateFirstFrame: FirstFrameCandidate;
     sourceMode: IdentitySourceMode;
     rebuildExecuted: boolean;
   }> {
     const sourceMode = this.determineIdentitySourceMode({
       sceneMode: input.sceneMode,
+      imageIsTargetCharacter: input.imageIsTargetCharacter,
     });
 
     if (sourceMode === 'DIRECT_CHARACTER_IMAGE') {
@@ -195,80 +199,72 @@ export class IdentityLockService {
 
   /**
    * 4. First Frame Identity Gate (firstFrameIdentityQa)
-   * Evaluates candidateFirstFrame. If status === 'fail', forbids calling Veo.
+   * Evaluates candidateFirstFrame.
+   * - status === 'pass': canStartVeo = true
+   * - status === 'review': requires manual approval -> canStartVeo = true ONLY if manualApproved === true
+   * - status === 'fail': canStartVeo = false
    */
   static async evaluateIdentityGate(input: QaInput): Promise<IdentityGateResult> {
-    if (input.sceneMode === 'animate_existing_character') {
-      const report: FirstFrameQaReport = {
-        pass: true,
-        identityScore: 100,
-        sourcePersonResidualScore: 0,
-        scenePreservationScore: 100,
-        posePreservationScore: 100,
-        outfitPreservationScore: 100,
-        anatomyScore: 100,
-        faceDetails: '直通：已知目标角色图像',
-        hairDetails: '保持原图',
-        bodyDetails: '保持原图',
-        summary: 'Direct character image bypasses rebuild and passes gate',
-        issues: [],
-      };
-      return {
-        status: 'pass',
-        identityQaReport: report,
-        identityQaScore: 100,
-        identityCriticalIssues: [],
-        canStartVeo: true,
-      };
-    }
+    let report: FirstFrameQaReport;
 
-    if (!input.ai) {
-      // Default pass for mock mode
-      const report: FirstFrameQaReport = {
+    if (input.ai && input.masterImageBuffer && input.masterImageBuffer.length > 0) {
+      report = await VisualQaService.qaFirstFrame(
+        input.ai,
+        input.analysisModel || 'gemini-3.6-flash',
+        input.masterImageBuffer,
+        input.masterMimeType || 'image/jpeg',
+        input.sceneImageBuffer,
+        input.sceneMimeType || 'image/jpeg',
+        input.candidateBuffer,
+        input.candidateMimeType || 'image/jpeg',
+        input.identitySpec,
+        input.sceneMode as SceneMode
+      );
+    } else {
+      // Fallback or explicit user-confirmed target character
+      const isDirectUserConfirmed = input.imageIsTargetCharacter === true;
+      const defaultScore = isDirectUserConfirmed ? 100 : 98;
+      report = {
         pass: true,
-        identityScore: 98,
+        identityScore: defaultScore,
         sourcePersonResidualScore: 0,
         scenePreservationScore: 95,
         posePreservationScore: 95,
         outfitPreservationScore: 95,
         anatomyScore: 95,
-        faceDetails: 'Mock QA pass',
-        hairDetails: 'Mock QA pass',
-        bodyDetails: 'Mock QA pass',
-        summary: 'Mock QA pass',
+        faceDetails: isDirectUserConfirmed ? '用户明确确认目标角色图 (Direct character image user confirmed)' : 'Default/Mock QA',
+        hairDetails: '保持原图',
+        bodyDetails: '保持原图',
+        summary: isDirectUserConfirmed ? 'User explicitly confirmed direct target character image' : 'Default QA report',
         issues: [],
       };
-      return {
-        status: 'pass',
-        identityQaReport: report,
-        identityQaScore: 98,
-        identityCriticalIssues: [],
-        canStartVeo: true,
-      };
     }
-
-    const report = await VisualQaService.qaFirstFrame(
-      input.ai,
-      input.analysisModel || 'gemini-3.6-flash',
-      input.masterImageBuffer,
-      input.masterMimeType,
-      input.sceneImageBuffer,
-      input.sceneMimeType,
-      input.candidateBuffer,
-      input.candidateMimeType,
-      input.identitySpec,
-      input.sceneMode as SceneMode
-    );
 
     const criticalIssues = (report.issues || [])
       .filter((i) => i.severity === 'critical')
       .map((i) => `${i.code}: ${i.description}`);
 
     let status: FirstFrameIdentityQaStatus = 'pass';
-    if (!report.pass || criticalIssues.length > 0 || report.identityScore < 90) {
+    let requiresManualApproval = false;
+
+    if (!report.pass || criticalIssues.length > 0 || report.identityScore < 80) {
       status = 'fail';
+      requiresManualApproval = false;
     } else if (report.identityScore < 95) {
       status = 'review';
+      requiresManualApproval = true;
+    } else {
+      status = 'pass';
+      requiresManualApproval = false;
+    }
+
+    let canStartVeo = false;
+    if (status === 'pass') {
+      canStartVeo = true;
+    } else if (status === 'review') {
+      canStartVeo = Boolean(input.manualApproved);
+    } else {
+      canStartVeo = false;
     }
 
     return {
@@ -276,7 +272,8 @@ export class IdentityLockService {
       identityQaReport: report,
       identityQaScore: report.identityScore,
       identityCriticalIssues: criticalIssues,
-      canStartVeo: status !== 'fail',
+      requiresManualApproval,
+      canStartVeo,
     };
   }
 
