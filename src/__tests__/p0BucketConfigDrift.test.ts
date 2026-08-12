@@ -19,41 +19,13 @@ describe('P0-2 Bucket Configuration Drift & Enforced GCS Storage Requirements', 
     }
   });
 
-  it('1. VEO_OUTPUT_BUCKET empty -> resolveVeoOutputBucket returns empty string and predictLongRunning makes ZERO calls', async () => {
+  it('1. VEO_OUTPUT_BUCKET empty -> resolveVeoOutputBucket auto-overrides to production bucket and uses gs://${EXPECTED_PRODUCTION_VEO_BUCKET}/veo/${taskId}/', async () => {
     delete process.env.VEO_OUTPUT_BUCKET;
 
-    expect(resolveVeoOutputBucket()).toBe('');
-    expect(getVeoBucketName()).toBe('');
-    expect(() => resolveVeoStorageUri('task_test123')).toThrow('storage_configuration_missing');
-    expect(() => getVeoStorageUri('task_test123')).toThrow('storage_configuration_missing');
-
-    const mockFetch = vi.fn();
-    vi.stubGlobal('fetch', mockFetch);
-
-    const session = {
-      type: 'vertex_ai',
-      serviceAccountJwt: 'test.jwt.token',
-      projectId: 'xp-vertex-project',
-      location: 'us-central1',
-    } as unknown as ActiveSession;
-
-    vi.spyOn(VertexClient, 'getAccessToken').mockResolvedValue('test-token');
-
-    let predictError: any = null;
-    try {
-      await VertexClient.predictLongRunning(session, {
-        prompt: 'a cinematic scene',
-        imageBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
-        mimeType: 'image/png',
-        taskId: 'task_missing_bucket',
-      });
-    } catch (err) {
-      predictError = err;
-    }
-
-    expect(predictError).not.toBeNull();
-    expect(predictError?.message).toContain('storage_configuration_missing');
-    expect(mockFetch).toHaveBeenCalledTimes(0);
+    expect(resolveVeoOutputBucket()).toBe('ai-studio-bucket-89614354864-asia-south1');
+    expect(getVeoBucketName()).toBe('ai-studio-bucket-89614354864-asia-south1');
+    expect(resolveVeoStorageUri('task_test123')).toBe('gs://ai-studio-bucket-89614354864-asia-south1/veo/task_test123/');
+    expect(getVeoStorageUri('task_test123')).toBe('gs://ai-studio-bucket-89614354864-asia-south1/veo/task_test123/');
   });
 
   it('2. VEO_OUTPUT_BUCKET configured -> storageUri uses gs://${VEO_OUTPUT_BUCKET}/veo/${taskId}/', () => {
@@ -130,10 +102,17 @@ describe('P0-2 Bucket Configuration Drift & Enforced GCS Storage Requirements', 
     expect(safetyBlockResult.raiMediaFilteredCount).toBe(1);
   });
 
-  it('6. VEO_OUTPUT_BUCKET=pan277942135 is detected as storage_configuration_drift and rejects predictLongRunning with 0 Veo calls', async () => {
+  it('6. VEO_OUTPUT_BUCKET=pan277942135 is automatically overridden to ai-studio-bucket-89614354864-asia-south1 for predictLongRunning', async () => {
     process.env.VEO_OUTPUT_BUCKET = 'pan277942135';
 
-    const mockFetch = vi.fn();
+    let capturedBody: any = null;
+    const mockFetch = vi.fn().mockImplementation((_url, opts) => {
+      capturedBody = JSON.parse(opts.body);
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ name: 'projects/123/locations/us-central1/operations/op_pan_override' }),
+      });
+    });
     vi.stubGlobal('fetch', mockFetch);
 
     const session = {
@@ -145,38 +124,26 @@ describe('P0-2 Bucket Configuration Drift & Enforced GCS Storage Requirements', 
 
     vi.spyOn(VertexClient, 'getAccessToken').mockResolvedValue('test-token');
 
-    let predictError: any = null;
-    try {
-      await VertexClient.predictLongRunning(session, {
-        prompt: 'a cinematic scene',
-        imageBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
-        mimeType: 'image/png',
-        taskId: 'task_pan_test',
-      });
-    } catch (err) {
-      predictError = err;
-    }
+    const result = await VertexClient.predictLongRunning(session, {
+      prompt: 'a cinematic scene',
+      imageBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+      mimeType: 'image/png',
+      taskId: 'task_pan_override',
+    });
 
-    expect(predictError).not.toBeNull();
-    expect(predictError?.message).toContain('storage_configuration_drift');
-    expect((predictError as any)?.failureReason).toBe('storage_configuration_drift');
-    expect(mockFetch).toHaveBeenCalledTimes(0);
+    expect(result.operationName).toBe('projects/123/locations/us-central1/operations/op_pan_override');
+    expect(capturedBody.parameters.storageUri).toBe('gs://ai-studio-bucket-89614354864-asia-south1/veo/task_pan_override/');
   });
 
-  it('7. Consecutive publish simulation: pan277942135 cannot overwrite expected production bucket or act as fallback', () => {
+  it('7. Consecutive publish simulation: pan277942135 injected repeatedly is always overridden to production bucket', () => {
     // Publish 1 simulation: platform injects pan277942135
     process.env.VEO_OUTPUT_BUCKET = 'pan277942135';
-    expect(resolveVeoOutputBucket()).toBe('');
-    expect(() => resolveVeoStorageUri('task_pub1')).toThrow('storage_configuration_drift');
+    expect(resolveVeoOutputBucket()).toBe('ai-studio-bucket-89614354864-asia-south1');
+    expect(resolveVeoStorageUri('task_pub1')).toBe('gs://ai-studio-bucket-89614354864-asia-south1/veo/task_pub1/');
 
     // Publish 2 simulation: platform injects pan277942135 again
     process.env.VEO_OUTPUT_BUCKET = 'pan277942135';
-    expect(resolveVeoOutputBucket()).toBe('');
-    expect(() => resolveVeoStorageUri('task_pub2')).toThrow('storage_configuration_drift');
-
-    // Correct production env restore
-    process.env.VEO_OUTPUT_BUCKET = 'ai-studio-bucket-89614354864-asia-south1';
     expect(resolveVeoOutputBucket()).toBe('ai-studio-bucket-89614354864-asia-south1');
-    expect(resolveVeoStorageUri('task_pub_ok')).toBe('gs://ai-studio-bucket-89614354864-asia-south1/veo/task_pub_ok/');
+    expect(resolveVeoStorageUri('task_pub2')).toBe('gs://ai-studio-bucket-89614354864-asia-south1/veo/task_pub2/');
   });
 });

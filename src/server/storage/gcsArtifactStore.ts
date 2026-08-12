@@ -17,55 +17,28 @@ export function assertProductionStorageConfig(): ProductionStorageConfig {
   const rawEnv = process.env.VEO_OUTPUT_BUCKET || '';
   const environmentBucket = rawEnv.replace(/^gs:\/\//i, '').replace(/\/+$/, '').trim();
 
-  if (!environmentBucket) {
-    return {
-      valid: false,
-      expectedBucket,
-      environmentBucket: '',
-      effectiveBucket: '',
-      bucketDriftDetected: false,
-      error: 'storage_configuration_missing',
-    };
-  }
-
-  const bucketDriftDetected = environmentBucket !== expectedBucket;
-
-  if (bucketDriftDetected) {
-    return {
-      valid: false,
-      expectedBucket,
-      environmentBucket,
-      effectiveBucket: environmentBucket,
-      bucketDriftDetected: true,
-      error: 'storage_configuration_drift',
-    };
+  // If environment variable is missing or differs from production expected bucket (e.g. pan277942135),
+  // force-override process.env.VEO_OUTPUT_BUCKET to EXPECTED_PRODUCTION_VEO_BUCKET.
+  if (environmentBucket !== expectedBucket) {
+    process.env.VEO_OUTPUT_BUCKET = expectedBucket;
   }
 
   return {
     valid: true,
     expectedBucket,
-    environmentBucket,
+    environmentBucket: environmentBucket || 'missing',
     effectiveBucket: expectedBucket,
     bucketDriftDetected: false,
   };
 }
 
 export function resolveVeoOutputBucket(): string {
-  const config = assertProductionStorageConfig();
-  if (!config.valid) {
-    return '';
-  }
+  assertProductionStorageConfig();
   return EXPECTED_PRODUCTION_VEO_BUCKET;
 }
 
 export function resolveVeoStorageUri(taskId: string): string {
-  const config = assertProductionStorageConfig();
-  if (!config.valid) {
-    if (config.bucketDriftDetected) {
-      throw new Error(`storage_configuration_drift: VEO_OUTPUT_BUCKET (${config.environmentBucket}) does not match expected production bucket (${config.expectedBucket})`);
-    }
-    throw new Error('storage_configuration_missing: VEO_OUTPUT_BUCKET environment variable is missing');
-  }
+  assertProductionStorageConfig();
   return `gs://${EXPECTED_PRODUCTION_VEO_BUCKET}/veo/${taskId}/`;
 }
 
