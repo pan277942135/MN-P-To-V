@@ -21,7 +21,7 @@ import { callWithRetry } from './src/utils/retryHelper';
 import type { IdentitySpec, ServerVideoTaskRecord, TaskStatus, AuditTaskStatus, TaskSubmissionState } from './src/types';
 import { firestoreTaskRepository } from './src/server/repositories/firestoreTaskRepository';
 import { getStorageAuthority } from './src/server/db/firestore';
-import { gcsArtifactStore, resolveVeoOutputBucket, resolveVeoStorageUri, getVeoBucketName, getVeoStorageUri } from './src/server/storage/gcsArtifactStore';
+import { gcsArtifactStore, resolveVeoOutputBucket, resolveVeoStorageUri, getVeoBucketName, getVeoStorageUri, assertProductionStorageConfig, EXPECTED_PRODUCTION_VEO_BUCKET } from './src/server/storage/gcsArtifactStore';
 
 async function startServer() {
   const app = express();
@@ -972,22 +972,32 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         return res.status(401).json({ error: '算力连接已失效，请重新连接' });
       }
 
-      if (!resolveVeoOutputBucket()) {
-        console.error('[Video Start] 拒绝启动 Veo 任务：缺失 VEO_OUTPUT_BUCKET 环境变量');
+      const storageConfig = assertProductionStorageConfig();
+      if (!storageConfig.valid) {
+        const isDrift = storageConfig.bucketDriftDetected;
+        const failureReason = isDrift ? 'storage_configuration_drift' : 'storage_configuration_missing';
+        const httpStatus = isDrift ? 503 : 400;
+        const customUserMessage = isDrift
+          ? `存储服务 Bucket 配置漂移：VEO_OUTPUT_BUCKET (${storageConfig.environmentBucket}) 与预期生产 Bucket (${storageConfig.expectedBucket}) 不一致。`
+          : '存储服务配置缺失：未在环境变量中配置 VEO_OUTPUT_BUCKET。';
+
+        console.error(`[Video Start] 拒绝启动 Veo 任务：Storage config invalid (${failureReason}), env: "${storageConfig.environmentBucket}", expected: "${storageConfig.expectedBucket}"`);
         const errObj = createStructuredError({
           source: 'internal_api',
           failureStage: 'submit',
-          httpStatus: 400,
-          customUserMessage: '存储服务配置缺失：未在环境变量中配置 VEO_OUTPUT_BUCKET。',
+          httpStatus,
+          customUserMessage,
           endpointPathRedacted: '/api/videos/start',
         });
-        return res.status(400).json({
+        return res.status(httpStatus).json({
           accepted: false,
           serverPersisted: false,
           status: 'failed',
           submissionState: 'not_submitted',
-          failureReason: 'storage_configuration_missing',
-          error: 'Storage configuration missing: VEO_OUTPUT_BUCKET environment variable is required.',
+          failureReason,
+          error: isDrift
+            ? `Storage configuration drift: VEO_OUTPUT_BUCKET (${storageConfig.environmentBucket}) does not match expected production bucket (${storageConfig.expectedBucket}).`
+            : 'Storage configuration missing: VEO_OUTPUT_BUCKET environment variable is required.',
           predictLongRunningCalls: 0,
           structuredError: errObj,
         });
@@ -1903,8 +1913,16 @@ ${cleanPrompt}`
       };
     });
 
-    const veoBucket = resolveVeoOutputBucket();
-    const gcsEnabled = Boolean(veoBucket);
+    const storageConfig = assertProductionStorageConfig();
+    const expectedVeoOutputBucket = storageConfig.expectedBucket;
+    const environmentVeoOutputBucket = storageConfig.environmentBucket;
+    const effectiveVeoOutputBucket = storageConfig.effectiveBucket;
+    const bucketDriftDetected = storageConfig.bucketDriftDetected;
+    const storageConfigValid = storageConfig.valid;
+    const resolvedStorageUriPrefix = storageConfigValid ? `gs://${effectiveVeoOutputBucket}/veo/` : null;
+    const storageConfigSource = bucketDriftDetected
+      ? 'drift_rejected'
+      : (process.env.VEO_OUTPUT_BUCKET ? 'env' : 'missing');
 
     return res.json({
       K_SERVICE: kService,
@@ -1914,12 +1932,16 @@ ${cleanPrompt}`
       evidenceSource: globalEvidenceSource,
       storageAuthority,
       artifactAuthority: 'cloud_storage',
-      VEO_OUTPUT_BUCKET: veoBucket || null,
-      veoOutputBucket: veoBucket || null,
-      gcsEnabled,
-      storageConfigValid: gcsEnabled,
-      resolvedStorageUriPrefix: veoBucket ? `gs://${veoBucket}/veo/` : null,
-      storageConfigSource: process.env.VEO_OUTPUT_BUCKET ? 'env' : 'missing',
+      expectedVeoOutputBucket,
+      environmentVeoOutputBucket,
+      effectiveVeoOutputBucket,
+      bucketDriftDetected,
+      storageConfigValid,
+      resolvedStorageUriPrefix,
+      storageConfigSource,
+      VEO_OUTPUT_BUCKET: effectiveVeoOutputBucket || null,
+      veoOutputBucket: effectiveVeoOutputBucket || null,
+      gcsEnabled: storageConfigValid,
       memoryCacheEnabled: true,
       disclaimer,
       taskCount: tasks.length,

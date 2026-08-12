@@ -1,17 +1,72 @@
 import { Storage } from '@google-cloud/storage';
 import { VideoGenerator } from '../../services/video/videoGenerator';
 
+export const EXPECTED_PRODUCTION_VEO_BUCKET = 'ai-studio-bucket-89614354864-asia-south1';
+
+export interface ProductionStorageConfig {
+  valid: boolean;
+  expectedBucket: string;
+  environmentBucket: string;
+  effectiveBucket: string;
+  bucketDriftDetected: boolean;
+  error?: string;
+}
+
+export function assertProductionStorageConfig(): ProductionStorageConfig {
+  const expectedBucket = EXPECTED_PRODUCTION_VEO_BUCKET;
+  const rawEnv = process.env.VEO_OUTPUT_BUCKET || '';
+  const environmentBucket = rawEnv.replace(/^gs:\/\//i, '').replace(/\/+$/, '').trim();
+
+  if (!environmentBucket) {
+    return {
+      valid: false,
+      expectedBucket,
+      environmentBucket: '',
+      effectiveBucket: '',
+      bucketDriftDetected: false,
+      error: 'storage_configuration_missing',
+    };
+  }
+
+  const bucketDriftDetected = environmentBucket !== expectedBucket;
+
+  if (bucketDriftDetected) {
+    return {
+      valid: false,
+      expectedBucket,
+      environmentBucket,
+      effectiveBucket: environmentBucket,
+      bucketDriftDetected: true,
+      error: 'storage_configuration_drift',
+    };
+  }
+
+  return {
+    valid: true,
+    expectedBucket,
+    environmentBucket,
+    effectiveBucket: expectedBucket,
+    bucketDriftDetected: false,
+  };
+}
+
 export function resolveVeoOutputBucket(): string {
-  const rawBucket = (process.env.VEO_OUTPUT_BUCKET || '').replace(/^gs:\/\//i, '').replace(/\/+$/, '').trim();
-  return rawBucket;
+  const config = assertProductionStorageConfig();
+  if (!config.valid) {
+    return '';
+  }
+  return EXPECTED_PRODUCTION_VEO_BUCKET;
 }
 
 export function resolveVeoStorageUri(taskId: string): string {
-  const bucket = resolveVeoOutputBucket();
-  if (!bucket) {
+  const config = assertProductionStorageConfig();
+  if (!config.valid) {
+    if (config.bucketDriftDetected) {
+      throw new Error(`storage_configuration_drift: VEO_OUTPUT_BUCKET (${config.environmentBucket}) does not match expected production bucket (${config.expectedBucket})`);
+    }
     throw new Error('storage_configuration_missing: VEO_OUTPUT_BUCKET environment variable is missing');
   }
-  return `gs://${bucket}/veo/${taskId}/`;
+  return `gs://${EXPECTED_PRODUCTION_VEO_BUCKET}/veo/${taskId}/`;
 }
 
 export const getVeoBucketName = resolveVeoOutputBucket;

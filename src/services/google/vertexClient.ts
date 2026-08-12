@@ -1,6 +1,6 @@
 import { type ActiveSession } from './credentialService';
 import { redactSecrets } from '../../utils/redactSecrets';
-import { resolveVeoStorageUri, resolveVeoOutputBucket } from '../../server/storage/gcsArtifactStore';
+import { resolveVeoStorageUri, resolveVeoOutputBucket, assertProductionStorageConfig } from '../../server/storage/gcsArtifactStore';
 
 export interface RoutingTestResult {
   httpStatus: number;
@@ -97,12 +97,17 @@ export class VertexClient {
 
     const endpoint = `https://${region}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${region}/publishers/google/models/${modelId}:predictLongRunning`;
 
-    const bucket = resolveVeoOutputBucket();
-    if (!bucket) {
-      const err = new Error('storage_configuration_missing: VEO_OUTPUT_BUCKET environment variable is missing');
+    const storageConfig = assertProductionStorageConfig();
+    if (!storageConfig.valid) {
+      const isDrift = storageConfig.bucketDriftDetected;
+      const failureReason = isDrift ? 'storage_configuration_drift' : 'storage_configuration_missing';
+      const errMsg = isDrift
+        ? `storage_configuration_drift: VEO_OUTPUT_BUCKET (${storageConfig.environmentBucket}) does not match expected production bucket (${storageConfig.expectedBucket})`
+        : 'storage_configuration_missing: VEO_OUTPUT_BUCKET environment variable is missing';
+      const err = new Error(errMsg);
       (err as any).source = 'internal_api';
       (err as any).failureStage = 'submit';
-      (err as any).failureReason = 'storage_configuration_missing';
+      (err as any).failureReason = failureReason;
       throw err;
     }
 

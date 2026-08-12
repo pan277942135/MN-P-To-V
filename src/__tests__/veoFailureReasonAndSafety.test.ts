@@ -297,6 +297,7 @@ describe('P0-S1 Veo Failure Reason Classification & Input Normalization', () => 
   });
 
   it('8. Image-to-video Vertex payload specifies personGeneration = allow_adult', async () => {
+    process.env.VEO_OUTPUT_BUCKET = 'ai-studio-bucket-89614354864-asia-south1';
     const mockSession = {
       type: 'vertex_ai',
       projectId: 'test-project',

@@ -129,4 +129,54 @@ describe('P0-2 Bucket Configuration Drift & Enforced GCS Storage Requirements', 
     expect(safetyBlockResult.isBlocked).toBe(true);
     expect(safetyBlockResult.raiMediaFilteredCount).toBe(1);
   });
+
+  it('6. VEO_OUTPUT_BUCKET=pan277942135 is detected as storage_configuration_drift and rejects predictLongRunning with 0 Veo calls', async () => {
+    process.env.VEO_OUTPUT_BUCKET = 'pan277942135';
+
+    const mockFetch = vi.fn();
+    vi.stubGlobal('fetch', mockFetch);
+
+    const session = {
+      type: 'vertex_ai',
+      serviceAccountJwt: 'test.jwt.token',
+      projectId: 'xp-vertex-project',
+      location: 'us-central1',
+    } as unknown as ActiveSession;
+
+    vi.spyOn(VertexClient, 'getAccessToken').mockResolvedValue('test-token');
+
+    let predictError: any = null;
+    try {
+      await VertexClient.predictLongRunning(session, {
+        prompt: 'a cinematic scene',
+        imageBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        mimeType: 'image/png',
+        taskId: 'task_pan_test',
+      });
+    } catch (err) {
+      predictError = err;
+    }
+
+    expect(predictError).not.toBeNull();
+    expect(predictError?.message).toContain('storage_configuration_drift');
+    expect((predictError as any)?.failureReason).toBe('storage_configuration_drift');
+    expect(mockFetch).toHaveBeenCalledTimes(0);
+  });
+
+  it('7. Consecutive publish simulation: pan277942135 cannot overwrite expected production bucket or act as fallback', () => {
+    // Publish 1 simulation: platform injects pan277942135
+    process.env.VEO_OUTPUT_BUCKET = 'pan277942135';
+    expect(resolveVeoOutputBucket()).toBe('');
+    expect(() => resolveVeoStorageUri('task_pub1')).toThrow('storage_configuration_drift');
+
+    // Publish 2 simulation: platform injects pan277942135 again
+    process.env.VEO_OUTPUT_BUCKET = 'pan277942135';
+    expect(resolveVeoOutputBucket()).toBe('');
+    expect(() => resolveVeoStorageUri('task_pub2')).toThrow('storage_configuration_drift');
+
+    // Correct production env restore
+    process.env.VEO_OUTPUT_BUCKET = 'ai-studio-bucket-89614354864-asia-south1';
+    expect(resolveVeoOutputBucket()).toBe('ai-studio-bucket-89614354864-asia-south1');
+    expect(resolveVeoStorageUri('task_pub_ok')).toBe('gs://ai-studio-bucket-89614354864-asia-south1/veo/task_pub_ok/');
+  });
 });
