@@ -230,6 +230,26 @@ export interface GenerationConfig {
   modelId: string;
 }
 
+export type IdentitySourceMode = 'DIRECT_CHARACTER_IMAGE' | 'IDENTITY_REBUILD_REQUIRED';
+export type FirstFrameIdentityQaStatus = 'pass' | 'fail' | 'review';
+
+export interface MasterImageSpec {
+  id: string;
+  type: 'front_hd' | 'three_quarter' | 'full_body' | 'other';
+  objectPath?: string;
+  url?: string;
+  mimeType?: string;
+}
+
+export interface CharacterIdentityProfile {
+  characterId: string;
+  characterName: string;
+  masterImages: MasterImageSpec[];
+  identitySpec?: IdentitySpec;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
 export interface ServerVideoTaskRecord {
   id: string;
   taskId: string;
@@ -288,6 +308,21 @@ export interface ServerVideoTaskRecord {
   diagnostics?: any;
   qaReport?: any;
   structuredError?: any;
+
+  // M2-1 Identity Lock fields
+  identitySourceMode?: IdentitySourceMode;
+  firstFrameIdentityQaStatus?: FirstFrameIdentityQaStatus;
+  identityQaScore?: number;
+  identityCriticalIssues?: string[];
+  identityDriftRisk?: 'low' | 'medium' | 'high';
+  identityDriftWarning?: string;
+
+  // M2-2 Reserved Video QA fields
+  identityQaStatus?: 'not_run' | 'pass' | 'fail';
+  identityQaReport?: any;
+  identityFrameScores?: number[];
+  identityDriftDetected?: boolean;
+  worstFrameTimestamp?: number | null;
 
   upstreamEndpoint?: string | null;
   upstreamHttpStatus?: number | null;
@@ -450,6 +485,16 @@ export interface GenerationTask {
   region?: string;
   sceneImageUrl?: string;
   qaReport?: VideoQaReport;
+  identitySourceMode?: IdentitySourceMode;
+  firstFrameIdentityQaStatus?: FirstFrameIdentityQaStatus;
+  identityQaScore?: number;
+  identityCriticalIssues?: string[];
+  identityDriftRisk?: 'low' | 'medium' | 'high';
+  identityDriftWarning?: string;
+  identityQaStatus?: 'not_run' | 'pass' | 'fail';
+  identityFrameScores?: number[];
+  identityDriftDetected?: boolean;
+  worstFrameTimestamp?: number | null;
   retryCount: number;
   attempts: AttemptRecord[];
   error?: UnifiedError;

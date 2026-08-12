@@ -49,10 +49,99 @@ export class PromptCompiler {
   public static readonly VERSION = 'v1.2.0-compiler';
 
   public static readonly HIGH_RISK_KEYWORDS = [
-    '转身', '走动', '大幅抬手', '遮脸', '快速回头', '镜头环绕', '复杂口型', '多段不连续动作',
-    'turn around', 'walk away', 'large hand gesture', 'cover face', 'quick glance back',
-    'camera orbit', 'complex lip sync', 'spin', 'rotate', 'walk', 'run'
+    '转身', '走动', '回头', '走向镜头', '遮脸', '快速移动', '大幅抬手', '快速回头', '镜头环绕', '复杂口型', '多段不连续动作',
+    'turn around', 'walk away', 'walk toward camera', 'walk toward', 'large hand gesture', 'cover face', 'quick glance back',
+    'camera orbit', 'complex lip sync', 'spin', 'rotate', 'walk', 'run', 'large head turn', 'large pose change', 'face occlusion', 'fast movement'
   ];
+
+  /**
+   * Classify identity drift risk according to motion intensity and risk keywords.
+   * LOW: breathing, blink, micro-expression, small weight shift
+   * MEDIUM: small hand movement, small body turn
+   * HIGH: large head turn, profile -> frontal, walking toward camera, large pose change, face occlusion, fast movement
+   */
+  public static classifyIdentityDriftRisk(userPrompt: string = ''): {
+    identityDriftRisk: 'low' | 'medium' | 'high';
+    warning?: string;
+    detectedKeywords: string[];
+  } {
+    const safePrompt = (userPrompt || '').toLowerCase();
+    const detected: string[] = [];
+
+    for (const kw of this.HIGH_RISK_KEYWORDS) {
+      if (safePrompt.includes(kw.toLowerCase())) {
+        detected.push(kw);
+      }
+    }
+
+    if (detected.length > 0) {
+      return {
+        identityDriftRisk: 'high',
+        warning: `检测到高风险动作 [${detected.join(', ')}]，在 Veo 生成中存在角色身份漂移风险。`,
+        detectedKeywords: detected,
+      };
+    }
+
+    // Medium risk check
+    const mediumKeywords = ['hand movement', 'body turn', '小手势', '微转头', '手部动作'];
+    for (const mkw of mediumKeywords) {
+      if (safePrompt.includes(mkw.toLowerCase())) {
+        return {
+          identityDriftRisk: 'medium',
+          warning: `检测到中风险动作 [${mkw}]。`,
+          detectedKeywords: [mkw],
+        };
+      }
+    }
+
+    return {
+      identityDriftRisk: 'low',
+      detectedKeywords: [],
+    };
+  }
+
+  /**
+   * Motion-first prompt strategy for Image-To-Video (I2V) in M2-1.
+   * Relies on the uploaded first frame for WHO / WHAT / WHERE.
+   * Focuses the prompt strictly on MOTION and forbids re-describing physical details
+   * (e.g. Asian female, young woman, hair color, face shape, body/wardrobe description)
+   * unless strictly necessary for motion semantics.
+   */
+  public static compileI2VMotionPrompt(input: {
+    userMotionPrompt: string;
+    durationSeconds?: number;
+    cameraPreset?: string;
+  }): string {
+    const duration = input.durationSeconds || 4;
+    const motionRaw = this.cleanUserMotionPrompt(input.userMotionPrompt) || 'Natural subtle breathing motion and gentle posture shift.';
+    
+    // Strip redundant physical re-descriptions if present in motion string
+    const motion = motionRaw
+      .replace(/\b(Asian female|young woman|black hair|brown eyes|oval face|slender body|white shirt)\b/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    let cameraDesc = 'Fixed camera.';
+    if (input.cameraPreset === 'slow_push') cameraDesc = 'Slow camera push-in.';
+    else if (input.cameraPreset === 'slow_pull') cameraDesc = 'Slow camera pull-back.';
+    else if (input.cameraPreset === 'subtle_pan') cameraDesc = 'Gentle horizontal camera pan.';
+
+    return [
+      `Use the uploaded image as the exact first frame.`,
+      ``,
+      `For ${duration} seconds:`,
+      motion || 'Natural subtle breathing motion and gentle posture shift.',
+      ``,
+      `Preserve the subject's existing facial appearance,`,
+      `head orientation,`,
+      `hair silhouette,`,
+      `body proportions,`,
+      `wardrobe,`,
+      `composition and environment.`,
+      ``,
+      cameraDesc,
+    ].join('\n');
+  }
 
   /**
    * Extract stable identity traits from character spec/description while omitting

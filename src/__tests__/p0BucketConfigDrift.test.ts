@@ -102,7 +102,7 @@ describe('P0-2 Bucket Configuration Drift & Enforced GCS Storage Requirements', 
     expect(safetyBlockResult.raiMediaFilteredCount).toBe(1);
   });
 
-  it('6. VEO_OUTPUT_BUCKET=pan277942135 is automatically overridden to ai-studio-bucket-89614354864-asia-south1 for predictLongRunning', async () => {
+  it('6. VEO_OUTPUT_BUCKET=pan277942135 is respected and passed as storageUri for predictLongRunning', async () => {
     process.env.VEO_OUTPUT_BUCKET = 'pan277942135';
 
     let capturedBody: any = null;
@@ -132,18 +132,18 @@ describe('P0-2 Bucket Configuration Drift & Enforced GCS Storage Requirements', 
     });
 
     expect(result.operationName).toBe('projects/123/locations/us-central1/operations/op_pan_override');
-    expect(capturedBody.parameters.storageUri).toBe('gs://ai-studio-bucket-89614354864-asia-south1/veo/task_pan_override/');
+    expect(capturedBody.parameters.storageUri).toBe('gs://pan277942135/veo/task_pan_override/');
   });
 
-  it('7. Consecutive publish simulation: pan277942135 injected repeatedly is always overridden to production bucket', () => {
+  it('7. Consecutive publish simulation: pan277942135 injected repeatedly resolves consistently', () => {
     // Publish 1 simulation: platform injects pan277942135
     process.env.VEO_OUTPUT_BUCKET = 'pan277942135';
-    expect(resolveVeoOutputBucket()).toBe('ai-studio-bucket-89614354864-asia-south1');
-    expect(resolveVeoStorageUri('task_pub1')).toBe('gs://ai-studio-bucket-89614354864-asia-south1/veo/task_pub1/');
+    expect(resolveVeoOutputBucket()).toBe('pan277942135');
+    expect(resolveVeoStorageUri('task_pub1')).toBe('gs://pan277942135/veo/task_pub1/');
 
     // Publish 2 simulation: platform injects pan277942135 again
     process.env.VEO_OUTPUT_BUCKET = 'pan277942135';
-    expect(resolveVeoOutputBucket()).toBe('ai-studio-bucket-89614354864-asia-south1');
-    expect(resolveVeoStorageUri('task_pub2')).toBe('gs://ai-studio-bucket-89614354864-asia-south1/veo/task_pub2/');
+    expect(resolveVeoOutputBucket()).toBe('pan277942135');
+    expect(resolveVeoStorageUri('task_pub2')).toBe('gs://pan277942135/veo/task_pub2/');
   });
 });

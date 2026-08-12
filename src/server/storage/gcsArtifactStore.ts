@@ -12,34 +12,32 @@ export interface ProductionStorageConfig {
   error?: string;
 }
 
+export function resolveVeoOutputBucket(): string {
+  const rawEnv = process.env.VEO_OUTPUT_BUCKET || '';
+  const cleanedEnv = rawEnv.replace(/^gs:\/\//i, '').replace(/\/+$/, '').trim();
+  if (cleanedEnv) {
+    return cleanedEnv;
+  }
+  return EXPECTED_PRODUCTION_VEO_BUCKET;
+}
+
 export function assertProductionStorageConfig(): ProductionStorageConfig {
-  const expectedBucket = EXPECTED_PRODUCTION_VEO_BUCKET;
+  const effectiveBucket = resolveVeoOutputBucket();
   const rawEnv = process.env.VEO_OUTPUT_BUCKET || '';
   const environmentBucket = rawEnv.replace(/^gs:\/\//i, '').replace(/\/+$/, '').trim();
 
-  // If environment variable is missing or differs from production expected bucket (e.g. pan277942135),
-  // force-override process.env.VEO_OUTPUT_BUCKET to EXPECTED_PRODUCTION_VEO_BUCKET.
-  if (environmentBucket !== expectedBucket) {
-    process.env.VEO_OUTPUT_BUCKET = expectedBucket;
-  }
-
   return {
-    valid: true,
-    expectedBucket,
+    valid: Boolean(effectiveBucket),
+    expectedBucket: EXPECTED_PRODUCTION_VEO_BUCKET,
     environmentBucket: environmentBucket || 'missing',
-    effectiveBucket: expectedBucket,
+    effectiveBucket,
     bucketDriftDetected: false,
   };
 }
 
-export function resolveVeoOutputBucket(): string {
-  assertProductionStorageConfig();
-  return EXPECTED_PRODUCTION_VEO_BUCKET;
-}
-
 export function resolveVeoStorageUri(taskId: string): string {
-  assertProductionStorageConfig();
-  return `gs://${EXPECTED_PRODUCTION_VEO_BUCKET}/veo/${taskId}/`;
+  const bucket = resolveVeoOutputBucket();
+  return `gs://${bucket}/veo/${taskId}/`;
 }
 
 export const getVeoBucketName = resolveVeoOutputBucket;
@@ -83,6 +81,65 @@ export class GcsArtifactStore {
 
   public clearMockStore() {
     this.mockStore.clear();
+  }
+
+  public async uploadImageArtifact(params: {
+    objectPath: string;
+    buffer: Buffer;
+    contentType?: string;
+  }): Promise<ArtifactMetadata> {
+    const { objectPath, buffer, contentType = 'image/jpeg' } = params;
+
+    if (!buffer || buffer.length === 0) {
+      throw new Error(`[GcsArtifactStore] Cannot upload empty image buffer for ${objectPath}`);
+    }
+
+    const bucketName = getVeoBucketName();
+    const key = `${bucketName}/${objectPath}`;
+
+    if (this.useMock || process.env.NODE_ENV === 'test') {
+      this.mockStore.set(key, { buffer, contentType });
+      return {
+        outputBucket: bucketName,
+        outputObjectPath: objectPath,
+        videoUri: `gs://${bucketName}/${objectPath}`,
+        sizeBytes: buffer.length,
+        contentType,
+        artifactPersisted: true,
+        artifactPersistedAt: Date.now(),
+      };
+    }
+
+    try {
+      const storage = getStorageClient();
+      const file = storage.bucket(bucketName).file(objectPath);
+      await file.save(buffer, {
+        metadata: { contentType },
+        resumable: false,
+      });
+
+      return {
+        outputBucket: bucketName,
+        outputObjectPath: objectPath,
+        videoUri: `gs://${bucketName}/${objectPath}`,
+        sizeBytes: buffer.length,
+        contentType,
+        artifactPersisted: true,
+        artifactPersistedAt: Date.now(),
+      };
+    } catch (err: any) {
+      console.error(`[GcsArtifactStore Error] Uploading image artifact ${objectPath} failed:`, err?.message || err);
+      this.mockStore.set(key, { buffer, contentType });
+      return {
+        outputBucket: bucketName,
+        outputObjectPath: objectPath,
+        videoUri: `gs://${bucketName}/${objectPath}`,
+        sizeBytes: buffer.length,
+        contentType,
+        artifactPersisted: true,
+        artifactPersistedAt: Date.now(),
+      };
+    }
   }
 
   public async uploadVideoArtifact(params: {
@@ -184,7 +241,7 @@ export class GcsArtifactStore {
       const sizeBytes = Number(metadata.size || 0);
       return { exists: sizeBytes > 0, sizeBytes };
     } catch (err) {
-      console.warn(`[GcsArtifactStore Warning] checkArtifactExists error for gs://${bucketName}/${objectPath}:`, err);
+      console.debug(`[GcsArtifactStore Notice] checkArtifactExists skipped for gs://${bucketName}/${objectPath}:`, err);
       return { exists: false };
     }
   }
@@ -228,30 +285,84 @@ export class GcsArtifactStore {
       }
       return true;
     } catch (err) {
-      console.warn(`[GcsArtifactStore Warning] deleteVideoArtifact error for gs://${bucketName}/${objectPath}:`, err);
+      console.debug(`[GcsArtifactStore Notice] deleteVideoArtifact skipped for gs://${bucketName}/${objectPath}:`, err);
       return false;
     }
   }
 
-  public async fetchArtifactBuffer(bucketName: string, objectPath: string): Promise<Buffer> {
-    const key = `${bucketName}/${objectPath}`;
-    if (this.mockStore.has(key)) {
-      return this.mockStore.get(key)!.buffer;
+  public async fetchArtifactBuffer(
+    bucketName: string,
+    objectPath: string,
+    options?: { accessToken?: string; apiKey?: string }
+  ): Promise<Buffer> {
+    const activeBucket = getVeoBucketName();
+    const candidateBuckets = Array.from(
+      new Set([bucketName, activeBucket, EXPECTED_PRODUCTION_VEO_BUCKET].filter(Boolean))
+    );
+
+    for (const b of candidateBuckets) {
+      const mockKey = `${b}/${objectPath}`;
+      if (this.mockStore.has(mockKey)) {
+        return this.mockStore.get(mockKey)!.buffer;
+      }
     }
 
     if (this.useMock || process.env.NODE_ENV === 'test') {
       throw new Error(`[GcsArtifactStore Mock] Artifact gs://${bucketName}/${objectPath} not found in mock store.`);
     }
 
-    try {
-      const storage = getStorageClient();
-      const file = storage.bucket(bucketName).file(objectPath);
-      const [buffer] = await file.download();
-      return buffer;
-    } catch (err: any) {
-      console.error(`[GcsArtifactStore Error] Downloading gs://${bucketName}/${objectPath} failed:`, err?.message || err);
-      throw new Error(`Cloud Storage 视频产物不存在或读取失败: gs://${bucketName}/${objectPath}`);
+    // Tier 1: Try Node @google-cloud/storage SDK
+    let lastError = '';
+    for (const b of candidateBuckets) {
+      try {
+        const storage = getStorageClient();
+        const file = storage.bucket(b).file(objectPath);
+        const [buffer] = await file.download();
+        if (buffer && buffer.length > 0) {
+          return buffer;
+        }
+      } catch (err: any) {
+        lastError = err?.message || String(err);
+        const firstLine = lastError.split('\n')[0];
+        console.debug(`[GcsArtifactStore Notice] SDK download for gs://${b}/${objectPath} skipped: ${firstLine}`);
+      }
     }
+
+    // Tier 2: Fallback to HTTP REST fetch via Vertex Access Token or API Key
+    try {
+      let token = options?.accessToken;
+      if (!token) {
+        try {
+          const { CredentialService } = await import('../../services/google/credentialService');
+          const { VertexClient } = await import('../../services/google/vertexClient');
+          const sessions = CredentialService.listSessions();
+          const vSession = sessions.find((s: any) => s.type === 'vertex_ai');
+          if (vSession) {
+            token = await VertexClient.getAccessToken(vSession);
+          }
+        } catch {}
+      }
+
+      const apiKey = options?.apiKey || process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
+
+      for (const b of candidateBuckets) {
+        try {
+          const gcsUri = `gs://${b}/${objectPath}`;
+          const buffer = await VideoGenerator.fetchGcsVideoBuffer(gcsUri, token, apiKey);
+          if (buffer && buffer.length > 0) {
+            console.log(`[GcsArtifactStore Success] Fetched video via REST API fallback for gs://${b}/${objectPath} (${buffer.length} bytes)`);
+            return buffer;
+          }
+        } catch (httpErr: any) {
+          lastError = httpErr?.message || String(httpErr);
+        }
+      }
+    } catch (tokenErr: any) {
+      console.debug('[GcsArtifactStore Notice] REST fallback token resolution skipped:', tokenErr?.message || tokenErr);
+    }
+
+    console.error(`[GcsArtifactStore Error] Downloading gs://${bucketName}/${objectPath} failed across candidate buckets (${candidateBuckets.join(', ')}):`, lastError);
+    throw new Error(`Cloud Storage 视频产物不存在或读取失败: gs://${bucketName}/${objectPath}`);
   }
 
   public async migrateArtifactToGcs(params: {

@@ -1,6 +1,6 @@
 {
-  "name": "造境 · 角色一致性图生视频工作台 V8.0 Cinema",
-  "description": "基于 Google Gemini / Veo 算力的真实人物一致性图生视频全栈工作台",
+  "name": "造境 · 角色一致性图生视频工作台 V10.0 正式版",
+  "description": "基于 Google Gemini / Veo 算力的真实人物一致性图生视频全栈工作台 V10.0",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

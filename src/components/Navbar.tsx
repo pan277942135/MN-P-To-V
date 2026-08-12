@@ -27,7 +27,7 @@ export const Navbar: React.FC = () => {
           <span className="text-[#334155] text-base font-light hidden sm:inline">|</span>
           <span className="text-sm text-[#94A3B8] font-medium hidden sm:inline truncate">角色一致性图生视频工作台</span>
           <span className="text-[11px] px-2 py-0.5 rounded-full bg-purple-950/80 text-purple-300 border border-purple-500/50 font-mono font-bold shadow-[0_0_10px_rgba(168,85,247,0.3)] shrink-0">
-            V9.0 Cinema
+            V10.0 正式版
           </span>
         </div>
       </div>

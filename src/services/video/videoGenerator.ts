@@ -6,6 +6,7 @@ import { redactSecrets } from '../../utils/redactSecrets';
 import { callWithRetry } from '../../utils/retryHelper';
 import { PromptCompiler } from '../prompt/PromptCompiler';
 import type { IdentitySpec, VideoGenerationDiagnostics, ImageDiagnosticInfo, FailureReason, RetryMode } from '../../types';
+import { resolveVeoOutputBucket, EXPECTED_PRODUCTION_VEO_BUCKET } from '../../server/storage/gcsArtifactStore';
 
 export interface VideoStartResult {
   engine: 'omni_flash' | 'veo_31';
@@ -639,15 +640,23 @@ Ensure steady focused gaze, natural facial motion, consistent lighting, and clea
       throw new Error(`无效的 GCS URI 路径: ${videoUri}`);
     }
 
-    const bucket = pathWithoutGs.substring(0, firstSlash);
+    const uriBucket = pathWithoutGs.substring(0, firstSlash);
     const rawObjectPath = pathWithoutGs.substring(firstSlash + 1);
     const encodedObjectPath = encodeURIComponent(rawObjectPath);
 
-    const candidateUrls = [
-      `https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encodedObjectPath}?alt=media`,
-      `https://storage.googleapis.com/download/storage/v1/b/${bucket}/o/${encodedObjectPath}?alt=media`,
-      `https://storage.googleapis.com/${bucket}/${rawObjectPath}`,
-    ];
+    const activeBucket = resolveVeoOutputBucket();
+    const candidateBuckets = Array.from(
+      new Set([uriBucket, activeBucket, EXPECTED_PRODUCTION_VEO_BUCKET].filter(Boolean))
+    );
+
+    const candidateUrls: string[] = [];
+    for (const b of candidateBuckets) {
+      candidateUrls.push(
+        `https://storage.googleapis.com/storage/v1/b/${b}/o/${encodedObjectPath}?alt=media`,
+        `https://storage.googleapis.com/download/storage/v1/b/${b}/o/${encodedObjectPath}?alt=media`,
+        `https://storage.googleapis.com/${b}/${rawObjectPath}`
+      );
+    }
 
     let lastError = '';
     for (let attempt = 0; attempt < backoffDelays.length; attempt++) {

@@ -2713,12 +2713,29 @@ ${cleanPrompt}`
         const candidateVideoUri = queryVideoUri || rec?.videoUri || rec?.outputUri;
         const candidateOpName = queryOpName || rec?.operationName || (rec as any)?.externalOperationName;
 
+        const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
+        let accessToken: string | undefined;
+        const connId = (req.headers['x-connection-id'] as string) || (req.query.connectionId as string) || rec?.connectionId;
+        if (connId) {
+          const session = CredentialService.getSession(connId);
+          if (session && session.type === 'vertex_ai') {
+            accessToken = await VertexClient.getAccessToken(session).catch(() => undefined);
+          }
+        }
+        if (!accessToken) {
+          const sessions = CredentialService.listSessions();
+          const vSession = sessions.find((s: any) => s.type === 'vertex_ai');
+          if (vSession) {
+            accessToken = await VertexClient.getAccessToken(vSession).catch(() => undefined);
+          }
+        }
+
         let videoBuffer: Buffer | null = null;
 
         // A. Primary: Fetch from GCS bucket if outputObjectPath is stored
         if (rec?.outputBucket && rec?.outputObjectPath) {
           try {
-            videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(rec.outputBucket, rec.outputObjectPath);
+            videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(rec.outputBucket, rec.outputObjectPath, { accessToken, apiKey });
             console.log(`[Video Stream] Successfully fetched artifact from Cloud Storage gs://${rec.outputBucket}/${rec.outputObjectPath} (${videoBuffer.length} bytes)`);
           } catch (gcsErr) {
             console.warn(`[Video Stream] GCS fetch failed for task ${taskId}:`, gcsErr);
@@ -2729,15 +2746,6 @@ ${cleanPrompt}`
         if ((!videoBuffer || videoBuffer.length < 1000) && candidateVideoUri) {
           try {
             console.log(`[Video Stream] Attempting GCS migration from candidateVideoUri (${candidateVideoUri}) for ${taskId}...`);
-            const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
-            let accessToken: string | undefined;
-            const connId = (req.headers['x-connection-id'] as string) || (req.query.connectionId as string) || rec?.connectionId;
-            if (connId) {
-              const session = CredentialService.getSession(connId);
-              if (session && session.type === 'vertex_ai') {
-                accessToken = await VertexClient.getAccessToken(session);
-              }
-            }
 
             const artifactMeta = await gcsArtifactStore.migrateArtifactToGcs({
               taskId,
@@ -2746,7 +2754,7 @@ ${cleanPrompt}`
               apiKey,
             });
 
-            videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(artifactMeta.outputBucket, artifactMeta.outputObjectPath);
+            videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(artifactMeta.outputBucket, artifactMeta.outputObjectPath, { accessToken, apiKey });
 
             if (rec) {
               rec.outputBucket = artifactMeta.outputBucket;
@@ -2779,15 +2787,14 @@ ${cleanPrompt}`
               if (pollRes.done && pollRes.response) {
                 const extracted = VideoGenerator.extractVideoData(pollRes.response);
                 if (extracted.uri) {
-                  const accessToken = await VertexClient.getAccessToken(vSession);
-                  const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
+                  const token = await VertexClient.getAccessToken(vSession).catch(() => accessToken);
                   const artifactMeta = await gcsArtifactStore.migrateArtifactToGcs({
                     taskId,
                     videoUri: extracted.uri,
-                    accessToken,
+                    accessToken: token,
                     apiKey,
                   });
-                  videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(artifactMeta.outputBucket, artifactMeta.outputObjectPath);
+                  videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(artifactMeta.outputBucket, artifactMeta.outputObjectPath, { accessToken: token, apiKey });
                 }
               }
             }
