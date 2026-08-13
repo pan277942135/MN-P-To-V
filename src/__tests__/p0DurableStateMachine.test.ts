@@ -132,8 +132,26 @@ describe('P0-3 + P0-4 Durable State Machine & Idempotency / Crash Recovery Suite
     updated = await taskStateMachineService.transitionTask({ taskId, toStatus: 'artifact_persisting' });
     expect(updated.status).toBe('artifact_persisting');
 
-    // artifact_persisting -> artifact_persisted
-    updated = await taskStateMachineService.transitionTask({ taskId, toStatus: 'artifact_persisted' });
+    // artifact_persisting -> artifact_persisted only after authoritative artifact persistence
+    const lifecycleArtifact = await gcsArtifactStore.uploadVideoArtifact({
+      taskId,
+      videoBuffer: Buffer.concat([
+        Buffer.from('000000206674797069736f6d0000020069736f6d69736f3261766331', 'hex'),
+        Buffer.alloc(2000, 1),
+      ]),
+    });
+    updated = await taskStateMachineService.transitionTask({
+      taskId,
+      toStatus: 'artifact_persisted',
+      patch: {
+        artifactPersisted: true,
+        outputBucket: lifecycleArtifact.outputBucket,
+        outputObjectPath: lifecycleArtifact.outputObjectPath,
+        videoUri: lifecycleArtifact.videoUri,
+        sizeBytes: lifecycleArtifact.sizeBytes,
+        artifactPersistedAt: lifecycleArtifact.artifactPersistedAt,
+      },
+    });
     expect(updated.status).toBe('artifact_persisted');
 
     // artifact_persisted -> qa_pending
@@ -452,6 +470,16 @@ describe('P0-3 + P0-4 Durable State Machine & Idempotency / Crash Recovery Suite
       createdAt: Date.now() - 60000,
       updatedAt: Date.now() - 30000,
     };
+
+    const generationSucceededArtifact = await gcsArtifactStore.uploadVideoArtifact({
+      taskId,
+      videoBuffer: Buffer.concat([
+        Buffer.from('000000206674797069736f6d0000020069736f6d69736f3261766331', 'hex'),
+        Buffer.alloc(2000, 2),
+      ]),
+    });
+    expect(generationSucceededArtifact.outputBucket).toBe(bucket);
+    expect(generationSucceededArtifact.outputObjectPath).toBe(objectPath);
 
     await firestoreTaskRepository.createTask(task);
 
