@@ -30,11 +30,11 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Apply deterministic P0-5 server hardening
+      - name: Apply deterministic P0-5 hardening
         shell: bash
         run: |
           if grep -q "P0-5: Provider submission is part of the request durability boundary" server.ts; then
-            echo "P0-5 server hardening already applied."
+            echo "Base P0-5 server hardening already applied."
           else
             python3 scripts/apply-p0-5-server-hardening.py
           fi
@@ -43,6 +43,9 @@ jobs:
           fi
           if [ -f scripts/apply-p0-5-contract-fixture-fix.py ]; then
             python3 scripts/apply-p0-5-contract-fixture-fix.py
+          fi
+          if [ -f scripts/apply-p0-5-production-state-wiring.py ] && ! grep -q "completeWithPersistedArtifact" src/server/services/taskStateMachineService.ts; then
+            python3 scripts/apply-p0-5-production-state-wiring.py
           fi
 
       - name: Diff check
@@ -67,9 +70,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add server.ts \
+            src/server/services/taskStateMachineService.ts \
             src/__tests__/firestoreTaskRepository.test.ts \
             src/__tests__/apiVideoStartRouteIntegration.test.ts \
             src/__tests__/p0DurableStateMachine.test.ts \
             src/__tests__/p0StorageAuthorityRegression.test.ts
-          git commit -m "ci(p0-5): apply verified hardening"
+          git commit -m "ci(p0-5): apply verified production state wiring"
           git push origin HEAD:p0-5-real-e2e-hardening
