@@ -48,7 +48,7 @@ const ALLOWED_TRANSITIONS: Record<string, TaskStatus[]> = {
   generation_succeeded: ['artifact_persisting', 'failed', 'cancelled', 'canceled'],
   artifact_persisting: ['artifact_persisted', 'artifact_persist_failed', 'failed'],
   artifact_persist_failed: ['artifact_persisting', 'failed', 'cancelled', 'canceled'],
-  artifact_persisted: ['qa_pending', 'completed', 'failed'],
+  artifact_persisted: ['qa_pending', 'failed'],
   qa_pending: ['completed', 'failed', 'cancelled', 'canceled'],
   completed: [],
   failed: [],
@@ -140,6 +140,24 @@ export class TaskStateMachineService {
         updatedAt: now,
         ...(toStatus === 'completed' ? { completedAt: patch.completedAt || now } : {}),
       };
+
+      if (toStatus === 'completed') {
+        const qaReport = updatedRecord.qaReport || updatedRecord.identityQaReport;
+        const artifactValid =
+          updatedRecord.artifactPersisted === true &&
+          Boolean(updatedRecord.outputBucket) &&
+          Boolean(updatedRecord.outputObjectPath) &&
+          Boolean(updatedRecord.videoUri);
+        const qaValid =
+          updatedRecord.identityQaStatus === 'pass' &&
+          qaReport?.pass === true &&
+          qaReport?.gateStatus === 'pass';
+        if (!artifactValid || !qaValid) {
+          throw new Error(
+            `[VIDEO_QA_COMPLETION_INVARIANT] Task ${taskId} cannot become completed without persisted artifact authority and PASS video identity QA.`
+          );
+        }
+      }
 
       return {
         taskPatch: updatedRecord,
@@ -287,92 +305,20 @@ export class TaskStateMachineService {
     artifactPersistedAt?: number;
     patch?: Partial<ServerVideoTaskRecord>;
   }): Promise<ServerVideoTaskRecord> {
-    const {
-      taskId,
-      outputBucket,
-      outputObjectPath,
-      videoUri,
-      sizeBytes,
-      contentType = 'video/mp4',
-      artifactPersistedAt = Date.now(),
-      patch = {},
-    } = params;
-
-    const advance = async (toStatus: TaskStatus, transitionPatch: Partial<ServerVideoTaskRecord> = {}) => {
-      return await this.transitionTask({ taskId, toStatus, patch: transitionPatch });
-    };
-
-    let task = await firestoreTaskRepository.getTask(taskId);
-    if (!task) {
-      throw new Error(`[TaskStateMachine] Task ${taskId} not found while finalizing artifact.`);
-    }
-
-    if (task.status === 'completed') {
-      if (
-        task.artifactPersisted !== true ||
-        !task.outputBucket ||
-        !task.outputObjectPath ||
-        !task.videoUri
-      ) {
-        throw new Error(`[TaskStateMachine] Completed task ${taskId} violates artifact invariant.`);
-      }
-      return task;
-    }
-
-    // Normalize every legacy/active provider state into the canonical production chain.
-    if (task.status === 'created') {
-      task = await advance('preparing');
-    }
-    if (task.status === 'preparing' || task.status === 'submitting' || task.status === 'submitted') {
-      task = await advance('generating');
-    }
-    if (task.status === 'polling_timeout') {
-      task = await advance('polling');
-    }
-    if (task.status === 'generating' || task.status === 'polling') {
-      task = await advance('generation_succeeded');
-    }
-    if (task.status === 'generation_succeeded' || task.status === 'artifact_persist_failed') {
-      task = await advance('artifact_persisting');
-    }
-    if (task.status === 'artifact_persisting') {
-      task = await advance('artifact_persisted', {
-        ...patch,
-        outputBucket,
-        outputObjectPath,
-        videoUri,
-        sizeBytes,
-        contentType,
-        artifactPersisted: true,
-        artifactPersistedAt,
-        videoDataUrl: `/api/videos/stream/${taskId}`,
+    const qaPending = await this.persistArtifactForQa(params);
+    const qaReport = params.patch?.qaReport || params.patch?.identityQaReport;
+    if (
+      params.patch?.identityQaStatus === 'pass' &&
+      qaReport?.pass === true &&
+      qaReport?.gateStatus === 'pass'
+    ) {
+      return await this.completeAfterQa({
+        taskId: params.taskId,
+        qaReport,
+        patch: params.patch,
       });
     }
-    if (task.status === 'artifact_persisted') {
-      task = await advance('qa_pending');
-    }
-    if (task.status === 'qa_pending') {
-      task = await advance('completed', {
-        ...patch,
-        outputBucket,
-        outputObjectPath,
-        videoUri,
-        sizeBytes,
-        contentType,
-        artifactPersisted: true,
-        artifactPersistedAt,
-        videoDataUrl: `/api/videos/stream/${taskId}`,
-        completedAt: Date.now(),
-      });
-    }
-
-    if (task.status !== 'completed') {
-      throw new Error(
-        `[TaskStateMachine] Task ${taskId} cannot be finalized from state ${task.status}.`
-      );
-    }
-
-    return task;
+    return qaPending;
   }
 
   public async persistArtifactForQa(params: {
