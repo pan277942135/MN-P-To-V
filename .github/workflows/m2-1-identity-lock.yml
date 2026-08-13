@@ -1,0 +1,64 @@
+name: M2-1 Identity Lock
+
+on:
+  push:
+    branches:
+      - m2-1-first-frame-identity-lock
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  identity-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Apply M2-1 identity gate hardening
+        run: python scripts/apply-m2-1-identity-gate-hardening.py
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
+
+      - name: Commit applied hardening
+        if: github.event_name == 'push'
+        run: |
+          if git diff --quiet; then
+            echo 'No generated patch changes to commit.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/services/character/identityLockService.ts src/services/qa/visualQaService.ts
+          git commit -m 'fix(m2-1): require QA for direct character images'
+          git push origin HEAD:${GITHUB_REF_NAME}
