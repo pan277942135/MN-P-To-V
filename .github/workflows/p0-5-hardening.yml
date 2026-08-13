@@ -41,6 +41,9 @@ jobs:
           if [ -f scripts/apply-p0-5-test-hardening.py ]; then
             python3 scripts/apply-p0-5-test-hardening.py
           fi
+          if [ -f scripts/apply-p0-5-contract-fixture-fix.py ]; then
+            python3 scripts/apply-p0-5-contract-fixture-fix.py
+          fi
 
       - name: Diff check
         run: git diff --check
