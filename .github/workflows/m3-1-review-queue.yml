@@ -1,0 +1,75 @@
+name: M3-1 Review Queue
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - m3-1-durable-review-queue
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  review-queue:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Apply one-shot navigation patch
+        run: python scripts/apply-m3-1-review-queue-nav.py
+
+      - name: Review queue contract gate
+        run: |
+          grep -q "HumanReviewQueuePage" src/App.tsx
+          grep -q "'review'" src/components/Sidebar.tsx
+          grep -q "isHumanReviewEligibleTask" src/services/review/humanReviewQueueService.ts
+          grep -q "submission_outcome_unknown" src/services/review/humanReviewQueueService.ts
+          grep -q "zaojing_bring_task_id" src/pages/HumanReviewQueuePage.tsx
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
+
+      - name: Commit generated navigation wiring
+        if: github.event_name == 'push'
+        run: |
+          if git diff --quiet; then
+            echo 'No generated navigation changes to commit.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/App.tsx src/components/Sidebar.tsx
+          git commit -m 'feat(m3-1): wire durable review queue navigation'
+          git push origin HEAD:${GITHUB_REF_NAME}
