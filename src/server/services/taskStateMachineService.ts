@@ -42,14 +42,15 @@ const ALLOWED_TRANSITIONS: Record<string, TaskStatus[]> = {
   preparing: ['generating', 'submitting', 'failed', 'cancelled', 'canceled'],
   submitting: ['submitted', 'preparing', 'generating', 'failed', 'cancelled', 'canceled'],
   submitted: ['polling', 'generating', 'failed', 'cancelled', 'canceled'],
-  generating: ['generation_succeeded', 'polling', 'failed', 'cancelled', 'canceled'],
+  generating: ['generation_succeeded', 'polling', 'submission_outcome_unknown', 'failed', 'cancelled', 'canceled'],
   polling: ['generation_succeeded', 'polling_timeout', 'failed', 'cancelled', 'canceled'],
   polling_timeout: ['polling', 'generating', 'failed', 'cancelled', 'canceled'],
   generation_succeeded: ['artifact_persisting', 'failed', 'cancelled', 'canceled'],
   artifact_persisting: ['artifact_persisted', 'artifact_persist_failed', 'failed'],
   artifact_persist_failed: ['artifact_persisting', 'failed', 'cancelled', 'canceled'],
   artifact_persisted: ['qa_pending', 'failed'],
-  qa_pending: ['completed', 'failed', 'cancelled', 'canceled'],
+  qa_pending: ['completed', 'generating', 'failed', 'cancelled', 'canceled'],
+  submission_outcome_unknown: ['polling', 'failed', 'cancelled', 'canceled'],
   completed: [],
   failed: [],
   cancelled: [],
@@ -292,6 +293,175 @@ export class TaskStateMachineService {
         updatedAt: Date.now(),
       };
       return { taskPatch, result: true };
+    });
+  }
+
+  public async reserveAutomaticProviderRetry(params: {
+    taskId: string;
+    decision: any;
+    diagnosisCode?: string;
+  }): Promise<{ reserved: boolean; task: ServerVideoTaskRecord }> {
+    const { taskId, decision, diagnosisCode } = params;
+    if (decision?.action !== 'REGENERATE_VIDEO' || !decision?.idempotencyKey) {
+      throw new Error('[M2_4_RETRY_RESERVATION_INVALID] REGENERATE_VIDEO decision with idempotency key is required.');
+    }
+
+    return await firestoreTaskRepository.runTaskTransaction<{ reserved: boolean; task: ServerVideoTaskRecord }>(taskId, (currentTask) => {
+      if (!currentTask) throw new Error(`[TaskStateMachine] Task ${taskId} not found.`);
+
+      if (currentTask.providerRetryIdempotencyKey === decision.idempotencyKey) {
+        return {
+          taskPatch: undefined,
+          result: { reserved: false, task: currentTask },
+        };
+      }
+      if (currentTask.status !== 'qa_pending') {
+        throw new InvalidStateTransitionError(currentTask.status, 'generating', taskId);
+      }
+
+      const now = Date.now();
+      const version = currentVersion(currentTask);
+      const artifactHistory = [...(currentTask.artifactHistory || [])];
+      if (
+        currentTask.artifactPersisted === true &&
+        currentTask.outputBucket &&
+        currentTask.outputObjectPath &&
+        currentTask.videoUri &&
+        !artifactHistory.some((item) => item.outputObjectPath === currentTask.outputObjectPath)
+      ) {
+        artifactHistory.push({
+          providerAttempt: currentTask.providerAttempt || 1,
+          outputBucket: currentTask.outputBucket,
+          outputObjectPath: currentTask.outputObjectPath,
+          videoUri: currentTask.videoUri,
+          sizeBytes: currentTask.sizeBytes,
+          persistedAt: currentTask.artifactPersistedAt,
+          qaStatus: currentTask.identityQaStatus,
+          diagnosisCode,
+          archivedAt: now,
+        });
+      }
+
+      const retryHistory = [...(currentTask.retryHistory || [])];
+      retryHistory.push({
+        sequence: retryHistory.length + 1,
+        decidedAt: now,
+        action: decision.action,
+        reasonCode: decision.reasonCode,
+        diagnosisCode,
+        providerAttempt: decision.nextProviderAttempt,
+        qaAttempt: decision.nextQaAttempt || 1,
+        idempotencyKey: decision.idempotencyKey,
+        state: 'reserved',
+      });
+
+      const patch: Partial<ServerVideoTaskRecord> = {
+        status: 'generating',
+        stateVersion: version + 1,
+        statusVersion: version + 1,
+        providerAttempt: decision.nextProviderAttempt,
+        qaAttempt: 1,
+        retryCount: Math.max(0, decision.nextProviderAttempt - 1),
+        automaticRetryPlan: decision,
+        providerRetryIdempotencyKey: decision.idempotencyKey,
+        retrySubmissionState: 'reserved',
+        retryReservedAt: now,
+        retryHistory,
+        artifactHistory,
+        operationName: '',
+        providerOperationId: '',
+        videoUri: '',
+        outputObjectPath: '',
+        videoDataUrl: '',
+        sizeBytes: 0,
+        contentType: '',
+        artifactPersisted: false,
+        identityQaStatus: 'not_run',
+        qaReport: null,
+        identityQaReport: null,
+        pollAttempt: 0,
+        error: '',
+        structuredError: null,
+        updatedAt: now,
+      };
+
+      return {
+        taskPatch: patch,
+        result: { reserved: true, task: { ...currentTask, ...patch } as ServerVideoTaskRecord },
+      };
+    });
+  }
+
+  public async markAutomaticRetrySubmitted(params: {
+    taskId: string;
+    idempotencyKey: string;
+    operationName: string;
+    diagnostics?: any;
+  }): Promise<ServerVideoTaskRecord> {
+    const { taskId, idempotencyKey, operationName, diagnostics } = params;
+    return await firestoreTaskRepository.runTaskTransaction(taskId, (currentTask) => {
+      if (!currentTask) throw new Error(`[TaskStateMachine] Task ${taskId} not found.`);
+      if (
+        currentTask.providerRetryIdempotencyKey !== idempotencyKey ||
+        currentTask.retrySubmissionState !== 'reserved' ||
+        currentTask.status !== 'generating'
+      ) {
+        throw new Error(`[M2_4_RETRY_SUBMISSION_STALE] Retry submission no longer owns task ${taskId}.`);
+      }
+
+      const now = Date.now();
+      const version = currentVersion(currentTask);
+      const retryHistory = [...(currentTask.retryHistory || [])];
+      const index = retryHistory.findIndex((item) => item.idempotencyKey === idempotencyKey);
+      if (index >= 0) {
+        retryHistory[index] = { ...retryHistory[index], state: 'submitted', operationName };
+      }
+      const patch: Partial<ServerVideoTaskRecord> = {
+        status: 'polling',
+        stateVersion: version + 1,
+        statusVersion: version + 1,
+        operationName,
+        providerOperationId: operationName,
+        retrySubmissionState: 'submitted',
+        retryHistory,
+        diagnostics,
+        submitHttpStatus: 200,
+        lastSubmitAttemptAt: now,
+        updatedAt: now,
+      };
+      return { taskPatch: patch, result: { ...currentTask, ...patch } as ServerVideoTaskRecord };
+    });
+  }
+
+  public async markAutomaticRetryOutcomeUnknown(params: {
+    taskId: string;
+    idempotencyKey: string;
+    message: string;
+  }): Promise<ServerVideoTaskRecord> {
+    const { taskId, idempotencyKey, message } = params;
+    return await firestoreTaskRepository.runTaskTransaction(taskId, (currentTask) => {
+      if (!currentTask) throw new Error(`[TaskStateMachine] Task ${taskId} not found.`);
+      if (currentTask.providerRetryIdempotencyKey !== idempotencyKey) {
+        return { taskPatch: undefined, result: currentTask };
+      }
+      const now = Date.now();
+      const version = currentVersion(currentTask);
+      const patch: Partial<ServerVideoTaskRecord> = {
+        status: 'submission_outcome_unknown',
+        stateVersion: version + 1,
+        statusVersion: version + 1,
+        retrySubmissionState: 'outcome_unknown',
+        error: message,
+        structuredError: buildStructuredError({
+          code: 'AUTOMATIC_RETRY_SUBMISSION_OUTCOME_UNKNOWN',
+          message,
+          stage: 'automatic_retry_submit',
+          retryable: false,
+          attempt: currentTask.providerAttempt,
+        }),
+        updatedAt: now,
+      };
+      return { taskPatch: patch, result: { ...currentTask, ...patch } as ServerVideoTaskRecord };
     });
   }
 
