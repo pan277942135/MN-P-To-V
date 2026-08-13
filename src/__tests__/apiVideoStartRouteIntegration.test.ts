@@ -266,7 +266,7 @@ describe('M2-1.2 Express Route Integration Test: /api/videos/start', () => {
     }, { timeout: 3000 });
   });
 
-  it('Case 6: DIRECT + imageIsTargetCharacter=true -> rebuild调用0次 -> 允许进入mock Veo submission', async () => {
+  it('Case 6: DIRECT + master QA pass -> rebuild调用0次 -> 允许进入mock Veo submission', async () => {
     const vertexSession: ActiveSession = {
       connectionId: 'test_conn_route_123',
       type: 'vertex_ai',
@@ -293,16 +293,33 @@ describe('M2-1.2 Express Route Integration Test: /api/videos/start', () => {
       endpoint: 'us-central1-aiplatform.googleapis.com',
     });
 
+    const spyQa = vi.spyOn(VisualQaService, 'qaFirstFrame').mockResolvedValueOnce({
+      pass: true,
+      identityScore: 98,
+      sourcePersonResidualScore: 0,
+      scenePreservationScore: 100,
+      posePreservationScore: 100,
+      outfitPreservationScore: 100,
+      anatomyScore: 98,
+      faceDetails: 'Direct image verified against master',
+      hairDetails: 'Direct image hair verified against master',
+      bodyDetails: 'Direct image body preserved',
+      summary: 'Direct target-character image passed mandatory master QA',
+      issues: [],
+    });
+
     const res = await request(app)
       .post('/api/videos/start')
       .set('x-connection-id', 'test_conn_route_123')
       .attach('firstFrame', createValidPngBuffer(), 'firstFrame.png')
+      .attach('masterImages', createValidPngBuffer(), 'master.png')
       .field('rawUserPrompt', 'A target character waving hand')
       .field('imageIsTargetCharacter', 'true');
 
     expect(res.status).toBe(200);
     expect(res.body.accepted).toBe(true);
     expect(spyRebuild).not.toHaveBeenCalled();
+    expect(spyQa).toHaveBeenCalledTimes(1);
 
     await vi.waitFor(() => {
       expect(spyPredict).toHaveBeenCalledTimes(1);
