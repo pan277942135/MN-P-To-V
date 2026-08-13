@@ -151,7 +151,7 @@ describe('M2-2 Video Identity QA', () => {
     ).rejects.toThrow('frameAssessments 数量与真实抽帧数量不一致');
   });
 
-  it('contains no synthetic-frame fallback and no orchestrator 100-point QA bypass', () => {
+  it('contains no synthetic-frame fallback, arbitrary 100KB gate, or orchestrator 100-point QA bypass', () => {
     const inspectorSource = fs.readFileSync(
       new URL('../services/video/videoInspector.ts', import.meta.url),
       'utf8'
@@ -163,6 +163,7 @@ describe('M2-2 Video Identity QA', () => {
 
     expect(inspectorSource).not.toContain('dummyFrame');
     expect(inspectorSource).not.toContain('sharp({');
+    expect(inspectorSource).not.toContain('100 * 1024');
     expect(orchestratorSource).not.toContain('identityScore: 100');
     expect(orchestratorSource).toContain('IdentityLockService.evaluateIdentityGate');
     expect(orchestratorSource).toContain('VideoIdentityQaService.qaVideoIdentity');
