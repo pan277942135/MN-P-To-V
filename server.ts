@@ -21,118 +21,34 @@ import { redactSecrets, sanitizeError, createStructuredError } from './src/utils
 import { callWithRetry } from './src/utils/retryHelper';
 import type { IdentitySpec, ServerVideoTaskRecord, TaskStatus, AuditTaskStatus, TaskSubmissionState } from './src/types';
 import { firestoreTaskRepository } from './src/server/repositories/firestoreTaskRepository';
+import { taskStateMachineService, InvalidStateTransitionError } from './src/server/services/taskStateMachineService';
 import { getStorageAuthority } from './src/server/db/firestore';
 import { gcsArtifactStore, resolveVeoOutputBucket, resolveVeoStorageUri, getVeoBucketName, getVeoStorageUri, assertProductionStorageConfig, EXPECTED_PRODUCTION_VEO_BUCKET } from './src/server/storage/gcsArtifactStore';
 
-// Server Video Task Store & Physical Video File Persistence
-const TASKS_FILE_PATH = path.join(process.cwd(), 'data', 'video_tasks.json');
-const VIDEOS_DIR = path.join(process.cwd(), 'data', 'videos');
-const IMAGES_DIR = path.join(process.cwd(), 'data', 'images');
+// Server Video Task Store & Ephemeral In-Memory Cache
+export const ephemeralImageStore = new Map<string, { buffer: Buffer; mimeType: string }>();
+export const ephemeralVideoStore = new Map<string, Buffer>();
 
 function saveImageBufferToFile(taskId: string, buffer: Buffer, mimeType = 'image/jpeg'): string {
-  try {
-    if (!fs.existsSync(IMAGES_DIR)) {
-      fs.mkdirSync(IMAGES_DIR, { recursive: true });
-    }
-    const ext = mimeType.includes('png') ? 'png' : 'jpg';
-    const filePath = path.join(IMAGES_DIR, `${taskId}.${ext}`);
-    fs.writeFileSync(filePath, buffer);
-    console.log(`[Image Storage] Saved scene image file: ${filePath} (${buffer.length} bytes)`);
-    return `/api/videos/image/${taskId}`;
-  } catch (err) {
-    console.error(`[Image Storage] Error saving image file for ${taskId}:`, err);
-    return `/api/videos/image/${taskId}`;
-  }
+  ephemeralImageStore.set(taskId, { buffer, mimeType });
+  return `/api/videos/image/${taskId}`;
 }
 
 function saveVideoBufferToFile(taskId: string, buffer: Buffer): { videoUrl: string; sizeBytes: number } {
-  try {
-    if (!fs.existsSync(VIDEOS_DIR)) {
-      fs.mkdirSync(VIDEOS_DIR, { recursive: true });
-    }
-    const filePath = path.join(VIDEOS_DIR, `${taskId}.mp4`);
-    fs.writeFileSync(filePath, buffer);
-    console.log(`[Video Storage] Saved physical MP4 video file: ${filePath} (${buffer.length} bytes)`);
-
-    const rec = serverVideoTaskStore.get(taskId);
-    if (rec) {
-      rec.videoBase64 = buffer.toString('base64');
-      rec.sizeBytes = buffer.length;
-      rec.videoDataUrl = `/api/videos/stream/${taskId}`;
-      saveTasksToDisk(serverVideoTaskStore);
-    }
-
-    return {
-      videoUrl: `/api/videos/stream/${taskId}`,
-      sizeBytes: buffer.length,
-    };
-  } catch (err) {
-    console.error(`[Video Storage] Error saving video file for ${taskId}:`, err);
-    return {
-      videoUrl: `data:video/mp4;base64,${buffer.toString('base64')}`,
-      sizeBytes: buffer.length,
-    };
+  ephemeralVideoStore.set(taskId, buffer);
+  const rec = serverVideoTaskStore.get(taskId);
+  if (rec) {
+    rec.sizeBytes = buffer.length;
+    rec.videoDataUrl = `/api/videos/stream/${taskId}`;
   }
+  return {
+    videoUrl: `/api/videos/stream/${taskId}`,
+    sizeBytes: buffer.length,
+  };
 }
 
-function loadTasksFromDisk(): Map<string, ServerVideoTaskRecord> {
-  const map = new Map<string, ServerVideoTaskRecord>();
-  try {
-    if (!fs.existsSync(VIDEOS_DIR)) {
-      fs.mkdirSync(VIDEOS_DIR, { recursive: true });
-    }
-    if (fs.existsSync(TASKS_FILE_PATH)) {
-      const content = fs.readFileSync(TASKS_FILE_PATH, 'utf-8');
-      const list: ServerVideoTaskRecord[] = JSON.parse(content);
-      for (const t of list) {
-        const tid = t.taskId || t.id;
-        if (!tid) continue;
-
-        const filePath = path.join(VIDEOS_DIR, `${tid}.mp4`);
-        const base64Data = t.videoBase64 || (t.videoDataUrl && t.videoDataUrl.startsWith('data:video/') ? t.videoDataUrl.split(',')[1] : undefined);
-        if (base64Data && (!fs.existsSync(filePath) || fs.statSync(filePath).size < 1000)) {
-          try {
-            const buf = Buffer.from(base64Data, 'base64');
-            if (buf.length > 1000) {
-              fs.writeFileSync(filePath, buf);
-              t.videoDataUrl = `/api/videos/stream/${tid}`;
-              t.sizeBytes = buf.length;
-              console.log(`[Disk Store] Restored MP4 file from base64 cache for task ${tid} (${buf.length} bytes)`);
-            }
-          } catch (migErr) {
-            console.warn(`[Task Migration] Failed to restore Base64 video for ${tid}:`, migErr);
-          }
-        }
-        map.set(tid, t);
-      }
-    }
-  } catch (err) {
-    console.warn('[Disk Store] Warning: Could not load tasks from disk:', err);
-  }
-  return map;
-}
-
-function saveTasksToDisk(map: Map<string, ServerVideoTaskRecord>) {
-  try {
-    const dir = path.dirname(TASKS_FILE_PATH);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    const list = Array.from(map.values()).map(rec => {
-      const tid = rec.taskId || rec.id;
-      if (tid) {
-        const mp4Path = path.join(VIDEOS_DIR, `${tid}.mp4`);
-        if (fs.existsSync(mp4Path) && fs.statSync(mp4Path).size > 1000 && rec.videoBase64) {
-          const { videoBase64, ...rest } = rec;
-          return rest;
-        }
-      }
-      return rec;
-    });
-    fs.writeFileSync(TASKS_FILE_PATH, JSON.stringify(list, null, 2), 'utf-8');
-  } catch (err) {
-    console.warn('[Disk Store] Warning: Could not save tasks to disk:', err);
-  }
+function saveTasksToDisk(_map?: Map<string, ServerVideoTaskRecord>) {
+  // No-op: Local filesystem persistence is disabled in production. Firestore is sole metadata authority.
 }
 
 function getStatusRank(status: string): number {
@@ -158,14 +74,32 @@ async function safeUpdateTaskRecord(taskId: string, updates: Partial<ServerVideo
     throw new Error(`[safeUpdateTaskRecord] Task ${taskId} does not exist in Firestore.`);
   }
 
-  if ((currentRecord.status === 'completed' || currentRecord.status === 'failed') && updates.status && updates.status !== currentRecord.status) {
-    console.warn(`[Task State Machine] Blocked illegal status transition for Task ${taskId}: ${currentRecord.status} -> ${updates.status}`);
-    delete updates.status;
+  if (updates.status && updates.status !== currentRecord.status) {
+    try {
+      const updated = await taskStateMachineService.transitionTask({
+        taskId,
+        toStatus: updates.status,
+        expectedStateVersion: updates.stateVersion,
+        executionId: updates.executionId,
+        patch: updates,
+      });
+      serverVideoTaskStore.set(taskId, updated);
+      return updated;
+    } catch (err: any) {
+      if (err instanceof InvalidStateTransitionError) {
+        console.warn(`[Task State Machine] Blocked illegal status transition for Task ${taskId}: ${err.message}`);
+        delete updates.status;
+      } else {
+        throw err;
+      }
+    }
   }
 
+  const currentVer = currentRecord.stateVersion ?? currentRecord.statusVersion ?? 1;
   const nextUpdates: Partial<ServerVideoTaskRecord> = {
     ...updates,
-    statusVersion: (currentRecord.statusVersion || 0) + 1,
+    stateVersion: currentVer + 1,
+    statusVersion: currentVer + 1,
     updatedAt: Date.now(),
     evidenceSource: 'firestore',
   };
@@ -176,12 +110,10 @@ async function safeUpdateTaskRecord(taskId: string, updates: Partial<ServerVideo
   }
 
   serverVideoTaskStore.set(taskId, updatedRecord);
-  saveTasksToDisk(serverVideoTaskStore);
-
   return updatedRecord;
 }
 
-export const serverVideoTaskStore = loadTasksFromDisk();
+export const serverVideoTaskStore = new Map<string, ServerVideoTaskRecord>();
 
 export async function createApp() {
   const app = express();
@@ -1430,32 +1362,66 @@ ${cleanPrompt}`
           rec.updatedAt = Date.now();
 
           if (startResult.videoBuffer) {
-            const { videoUrl, sizeBytes } = saveVideoBufferToFile(taskId, startResult.videoBuffer);
-            const updates: Partial<ServerVideoTaskRecord> = {
-              status: 'completed',
-              videoDataUrl: videoUrl,
-              sizeBytes: sizeBytes,
-              completedAt: Date.now(),
-              qaReport: {
-                pass: true,
-                firstFrameMode: '首帧模式：原图直通',
-                identityQaStatus: '身份自动质检：未执行',
-                masterImagesSentCount: 0,
-                summary: '首帧原图直通模式已生效，角色母板未发送至Veo',
-                criticalIssues: [],
-              },
-              diagnostics: startResult.diagnostics,
-              submitHttpStatus: 200,
-            };
-            if (firestoreTaskRepository.isAvailable()) {
-              await safeUpdateTaskRecord(taskId, updates);
-            } else {
-              Object.assign(rec, updates);
-              serverVideoTaskStore.set(taskId, rec);
-              saveTasksToDisk(serverVideoTaskStore);
+            try {
+              const artifactMeta = await gcsArtifactStore.uploadVideoArtifact({
+                taskId,
+                videoBuffer: startResult.videoBuffer,
+                contentType: 'video/mp4',
+              });
+              ephemeralVideoStore.set(taskId, startResult.videoBuffer);
+              const updates: Partial<ServerVideoTaskRecord> = {
+                status: 'completed',
+                outputBucket: artifactMeta.outputBucket,
+                outputObjectPath: artifactMeta.outputObjectPath,
+                videoUri: artifactMeta.videoUri,
+                artifactPersisted: true,
+                sizeBytes: artifactMeta.sizeBytes,
+                contentType: artifactMeta.contentType,
+                videoDataUrl: `/api/videos/stream/${taskId}`,
+                completedAt: Date.now(),
+                qaReport: {
+                  pass: true,
+                  firstFrameMode: '首帧模式：原图直通',
+                  identityQaStatus: '身份自动质检：未执行',
+                  masterImagesSentCount: 0,
+                  summary: '首帧原图直通模式已生效，角色母板未发送至Veo',
+                  criticalIssues: [],
+                },
+                diagnostics: startResult.diagnostics,
+                submitHttpStatus: 200,
+              };
+              if (firestoreTaskRepository.isAvailable()) {
+                await safeUpdateTaskRecord(taskId, updates);
+              } else {
+                Object.assign(rec, updates);
+                serverVideoTaskStore.set(taskId, rec);
+              }
+              console.log(`[Video Start Sync Complete] 任务 ${taskId} 直接渲染完成并上传至 GCS (${artifactMeta.sizeBytes} bytes)`);
+              return;
+            } catch (persistErr: any) {
+              console.error(`[Video Start GCS Upload Error] Task ${taskId}:`, persistErr);
+              const errObj = createStructuredError({
+                source: 'artifact_persist',
+                failureStage: 'artifact_persist',
+                httpStatus: 500,
+                customUserMessage: `视频生成成功但无法写入 Cloud Storage: ${persistErr?.message || persistErr}`,
+                endpointPathRedacted: '/api/videos/start',
+              });
+              const updates: Partial<ServerVideoTaskRecord> = {
+                status: 'artifact_persist_failed',
+                artifactPersisted: false,
+                error: `视频产物写入 Cloud Storage 失败: ${persistErr?.message || persistErr}`,
+                structuredError: errObj,
+                updatedAt: Date.now(),
+              };
+              if (firestoreTaskRepository.isAvailable()) {
+                await safeUpdateTaskRecord(taskId, updates);
+              } else {
+                Object.assign(rec, updates);
+                serverVideoTaskStore.set(taskId, rec);
+              }
+              return;
             }
-            console.log(`[Video Start Sync Complete] 任务 ${taskId} 直接渲染完成`);
-            return;
           }
 
           if (startResult.operationName) {
@@ -2186,7 +2152,23 @@ ${cleanPrompt}`
           const apiKey = session.apiKey || process.env.GEMINI_API_KEY;
           const reFetchBuf = await VideoGenerator.fetchGcsVideoBuffer(record.videoUri, accessToken, apiKey);
           if (reFetchBuf && reFetchBuf.length > 50 * 1024) {
-            const { videoUrl, sizeBytes } = saveVideoBufferToFile(taskId, reFetchBuf);
+            let artifactMeta;
+            try {
+              artifactMeta = await gcsArtifactStore.uploadVideoArtifact({
+                taskId,
+                videoBuffer: reFetchBuf,
+                contentType: 'video/mp4',
+              });
+            } catch (uploadErr) {
+              artifactMeta = await gcsArtifactStore.migrateArtifactToGcs({
+                taskId,
+                videoUri: record.videoUri,
+                accessToken,
+                apiKey,
+              });
+            }
+
+            ephemeralVideoStore.set(taskId, reFetchBuf);
             const defaultQaReport = {
               pass: true,
               firstFrameMode: '首帧模式：原图直通',
@@ -2199,8 +2181,14 @@ ${cleanPrompt}`
             const updates: Partial<ServerVideoTaskRecord> = {
               status: 'completed',
               completedAt: Date.now(),
-              videoDataUrl: videoUrl,
-              sizeBytes: sizeBytes,
+              videoDataUrl: `/api/videos/stream/${taskId}`,
+              outputBucket: artifactMeta.outputBucket,
+              outputObjectPath: artifactMeta.outputObjectPath,
+              videoUri: artifactMeta.videoUri,
+              sizeBytes: artifactMeta.sizeBytes,
+              contentType: artifactMeta.contentType,
+              artifactPersisted: true,
+              artifactPersistedAt: artifactMeta.artifactPersistedAt,
               qaReport: defaultQaReport,
               pollHttpStatus: 200,
               pollAttempt: record.pollAttempt,
@@ -2232,11 +2220,14 @@ ${cleanPrompt}`
 
             return res.json({
               status: 'completed',
-              videoDataUrl: videoUrl,
-              sizeBytes: sizeBytes,
+              videoDataUrl: `/api/videos/stream/${taskId}`,
+              sizeBytes: artifactMeta.sizeBytes,
               durationSeconds: record.durationSeconds,
               qaReport: defaultQaReport,
               diagnostics: record.diagnostics,
+              outputBucket: artifactMeta.outputBucket,
+              outputObjectPath: artifactMeta.outputObjectPath,
+              artifactPersisted: true,
             });
           }
         } catch (reFetchErr) {
@@ -2641,19 +2632,13 @@ ${cleanPrompt}`
   app.get('/api/videos/image/:taskId', async (req, res) => {
     try {
       const { taskId } = req.params;
-      const jpgPath = path.join(IMAGES_DIR, `${taskId}.jpg`);
-      const pngPath = path.join(IMAGES_DIR, `${taskId}.png`);
-
-      if (fs.existsSync(jpgPath)) {
-        res.setHeader('Content-Type', 'image/jpeg');
-        return fs.createReadStream(jpgPath).pipe(res);
-      }
-      if (fs.existsSync(pngPath)) {
-        res.setHeader('Content-Type', 'image/png');
-        return fs.createReadStream(pngPath).pipe(res);
+      const cached = ephemeralImageStore.get(taskId);
+      if (cached) {
+        res.setHeader('Content-Type', cached.mimeType || 'image/jpeg');
+        return res.send(cached.buffer);
       }
 
-      // Check in-memory store or fallback
+      // Check in-memory task record fallback
       const rec = serverVideoTaskStore.get(taskId);
       if (rec?.sceneImageUrl && rec.sceneImageUrl.startsWith('data:image/')) {
         const matches = rec.sceneImageUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
@@ -2804,21 +2789,11 @@ ${cleanPrompt}`
     try {
       const { taskId } = req.params;
       const isDownload = req.query.download === 'true' || req.query.download === '1';
-      const filePath = path.join(VIDEOS_DIR, `${taskId}.mp4`);
 
-      // 1. Check local file cache first
-      if (fs.existsSync(filePath)) {
-        try {
-          const stat = fs.statSync(filePath);
-          if (stat.size < 1000) {
-            console.warn(`[Video Stream] Removing corrupt 0-byte video file for ${taskId}`);
-            fs.unlinkSync(filePath);
-          }
-        } catch {}
-      }
+      let videoBuffer: Buffer | null = ephemeralVideoStore.get(taskId) || null;
 
-      // 2. If file missing locally, fetch from Cloud Storage (or migrate)
-      if (!fs.existsSync(filePath)) {
+      // If buffer missing from ephemeral memory store, fetch directly from Cloud Storage (or migrate)
+      if (!videoBuffer || videoBuffer.length < 1000) {
         let rec = firestoreTaskRepository.isAvailable() ? await firestoreTaskRepository.getTask(taskId) : null;
         if (!rec) {
           rec = serverVideoTaskStore.get(taskId) || null;
@@ -2859,15 +2834,13 @@ ${cleanPrompt}`
           } catch {}
         }
 
-        let videoBuffer: Buffer | null = null;
-
         // A. Primary: Fetch from GCS bucket if outputObjectPath is stored
         if (rec?.outputBucket && rec?.outputObjectPath) {
           try {
             videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(rec.outputBucket, rec.outputObjectPath, { accessToken, apiKey, session: activeSession });
             console.log(`[Video Stream] Successfully fetched artifact from Cloud Storage gs://${rec.outputBucket}/${rec.outputObjectPath} (${videoBuffer.length} bytes)`);
           } catch (gcsErr) {
-            console.warn(`[Video Stream] GCS fetch failed for task ${taskId}:`, gcsErr);
+            console.info(`[Video Stream] Primary GCS fetch skipped for task ${taskId}:`, (gcsErr as any)?.message || gcsErr);
           }
         }
 
@@ -2901,7 +2874,7 @@ ${cleanPrompt}`
               }).catch(() => {});
             }
           } catch (migrationErr) {
-            console.error(`[Video Stream] Migration from candidateVideoUri failed for ${taskId}:`, migrationErr);
+            console.info(`[Video Stream] Migration from candidateVideoUri skipped for ${taskId}:`, (migrationErr as any)?.message || migrationErr);
           }
         }
 
@@ -2928,64 +2901,48 @@ ${cleanPrompt}`
               }
             }
           } catch (opErr) {
-            console.error(`[Video Stream] Operation poll recovery failed for ${taskId}:`, opErr);
+            console.info(`[Video Stream] Operation poll recovery skipped for ${taskId}:`, (opErr as any)?.message || opErr);
           }
         }
 
-        // Write to local cache disk if retrieved
         if (videoBuffer && videoBuffer.length >= 1000) {
-          if (!fs.existsSync(VIDEOS_DIR)) fs.mkdirSync(VIDEOS_DIR, { recursive: true });
-          fs.writeFileSync(filePath, videoBuffer);
+          ephemeralVideoStore.set(taskId, videoBuffer);
         }
       }
 
-      if (!fs.existsSync(filePath)) {
+      if (!videoBuffer || videoBuffer.length < 1000) {
         res.setHeader('Content-Type', 'application/json');
         return res.status(404).json({ error: '视频文件在 Cloud Storage 存储上不存在，请点击【重新获取视频】或【重新生成】。' });
       }
 
-      const stat = fs.statSync(filePath);
-      const fileSize = stat.size;
-
-      if (fileSize < 1000) {
-        res.setHeader('Content-Type', 'application/json');
-        return res.status(404).json({ error: '视频文件大小异常，请点击【重新获取视频】或【重新生成】。' });
-      }
-
+      const fileSize = videoBuffer.length;
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Headers', '*');
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length');
-
-      if (isDownload) {
-        res.setHeader('Content-Disposition', `attachment; filename="zaojing_${taskId}.mp4"`);
-        res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Content-Length', fileSize);
-        const readStream = fs.createReadStream(filePath);
-        return readStream.pipe(res);
-      }
 
       const range = req.headers.range;
       if (range) {
         const parts = range.replace(/bytes=/, '').split('-');
         const start = parseInt(parts[0], 10);
         const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-        const chunksize = end - start + 1;
-        const file = fs.createReadStream(filePath, { start, end });
-        const head = {
+        const chunksize = (end - start) + 1;
+        res.writeHead(206, {
           'Content-Range': `bytes ${start}-${end}/${fileSize}`,
           'Accept-Ranges': 'bytes',
           'Content-Length': chunksize,
           'Content-Type': 'video/mp4',
-        };
-        res.writeHead(206, head);
-        file.pipe(res);
+          'Access-Control-Allow-Origin': '*',
+        });
+        return res.end(videoBuffer.subarray(start, end + 1));
       } else {
-        const head = {
+        res.writeHead(200, {
           'Content-Length': fileSize,
           'Content-Type': 'video/mp4',
-        };
-        res.writeHead(200, head);
-        fs.createReadStream(filePath).pipe(res);
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Expose-Headers': 'Content-Disposition, Content-Length',
+          ...(isDownload ? { 'Content-Disposition': `attachment; filename="zaojing_${taskId}.mp4"` } : {}),
+        });
+        return res.end(videoBuffer);
       }
     } catch (err) {
       console.error('Error streaming video:', err);
@@ -3183,14 +3140,55 @@ export async function startServer() {
               const ai = await GeminiClientFactory.getClientForSession(session);
               const pollRes = await VideoGenerator.pollVeoOperation(ai, session, record.operationName!);
               if (pollRes.done && pollRes.videoBuffer) {
-                const { videoUrl, sizeBytes } = saveVideoBufferToFile(taskId, pollRes.videoBuffer);
-                record.status = 'completed';
-                record.completedAt = Date.now();
-                record.videoDataUrl = videoUrl;
-                record.sizeBytes = sizeBytes;
-                serverVideoTaskStore.set(taskId, record);
-                saveTasksToDisk(serverVideoTaskStore);
-                console.log(`[Recovery Engine] Task ${taskId} successfully recovered & saved!`);
+                try {
+                  const artifactMeta = await gcsArtifactStore.uploadVideoArtifact({
+                    taskId,
+                    videoBuffer: pollRes.videoBuffer,
+                    contentType: 'video/mp4',
+                  });
+                  ephemeralVideoStore.set(taskId, pollRes.videoBuffer);
+                  const updates: Partial<ServerVideoTaskRecord> = {
+                    status: 'completed',
+                    completedAt: Date.now(),
+                    videoDataUrl: `/api/videos/stream/${taskId}`,
+                    outputBucket: artifactMeta.outputBucket,
+                    outputObjectPath: artifactMeta.outputObjectPath,
+                    videoUri: artifactMeta.videoUri,
+                    sizeBytes: artifactMeta.sizeBytes,
+                    contentType: artifactMeta.contentType,
+                    artifactPersisted: true,
+                    artifactPersistedAt: artifactMeta.artifactPersistedAt,
+                    updatedAt: Date.now(),
+                  };
+                  if (firestoreTaskRepository.isAvailable()) {
+                    await safeUpdateTaskRecord(taskId, updates);
+                  } else {
+                    Object.assign(record, updates);
+                    serverVideoTaskStore.set(taskId, record);
+                  }
+                  console.log(`[Recovery Engine] Task ${taskId} successfully recovered & saved to GCS (${artifactMeta.sizeBytes} bytes)!`);
+                } catch (persistErr: any) {
+                  console.error(`[Recovery Engine GCS Upload Error] Task ${taskId}:`, persistErr);
+                  const errObj = createStructuredError({
+                    source: 'artifact_persist',
+                    failureStage: 'artifact_persist',
+                    httpStatus: 500,
+                    customUserMessage: `恢复渲染完成，但视频产物写入 Cloud Storage 失败: ${persistErr?.message || persistErr}`,
+                    endpointPathRedacted: '/recovery_engine',
+                  });
+                  const failUpdates: Partial<ServerVideoTaskRecord> = {
+                    status: 'artifact_persist_failed',
+                    error: `视频产物写入 Cloud Storage 失败: ${persistErr?.message || persistErr}`,
+                    structuredError: errObj,
+                    updatedAt: Date.now(),
+                  };
+                  if (firestoreTaskRepository.isAvailable()) {
+                    await safeUpdateTaskRecord(taskId, failUpdates);
+                  } else {
+                    Object.assign(record, failUpdates);
+                    serverVideoTaskStore.set(taskId, record);
+                  }
+                }
               }
             } catch (err) {
               console.error(`[Recovery Engine] Error recovering task ${taskId}:`, err);

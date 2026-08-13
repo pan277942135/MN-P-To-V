@@ -2,7 +2,13 @@ node_modules/
 build/
 dist/
 coverage/
+data/video_tasks.json
+data/images/
+data/videos/
+data/characters.json
+data/
 .DS_Store
 *.log
 .env*
 !.env.example
+

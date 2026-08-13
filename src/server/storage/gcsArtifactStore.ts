@@ -1,5 +1,7 @@
 import { Storage } from '@google-cloud/storage';
+import { GoogleAuth, OAuth2Client } from 'google-auth-library';
 import { VideoGenerator } from '../../services/video/videoGenerator';
+import { redactSecrets } from '../../utils/redactSecrets';
 
 export const EXPECTED_PRODUCTION_VEO_BUCKET = 'ai-studio-bucket-89614354864-asia-south1';
 
@@ -78,11 +80,51 @@ function getStorageClient(): Storage {
   return storageClientInstance;
 }
 
-function getStorageClientsForSessions(options?: { session?: any; accessToken?: string }): Storage[] {
+function sanitizeGcsError(msg: string): string {
+  if (!msg) return 'Unknown error';
+  let cleaned = redactSecrets(msg.split('\n')[0]);
+  if (cleaned.includes('does not have storage.objects.get access') || cleaned.includes("Permission 'storage.objects.get' denied")) {
+    return 'GCS Access Denied (403: insufficient storage.objects.get permission)';
+  }
+  return cleaned;
+}
+
+function createTokenAuthClient(accessToken: string, projectId?: string) {
+  const oauthClient = new OAuth2Client();
+  oauthClient.setCredentials({
+    access_token: accessToken,
+    token_type: 'Bearer',
+    expiry_date: Date.now() + 3600 * 1000 * 24,
+  });
+
+  return {
+    getRequestHeaders: async (_url?: string) => ({
+      Authorization: `Bearer ${accessToken}`,
+      authorization: `Bearer ${accessToken}`,
+    }),
+    getAccessToken: async () => ({ token: accessToken }),
+    getProjectId: async () => projectId || 'xp-vertex-project',
+    request: async (opts: any) => oauthClient.request(opts),
+  };
+}
+
+async function getStorageClientsForSessions(options?: { session?: any; accessToken?: string }): Promise<Storage[]> {
   const clients: Storage[] = [];
   const seenKeys = new Set<string>();
 
-  const addClientForSession = (s: any) => {
+  if (options?.accessToken) {
+    seenKeys.add('token_' + options.accessToken);
+    try {
+      clients.push(
+        new Storage({
+          authClient: createTokenAuthClient(options.accessToken, options?.session?.projectId) as any,
+          projectId: options?.session?.projectId,
+        })
+      );
+    } catch {}
+  }
+
+  const addClientForSession = async (s: any) => {
     if (!s) return;
     if (s.serviceAccountJsonRaw && !seenKeys.has(s.serviceAccountJsonRaw)) {
       seenKeys.add(s.serviceAccountJsonRaw);
@@ -93,25 +135,49 @@ function getStorageClientsForSessions(options?: { session?: any; accessToken?: s
     } else if (s.serviceAccountJwt && !seenKeys.has('jwt_' + (s.connectionId || s.projectId))) {
       seenKeys.add('jwt_' + (s.connectionId || s.projectId));
       try {
-        clients.push(new Storage({ authClient: s.serviceAccountJwt, projectId: s.projectId }));
+        let jwt = s.serviceAccountJwt;
+        if (jwt && typeof jwt.then === 'function') {
+          jwt = await jwt;
+        }
+        if (jwt) {
+          clients.push(new Storage({ authClient: jwt, projectId: s.projectId }));
+        }
+      } catch {}
+    }
+    if (s.type === 'vertex_ai') {
+      try {
+        const { VertexClient } = await import('../../services/google/vertexClient');
+        const token = await VertexClient.getAccessToken(s).catch(() => undefined);
+        if (token && !seenKeys.has('token_' + token)) {
+          seenKeys.add('token_' + token);
+          clients.push(
+            new Storage({
+              authClient: createTokenAuthClient(token, s.projectId) as any,
+              projectId: s.projectId,
+            })
+          );
+        }
       } catch {}
     }
   };
 
   if (options?.session) {
-    addClientForSession(options.session);
+    await addClientForSession(options.session);
   }
 
   try {
-    const { CredentialService } = require('../../services/google/credentialService');
+    const { CredentialService } = await import('../../services/google/credentialService');
     const sessions = CredentialService.listSessions();
     for (const s of sessions) {
-      addClientForSession(s);
+      await addClientForSession(s);
     }
   } catch {}
 
-  // Fallback to container default ADC
-  clients.push(getStorageClient());
+  // Always include container default ADC client as fallback
+  try {
+    clients.push(getStorageClient());
+  } catch {}
+
   return clients;
 }
 
@@ -142,6 +208,11 @@ export class GcsArtifactStore {
     this.mockStore.clear();
   }
 
+  public resetMockStore() {
+    this.mockStore.clear();
+    this.mockUploadFailure = false;
+  }
+
   public async uploadImageArtifact(params: {
     objectPath: string;
     buffer: Buffer;
@@ -153,7 +224,11 @@ export class GcsArtifactStore {
       throw new Error(`[GcsArtifactStore] Cannot upload empty image buffer for ${objectPath}`);
     }
 
-    const bucketName = getVeoBucketName();
+    const storageConfig = assertProductionStorageConfig();
+    if (!storageConfig.valid) {
+      throw new Error(`[GcsArtifactStore Guard Error] ${storageConfig.error}`);
+    }
+    const bucketName = storageConfig.effectiveBucket;
     const key = `${bucketName}/${objectPath}`;
 
     if (this.useMock || process.env.NODE_ENV === 'test') {
@@ -219,7 +294,11 @@ export class GcsArtifactStore {
       throw new Error(`[GcsArtifactStore Mock] Simulated GCS upload failure for task ${taskId}`);
     }
 
-    const bucketName = getVeoBucketName();
+    const storageConfig = assertProductionStorageConfig();
+    if (!storageConfig.valid) {
+      throw new Error(`[GcsArtifactStore Guard Error] ${storageConfig.error}`);
+    }
+    const bucketName = storageConfig.effectiveBucket;
     const objectPath = getVeoObjectPath(taskId);
     const key = `${bucketName}/${objectPath}`;
 
@@ -375,72 +454,55 @@ export class GcsArtifactStore {
       throw new Error(`[GcsArtifactStore Mock] Artifact gs://${bucketName}/${objectPath} not found in mock store.`);
     }
 
-    // Tier 1: Try Node @google-cloud/storage SDK with session credentials then ADC
-    let lastError = '';
-    const storageClients = getStorageClientsForSessions(options);
+    // Resolve session & token upfront for both SDK download and REST fallback
+    let token = options?.accessToken;
+    let activeSession = options?.session;
 
-    for (const storage of storageClients) {
-      for (const b of candidateBuckets) {
-        try {
-          const file = storage.bucket(b).file(objectPath);
-          const [buffer] = await file.download();
-          if (buffer && buffer.length > 0) {
-            return buffer;
-          }
-        } catch (err: any) {
-          lastError = err?.message || String(err);
-          const firstLine = lastError.split('\n')[0];
-          console.debug(`[GcsArtifactStore Notice] SDK download for gs://${b}/${objectPath} skipped: ${firstLine}`);
-        }
-      }
+    if (!activeSession) {
+      try {
+        const { CredentialService } = await import('../../services/google/credentialService');
+        activeSession = CredentialService.getSession();
+      } catch {}
     }
 
-    // Tier 2: Fallback to HTTP REST fetch via Vertex Access Token or API Key
+    if (!token && activeSession && activeSession.type === 'vertex_ai') {
+      try {
+        const { VertexClient } = await import('../../services/google/vertexClient');
+        token = await VertexClient.getAccessToken(activeSession).catch(() => undefined);
+      } catch {}
+    }
+
+    if (!token) {
+      try {
+        const { CredentialService } = await import('../../services/google/credentialService');
+        const { VertexClient } = await import('../../services/google/vertexClient');
+        const sessions = CredentialService.listSessions();
+        const vSession = sessions.find((s: any) => s.type === 'vertex_ai');
+        if (vSession) {
+          token = await VertexClient.getAccessToken(vSession).catch(() => undefined);
+        }
+      } catch {}
+    }
+
+    if (!token) {
+      try {
+        const { GoogleAuth } = await import('google-auth-library');
+        const auth = new GoogleAuth({
+          scopes: [
+            'https://www.googleapis.com/auth/cloud-platform',
+            'https://www.googleapis.com/auth/devstorage.read_only',
+          ],
+        });
+        const client = await auth.getClient();
+        const tRes = await client.getAccessToken();
+        token = typeof tRes === 'string' ? tRes : tRes?.token || undefined;
+      } catch {}
+    }
+
+    let lastError = '';
+
+    // Tier 1: Primary HTTP REST fetch via Vertex Access Token or API Key
     try {
-      let token = options?.accessToken;
-      let activeSession = options?.session;
-
-      if (!activeSession) {
-        try {
-          const { CredentialService } = await import('../../services/google/credentialService');
-          activeSession = CredentialService.getSession();
-        } catch {}
-      }
-
-      if (!token && activeSession && activeSession.type === 'vertex_ai') {
-        try {
-          const { VertexClient } = await import('../../services/google/vertexClient');
-          token = await VertexClient.getAccessToken(activeSession).catch(() => undefined);
-        } catch {}
-      }
-
-      if (!token) {
-        try {
-          const { CredentialService } = await import('../../services/google/credentialService');
-          const { VertexClient } = await import('../../services/google/vertexClient');
-          const sessions = CredentialService.listSessions();
-          const vSession = sessions.find((s: any) => s.type === 'vertex_ai');
-          if (vSession) {
-            token = await VertexClient.getAccessToken(vSession).catch(() => undefined);
-          }
-        } catch {}
-      }
-
-      if (!token) {
-        try {
-          const { GoogleAuth } = await import('google-auth-library');
-          const auth = new GoogleAuth({
-            scopes: [
-              'https://www.googleapis.com/auth/cloud-platform',
-              'https://www.googleapis.com/auth/devstorage.read_only',
-            ],
-          });
-          const client = await auth.getClient();
-          const tRes = await client.getAccessToken();
-          token = typeof tRes === 'string' ? tRes : tRes?.token || undefined;
-        } catch {}
-      }
-
       const apiKey = options?.apiKey || activeSession?.apiKey || process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
 
       for (const b of candidateBuckets) {
@@ -448,7 +510,7 @@ export class GcsArtifactStore {
           const gcsUri = `gs://${b}/${objectPath}`;
           const buffer = await VideoGenerator.fetchGcsVideoBuffer(gcsUri, token, apiKey);
           if (buffer && buffer.length > 0) {
-            console.log(`[GcsArtifactStore Success] Fetched video via REST API fallback for gs://${b}/${objectPath} (${buffer.length} bytes)`);
+            console.log(`[GcsArtifactStore Success] Fetched video via REST API for gs://${b}/${objectPath} (${buffer.length} bytes)`);
             return buffer;
           }
         } catch (httpErr: any) {
@@ -456,10 +518,45 @@ export class GcsArtifactStore {
         }
       }
     } catch (tokenErr: any) {
-      console.debug('[GcsArtifactStore Notice] REST fallback token resolution skipped:', tokenErr?.message || tokenErr);
+      console.debug('[GcsArtifactStore Notice] REST token resolution skipped:', tokenErr?.message || tokenErr);
     }
 
-    console.warn(`[GcsArtifactStore Warning] Downloading gs://${bucketName}/${objectPath} failed across candidate buckets (${candidateBuckets.join(', ')}):`, lastError);
+    // Tier 2: Fallback to Node @google-cloud/storage SDK with session credentials or ADC
+    const storageClients = await getStorageClientsForSessions({ session: activeSession, accessToken: token });
+
+    const taskMatch = objectPath.match(/veo\/([^\/]+)/);
+    const taskId = taskMatch ? taskMatch[1] : '';
+    const candidatePaths = Array.from(new Set([
+      objectPath,
+      ...(taskId ? [
+        `veo/${taskId}/video.mp4`,
+        `veo/${taskId}/sample_0.mp4`,
+        `veo/${taskId}/output_0.mp4`,
+        `veo/${taskId}/video_0.mp4`,
+        `veo/${taskId}/0.mp4`,
+      ] : []),
+    ]));
+
+    for (const storage of storageClients) {
+      for (const b of candidateBuckets) {
+        for (const objPath of candidatePaths) {
+          try {
+            const file = storage.bucket(b).file(objPath);
+            const [buffer] = await file.download();
+            if (buffer && buffer.length > 0) {
+              return buffer;
+            }
+          } catch (err: any) {
+            lastError = err?.message || String(err);
+            const cleanErr = sanitizeGcsError(lastError);
+            console.debug(`[GcsArtifactStore Notice] SDK download for gs://${b}/${objPath} skipped: ${cleanErr}`);
+          }
+        }
+      }
+    }
+
+    const finalCleanErr = sanitizeGcsError(lastError);
+    console.info(`[GcsArtifactStore Notice] Downloading gs://${bucketName}/${objectPath} skipped across candidate buckets (${candidateBuckets.join(', ')}): ${finalCleanErr}`);
     throw new Error(`Cloud Storage 视频产物不存在或读取失败: gs://${bucketName}/${objectPath}`);
   }
 

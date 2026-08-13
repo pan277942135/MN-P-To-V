@@ -21,7 +21,11 @@ export class VertexClient {
     }
 
     try {
-      const tokenRes = await session.serviceAccountJwt.getAccessToken();
+      let client = session.serviceAccountJwt;
+      if (client && typeof client.then === 'function') {
+        client = await client;
+      }
+      const tokenRes = await client.getAccessToken();
       const token = typeof tokenRes === 'string' ? tokenRes : tokenRes?.token;
       if (!token) {
         throw new Error('无法获取 Access Token');

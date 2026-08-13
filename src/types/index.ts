@@ -173,6 +173,14 @@ export type RetryMode =
   | 'SAFE_TO_REGENERATE';
 
 export type TaskStatus =
+  | 'created'
+  | 'preparing'
+  | 'generating'
+  | 'generation_succeeded'
+  | 'artifact_persisting'
+  | 'artifact_persist_failed'
+  | 'artifact_persisted'
+  | 'qa_pending'
   | 'draft'
   | 'local_draft'
   | 'submitting'
@@ -200,7 +208,6 @@ export type TaskStatus =
   | 'orphaned_local_task'
   | 'submit_failed_safe_to_retry'
   | 'submission_outcome_unknown'
-  | 'artifact_persist_failed'
   | 'artifact_missing'
   | 'artifact_fetch_failed';
 
@@ -254,8 +261,16 @@ export interface ServerVideoTaskRecord {
   id: string;
   taskId: string;
   operationName?: string;
+  providerOperationId?: string;
   status: TaskStatus;
   statusVersion?: number;
+  stateVersion?: number;
+  executionId?: string;
+  leaseOwner?: string;
+  leaseExpiresAt?: number;
+  heartbeatAt?: number;
+  attempt?: number;
+  maxAttempts?: number;
   modelId: string;
   projectId: string;
   region: string;

@@ -9,7 +9,7 @@ import type {
   FirstFrameQaReport,
   SceneMode,
 } from '../../types';
-import { gcsArtifactStore, getVeoBucketName } from '../../server/storage/gcsArtifactStore';
+import { gcsArtifactStore, getVeoBucketName, assertProductionStorageConfig } from '../../server/storage/gcsArtifactStore';
 import { FirstFrameGenerator } from '../image/firstFrameGenerator';
 import { VisualQaService } from '../qa/visualQaService';
 import { PromptCompiler } from '../prompt/PromptCompiler';
@@ -72,7 +72,11 @@ export class IdentityLockService {
     }>;
   }): Promise<CharacterIdentityProfile> {
     const { characterId, characterName, identitySpec, images } = params;
-    const bucket = getVeoBucketName();
+    const storageConfig = assertProductionStorageConfig();
+    if (!storageConfig.valid) {
+      throw new Error(`[IdentityLockService Guard Error] ${storageConfig.error}`);
+    }
+    const bucket = storageConfig.effectiveBucket;
     const masterImages: MasterImageSpec[] = [];
 
     for (let i = 0; i < images.length; i++) {

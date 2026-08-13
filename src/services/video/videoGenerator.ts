@@ -645,38 +645,92 @@ export class VideoGenerator {
 
     const uriBucket = pathWithoutGs.substring(0, firstSlash);
     const rawObjectPath = pathWithoutGs.substring(firstSlash + 1);
-    const encodedObjectPath = encodeURIComponent(rawObjectPath);
+
+    // Extract taskId if present in path (e.g. veo/task_123/video.mp4)
+    const taskMatch = rawObjectPath.match(/veo\/([^\/]+)/);
+    const taskId = taskMatch ? taskMatch[1] : '';
+
+    const candidatePaths = Array.from(new Set([
+      rawObjectPath,
+      ...(taskId ? [
+        `veo/${taskId}/video.mp4`,
+        `veo/${taskId}/sample_0.mp4`,
+        `veo/${taskId}/output_0.mp4`,
+        `veo/${taskId}/video_0.mp4`,
+        `veo/${taskId}/0.mp4`,
+      ] : []),
+    ]));
 
     const activeBucket = resolveVeoOutputBucket();
     const candidateBuckets = Array.from(
       new Set([uriBucket, activeBucket, EXPECTED_PRODUCTION_VEO_BUCKET].filter(Boolean))
     );
 
-    let resolvedToken = accessToken;
-    let resolvedApiKey = apiKey;
-    if (!resolvedToken) {
-      try {
-        const { CredentialService } = await import('../google/credentialService');
-        const { VertexClient } = await import('../google/vertexClient');
-        const sessions = CredentialService.listSessions();
-        const vSession = sessions.find((s: any) => s.type === 'vertex_ai');
-        if (vSession) {
-          resolvedToken = await VertexClient.getAccessToken(vSession).catch(() => undefined);
-          if (!resolvedApiKey) resolvedApiKey = vSession.apiKey;
-        }
-      } catch {}
-    }
-    if (!resolvedApiKey) {
-      resolvedApiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
-    }
+    // Gather all candidate tokens
+    const tokensToTry: string[] = [];
+    if (accessToken) tokensToTry.push(accessToken);
 
-    const candidateUrls: string[] = [];
+    try {
+      const { CredentialService } = await import('../google/credentialService');
+      const { VertexClient } = await import('../google/vertexClient');
+      const sessions = CredentialService.listSessions();
+      for (const s of sessions) {
+        if (s.type === 'vertex_ai') {
+          const t = await VertexClient.getAccessToken(s).catch(() => undefined);
+          if (t && !tokensToTry.includes(t)) {
+            tokensToTry.push(t);
+          }
+        }
+      }
+    } catch {}
+
+    try {
+      const { GoogleAuth } = await import('google-auth-library');
+      const auth = new GoogleAuth({
+        scopes: [
+          'https://www.googleapis.com/auth/cloud-platform',
+          'https://www.googleapis.com/auth/devstorage.full_control',
+          'https://www.googleapis.com/auth/devstorage.read_only',
+        ],
+      });
+      const client = await auth.getClient();
+      const tRes = await client.getAccessToken();
+      const adcToken = typeof tRes === 'string' ? tRes : tRes?.token;
+      if (adcToken && !tokensToTry.includes(adcToken)) {
+        tokensToTry.push(adcToken);
+      }
+    } catch {}
+
+    let resolvedApiKey = apiKey || process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
+
+    const candidateUrls: { url: string; token?: string }[] = [];
+
     for (const b of candidateBuckets) {
-      candidateUrls.push(
-        `https://storage.googleapis.com/storage/v1/b/${b}/o/${encodedObjectPath}?alt=media`,
-        `https://storage.googleapis.com/download/storage/v1/b/${b}/o/${encodedObjectPath}?alt=media`,
-        `https://storage.googleapis.com/${b}/${rawObjectPath}`
-      );
+      for (const objPath of candidatePaths) {
+        const encodedObjectPath = encodeURIComponent(objPath);
+        const baseUrl1 = `https://storage.googleapis.com/storage/v1/b/${b}/o/${encodedObjectPath}?alt=media`;
+        const baseUrl2 = `https://storage.googleapis.com/download/storage/v1/b/${b}/o/${encodedObjectPath}?alt=media`;
+        const baseUrl3 = `https://storage.googleapis.com/${b}/${objPath}`;
+
+        for (const t of tokensToTry) {
+          candidateUrls.push(
+            { url: baseUrl1, token: t },
+            { url: baseUrl2, token: t },
+            { url: baseUrl3, token: t }
+          );
+        }
+        if (resolvedApiKey) {
+          candidateUrls.push(
+            { url: `${baseUrl1}&key=${resolvedApiKey}` },
+            { url: `${baseUrl2}&key=${resolvedApiKey}` },
+            { url: `${baseUrl3}?key=${resolvedApiKey}` }
+          );
+        }
+        candidateUrls.push(
+          { url: baseUrl1 },
+          { url: baseUrl3 }
+        );
+      }
     }
 
     let lastError = '';
@@ -684,17 +738,14 @@ export class VideoGenerator {
       if (attempt > 0) {
         await new Promise((res) => setTimeout(res, backoffDelays[attempt - 1]));
       }
-      for (const rawUrl of candidateUrls) {
+      for (const item of candidateUrls) {
         try {
-          let url = rawUrl;
-          if (resolvedApiKey && !url.includes('key=')) {
-            url += (url.includes('?') ? '&' : '?') + `key=${resolvedApiKey}`;
-          }
           const headers: Record<string, string> = {};
-          if (resolvedToken) headers['Authorization'] = `Bearer ${resolvedToken}`;
-          if (resolvedApiKey) headers['x-goog-api-key'] = resolvedApiKey;
+          if (item.token) {
+            headers['Authorization'] = `Bearer ${item.token}`;
+          }
 
-          const res = await fetch(url, { headers });
+          const res = await fetch(item.url, { headers });
           if (res.ok) {
             const buf = Buffer.from(await res.arrayBuffer());
             if (VideoGenerator.isMp4Valid(buf)) {
@@ -703,15 +754,15 @@ export class VideoGenerator {
               lastError = `返回的数据未包含 MP4 标识 (${buf.length} bytes)`;
             }
           } else {
-            lastError = `HTTP ${res.status} (${url})`;
+            lastError = `HTTP ${res.status}`;
           }
         } catch (e) {
-          lastError = String(e);
+          lastError = redactSecrets(String(e));
         }
       }
     }
 
-    throw new Error(`从 GCS 下载视频多路径拉取均失败 (${videoUri}): ${lastError}`);
+    throw new Error(`从 GCS 下载视频多路径拉取均失败 (${videoUri}): ${redactSecrets(lastError)}`);
   }
 
   static async pollVeoOperation(
