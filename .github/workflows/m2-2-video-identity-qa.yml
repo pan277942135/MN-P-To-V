@@ -10,7 +10,7 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   video-identity-qa:
@@ -21,6 +21,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Apply M2-2 production QA integration
+        run: python scripts/apply-m2-2-production-qa-integration.py
+
+      - name: Source contract gate
+        run: |
+          ! grep -R "身份自动质检：未执行" server.ts src/pages/StudioPage.tsx
+          ! grep -R "identityScore: 100" src/pages/StudioPage.tsx src/services/tasks/taskOrchestrator.ts
+          ! grep -R "dummyFrame\|100 \* 1024" src/services/video/videoInspector.ts
+          ! grep -R "completeWithPersistedArtifact" server.ts
+          grep -q "persistArtifactForQa" server.ts
+          grep -q "completeAfterQa" server.ts
+          grep -q "DurableVideoIdentityQaService" server.ts
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -41,3 +62,16 @@ jobs:
 
       - name: Diff integrity
         run: git diff --check
+
+      - name: Commit production integration
+        if: github.event_name == 'push'
+        run: |
+          if git diff --quiet; then
+            echo 'Production QA integration already applied.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add server.ts src/server/services/taskStateMachineService.ts src/types/index.ts src/pages/StudioPage.tsx
+          git commit -m 'feat(m2-2): enforce durable video QA before completed'
+          git push origin HEAD:${GITHUB_REF_NAME}
