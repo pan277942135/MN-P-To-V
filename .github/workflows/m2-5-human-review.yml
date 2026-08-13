@@ -10,7 +10,7 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   human-review:
@@ -21,40 +21,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
-          fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Apply M2-5 review integration
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          p = Path('scripts/apply-m2-5-human-review.py')
-          s = p.read_text()
-          s = s.replace(
-              "raise SystemExit('Studio polling manual-review anchor missing')",
-              "print('Studio polling branch handled by current-flow follow-up')"
-          )
-          p.write_text(s)
-          PY
-          python scripts/apply-m2-5-human-review.py
-          python scripts/apply-m2-5-studio-polling.py
 
       - name: Human-review contract gate
         run: |
+          test ! -e scripts/apply-m2-5-human-review.py
+          test ! -e scripts/apply-m2-5-studio-polling.py
           grep -q "app.post('/api/videos/review/:taskId'" server.ts
           grep -q "resolveHumanReview" src/server/services/taskStateMachineService.ts
           grep -q "humanReviewValid" src/server/services/taskStateMachineService.ts
           grep -q "HUMAN_REVIEW_NOT_ELIGIBLE" src/server/services/taskStateMachineService.ts
+          grep -q "HUMAN_REVIEW_DECISION_CONFLICT" src/server/services/taskStateMachineService.ts
           grep -q "statusData.status === 'qa_pending' && statusData.requiresManualApproval" src/pages/StudioPage.tsx
           grep -q "handleVideoHumanReview('accepted')" src/pages/StudioPage.tsx
           grep -q "handleVideoHumanReview('rejected')" src/pages/StudioPage.tsx
           grep -q "submission_outcome_unknown" src/pages/StudioPage.tsx
+          grep -q "该状态不能通过“接受视频”解除" src/pages/StudioPage.tsx
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -75,16 +56,3 @@ jobs:
 
       - name: Diff integrity
         run: git diff --check
-
-      - name: Commit human review integration
-        if: github.event_name == 'push'
-        run: |
-          if git diff --quiet; then
-            echo 'Human review integration already applied.'
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add server.ts src/types/index.ts src/server/services/taskStateMachineService.ts src/pages/StudioPage.tsx
-          git commit -m 'feat(m2-5): wire durable human review workbench'
-          git push origin HEAD:${GITHUB_REF_NAME}
