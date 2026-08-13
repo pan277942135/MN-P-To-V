@@ -33,7 +33,7 @@ jobs:
           if grep -q "P0-5: Provider submission is part of the request durability boundary" server.ts; then
             echo "P0-5 server hardening already applied."
           else
-            node scripts/apply-p0-5-server-hardening.mjs
+            python3 scripts/apply-p0-5-server-hardening.py
           fi
 
       - name: Diff check
