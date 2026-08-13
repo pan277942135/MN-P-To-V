@@ -4,14 +4,12 @@ on:
   push:
     branches:
       - p0-5-real-e2e-hardening
-  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   harden-and-verify:
-    if: ${{ github.actor != 'github-actions[bot]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -30,7 +28,13 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Apply deterministic P0-5 server hardening
-        run: node scripts/apply-p0-5-server-hardening.mjs
+        shell: bash
+        run: |
+          if grep -q "P0-5: Provider submission is part of the request durability boundary" server.ts; then
+            echo "P0-5 server hardening already applied."
+          else
+            node scripts/apply-p0-5-server-hardening.mjs
+          fi
 
       - name: Diff check
         run: git diff --check
