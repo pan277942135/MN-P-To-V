@@ -63,6 +63,10 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add server.ts src/__tests__/firestoreTaskRepository.test.ts src/__tests__/apiVideoStartRouteIntegration.test.ts
+          git add server.ts \
+            src/__tests__/firestoreTaskRepository.test.ts \
+            src/__tests__/apiVideoStartRouteIntegration.test.ts \
+            src/__tests__/p0DurableStateMachine.test.ts \
+            src/__tests__/p0StorageAuthorityRegression.test.ts
           git commit -m "ci(p0-5): apply verified hardening"
           git push origin HEAD:p0-5-real-e2e-hardening
