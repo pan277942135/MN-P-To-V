@@ -1,6 +1,7 @@
 name: M2-1 Identity Lock
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - m2-1-first-frame-identity-lock
