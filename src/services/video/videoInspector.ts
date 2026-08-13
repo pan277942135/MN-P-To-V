@@ -36,9 +36,8 @@ export interface VideoProbeMetadata {
 
 export class VideoInspector {
   static verifyMp4Container(buffer: Buffer): boolean {
-    if (!buffer || buffer.length < 100) return false;
-
-    // Check MP4 magic byte signature 'ftyp' at offset 4.
+    // Offset 4..7 must be readable for the ISO BMFF `ftyp` box identifier.
+    if (!buffer || buffer.length < 8) return false;
     return buffer.toString('ascii', 4, 8) === 'ftyp';
   }
 
@@ -149,10 +148,9 @@ export class VideoInspector {
       issueReason,
     });
 
-    if (sizeBytes < 100 * 1024) {
-      return emptyResult('视频文件小于 100KB，属于非完整 MP4 视频');
-    }
-
+    // Do not use an arbitrary byte-size threshold as a validity proxy. A real MP4 is
+    // accepted or rejected by container signature, authoritative stream metadata and
+    // successful decoding of its actual sampled frames.
     if (!this.verifyMp4Container(videoBuffer)) {
       return emptyResult('非合法 MP4 容器标识 (ftyp)');
     }
