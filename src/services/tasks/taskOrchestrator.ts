@@ -9,6 +9,7 @@ import { VideoGenerator, type VideoStartResult } from '../video/videoGenerator';
 import { VideoInspector } from '../video/videoInspector';
 import { VideoIdentityQaService } from '../qa/videoIdentityQaService';
 import { VideoFailureDiagnosisService } from '../qa/videoFailureDiagnosisService';
+import { VideoRetryPolicyService } from '../qa/videoRetryPolicyService';
 import { CredentialService } from '../google/credentialService';
 import { GeminiClientFactory } from '../google/geminiClient';
 import { ModelRouter } from '../google/modelRouter';
@@ -381,6 +382,15 @@ export class TaskOrchestrator {
         diagnostics: startResult.diagnostics,
       };
 
+      const retryDecision = VideoRetryPolicyService.decide({
+        taskId: task.id,
+        qaReport: videoQaReport,
+        diagnosis: failureDiagnosis,
+        providerAttempt: videoAttempts,
+        qaAttempt: 1,
+        maxProviderAttempts: maxVideoAttempts,
+      });
+
       const attemptRecord: AttemptRecord = {
         attemptIndex: task.attempts.length + 1,
         actionType: videoAttempts === 1 ? 'video_start' : 'video_repair',
@@ -389,8 +399,8 @@ export class TaskOrchestrator {
         endTime: Date.now(),
         success: videoQaReport.pass,
         qaScore: videoQaReport.averageIdentityScore,
-        triggeredRetry: !videoQaReport.pass && videoAttempts < maxVideoAttempts,
-        notes: `[${videoQaReport.gateStatus}][${failureDiagnosis?.primaryCode || 'NO_FAILURE_DIAGNOSIS'}] ${videoQaReport.summary}`,
+        triggeredRetry: retryDecision.action === 'REGENERATE_VIDEO',
+        notes: `[${videoQaReport.gateStatus}][${failureDiagnosis?.primaryCode || 'NO_FAILURE_DIAGNOSIS'}][${retryDecision.action}] ${videoQaReport.summary}`,
       };
       task.attempts.push(attemptRecord);
 
@@ -404,18 +414,19 @@ export class TaskOrchestrator {
       }
 
       directionalRepair =
+        retryDecision.repairPromptAppend ||
         failureDiagnosis?.repairPromptAppend ||
         videoQaReport.repairInstruction ||
         '恢复所有视频帧与 Approved First Frame 和角色母板的一致身份特征';
 
-      if (videoAttempts < maxVideoAttempts) {
-        task.progressStage = `Identity QA ${videoQaReport.gateStatus}，按最差帧问题执行定向重试`;
+      if (retryDecision.action === 'REGENERATE_VIDEO') {
+        task.progressStage = `自动重试策略允许定向重生成：${retryDecision.reasonCode}`;
         task.updatedAt = Date.now();
         await onTaskUpdated(task);
         continue;
       }
 
-      if (videoQaReport.gateStatus === 'review') {
+      if (retryDecision.action === 'MANUAL_REVIEW' || videoQaReport.gateStatus === 'review') {
         task.status = 'completed_with_warning';
         task.progressStage = '视频生成完成，但 Identity QA 需要人工复核';
         task.progressPercent = 100;

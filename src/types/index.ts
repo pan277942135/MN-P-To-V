@@ -241,6 +241,33 @@ export type IdentitySourceMode = 'DIRECT_CHARACTER_IMAGE' | 'IDENTITY_REBUILD_RE
 export type FirstFrameIdentityQaStatus = 'pass' | 'fail' | 'review';
 export type VideoIdentityQaStatus = 'not_run' | 'pass' | 'review' | 'fail';
 
+export type RetrySubmissionState = 'none' | 'reserved' | 'submitted' | 'outcome_unknown';
+
+export interface VideoRetryHistoryRecord {
+  sequence: number;
+  decidedAt: number;
+  action: string;
+  reasonCode: string;
+  diagnosisCode?: string;
+  providerAttempt: number;
+  qaAttempt: number;
+  idempotencyKey?: string;
+  state: 'reserved' | 'submitted' | 'completed' | 'failed' | 'manual_review' | 'qa_retry';
+  operationName?: string;
+}
+
+export interface VideoArtifactHistoryRecord {
+  providerAttempt: number;
+  outputBucket: string;
+  outputObjectPath: string;
+  videoUri: string;
+  sizeBytes?: number;
+  persistedAt?: number;
+  qaStatus?: VideoIdentityQaStatus;
+  diagnosisCode?: string;
+  archivedAt: number;
+}
+
 export interface MasterImageSpec {
   id: string;
   type: 'front_hd' | 'three_quarter' | 'full_body' | 'other';
@@ -320,6 +347,14 @@ export interface ServerVideoTaskRecord {
   artifactPersistedAt?: number;
   sceneMode?: string;
   retryCount?: number;
+  providerAttempt?: number;
+  qaAttempt?: number;
+  automaticRetryPlan?: any;
+  providerRetryIdempotencyKey?: string;
+  retrySubmissionState?: RetrySubmissionState;
+  retryReservedAt?: number;
+  retryHistory?: VideoRetryHistoryRecord[];
+  artifactHistory?: VideoArtifactHistoryRecord[];
   attempts?: AttemptRecord[];
   diagnostics?: any;
   qaReport?: any;

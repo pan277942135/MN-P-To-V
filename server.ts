@@ -15,6 +15,8 @@ import { VideoGenerator } from './src/services/video/videoGenerator';
 import { VideoInspector } from './src/services/video/videoInspector';
 import { DurableVideoIdentityQaService } from './src/server/services/durableVideoIdentityQaService';
 import { VideoFailureDiagnosisService } from './src/services/qa/videoFailureDiagnosisService';
+import { VideoRetryPolicyService } from './src/services/qa/videoRetryPolicyService';
+import { DurableVideoRetryService } from './src/server/services/durableVideoRetryService';
 import { GeminiClientFactory } from './src/services/google/geminiClient';
 import { ModelRouter } from './src/services/google/modelRouter';
 import { PromptCompiler } from './src/services/prompt/PromptCompiler';
@@ -158,11 +160,25 @@ async function settlePersistedVideoThroughQa(params: {
       session,
     });
   } catch (qaErr: any) {
+    const currentQaAttempt = qaPendingTask.qaAttempt || 1;
+    const canReQa = currentQaAttempt < 2;
+    const retryHistoryForQaError = [...(qaPendingTask.retryHistory || [])];
+    if ((qaPendingTask.providerAttempt || 1) > 1) {
+      for (let i = retryHistoryForQaError.length - 1; i >= 0; i--) {
+        if (retryHistoryForQaError[i].providerAttempt === (qaPendingTask.providerAttempt || 1)) {
+          retryHistoryForQaError[i] = {
+            ...retryHistoryForQaError[i],
+            state: canReQa ? 'qa_retry' : 'manual_review',
+          };
+          break;
+        }
+      }
+    }
     const qaError = {
       code: 'VIDEO_IDENTITY_QA_EXECUTION_FAILED',
       message: qaErr?.message || String(qaErr),
       stage: 'qa_video',
-      retryable: true,
+      retryable: canReQa,
       timestamp: Date.now(),
     };
     return await taskStateMachineService.transitionTask({
@@ -171,26 +187,72 @@ async function settlePersistedVideoThroughQa(params: {
       patch: {
         structuredError: qaError,
         error: qaError.message,
-        identityQaStatus: 'not_run',
+        identityQaStatus: canReQa ? 'not_run' : 'review',
+        qaAttempt: canReQa ? currentQaAttempt + 1 : currentQaAttempt,
+        retryHistory: retryHistoryForQaError,
+        automaticRetryPlan: {
+          version: 'm2-4-v1',
+          action: canReQa ? 'REQA_SAME_ARTIFACT' : 'MANUAL_REVIEW',
+          reasonCode: canReQa ? 'QA_EXECUTION_FAILED_REQA' : 'QA_EXECUTION_RETRY_EXHAUSTED',
+          automatic: canReQa,
+          consumesProviderAttempt: false,
+          nextProviderAttempt: qaPendingTask.providerAttempt || 1,
+          nextQaAttempt: canReQa ? currentQaAttempt + 1 : currentQaAttempt,
+          preserveCurrentArtifact: true,
+          requiresHumanReview: !canReQa,
+        },
       },
     });
   }
 
   const failureDiagnosis = VideoFailureDiagnosisService.diagnose(qaReport);
+  const retryDecision = VideoRetryPolicyService.decide({
+    taskId,
+    qaReport,
+    diagnosis: failureDiagnosis,
+    providerAttempt: qaPendingTask.providerAttempt || 1,
+    qaAttempt: qaPendingTask.qaAttempt || 1,
+    artifactObjectPath: artifactMeta.outputObjectPath,
+  });
   const diagnosedQaReport = failureDiagnosis
-    ? { ...qaReport, failureDiagnosis }
-    : qaReport;
+    ? { ...qaReport, failureDiagnosis, retryDecision }
+    : { ...qaReport, retryDecision };
+
+  const retryHistoryForOutcome = [...(qaPendingTask.retryHistory || [])];
+  if ((qaPendingTask.providerAttempt || 1) > 1) {
+    const retryOutcomeState =
+      qaReport.gateStatus === 'pass'
+        ? 'completed'
+        : retryDecision.action === 'REQA_SAME_ARTIFACT'
+          ? 'qa_retry'
+          : (qaReport.gateStatus === 'review' || retryDecision.action === 'MANUAL_REVIEW')
+            ? 'manual_review'
+            : 'failed';
+    for (let i = retryHistoryForOutcome.length - 1; i >= 0; i--) {
+      if (retryHistoryForOutcome[i].providerAttempt === (qaPendingTask.providerAttempt || 1)) {
+        retryHistoryForOutcome[i] = {
+          ...retryHistoryForOutcome[i],
+          state: retryOutcomeState,
+        };
+        break;
+      }
+    }
+  }
 
   if (qaReport.gateStatus === 'pass') {
     return await taskStateMachineService.completeAfterQa({
       taskId,
       qaReport: diagnosedQaReport,
-      patch,
+      patch: {
+        ...patch,
+        retryHistory: retryHistoryForOutcome,
+      },
     });
   }
 
   const commonQaPatch: Partial<ServerVideoTaskRecord> = {
     ...patch,
+    retryHistory: retryHistoryForOutcome,
     qaReport: diagnosedQaReport,
     identityQaReport: diagnosedQaReport,
     identityQaStatus: qaReport.gateStatus,
@@ -199,12 +261,92 @@ async function settlePersistedVideoThroughQa(params: {
     worstFrameTimestamp: qaReport.worstFrameTimestamp,
   };
 
-  if (qaReport.gateStatus === 'review') {
+  if (retryDecision.action === 'MANUAL_REVIEW' || qaReport.gateStatus === 'review') {
     return await taskStateMachineService.transitionTask({
       taskId,
       toStatus: 'qa_pending',
-      patch: commonQaPatch,
+      patch: {
+        ...commonQaPatch,
+        automaticRetryPlan: retryDecision,
+      },
     });
+  }
+
+  if (retryDecision.action === 'REQA_SAME_ARTIFACT') {
+    return await taskStateMachineService.transitionTask({
+      taskId,
+      toStatus: 'qa_pending',
+      patch: {
+        ...commonQaPatch,
+        identityQaStatus: 'not_run',
+        qaAttempt: retryDecision.nextQaAttempt,
+        automaticRetryPlan: retryDecision,
+      },
+    });
+  }
+
+  if (retryDecision.action === 'REGENERATE_VIDEO' && retryDecision.idempotencyKey) {
+    const reservation = await taskStateMachineService.reserveAutomaticProviderRetry({
+      taskId,
+      decision: retryDecision,
+      diagnosisCode: failureDiagnosis?.primaryCode,
+    });
+    if (!reservation.reserved) return reservation.task;
+
+    try {
+      const retryStart = await DurableVideoRetryService.launch({
+        task: reservation.task,
+        decision: retryDecision,
+        session,
+        ai,
+      });
+
+      if (retryStart.operationName) {
+        return await taskStateMachineService.markAutomaticRetrySubmitted({
+          taskId,
+          idempotencyKey: retryDecision.idempotencyKey,
+          operationName: retryStart.operationName,
+          diagnostics: retryStart.diagnostics,
+        });
+      }
+
+      if (retryStart.videoBuffer) {
+        const attemptTaskKey = DurableVideoRetryService.getAttemptTaskKey(
+          taskId,
+          retryDecision.nextProviderAttempt
+        );
+        const retryArtifactMeta = await gcsArtifactStore.uploadVideoArtifact({
+          taskId: attemptTaskKey,
+          videoBuffer: retryStart.videoBuffer,
+          contentType: 'video/mp4',
+        });
+        return await settlePersistedVideoThroughQa({
+          taskId,
+          videoBuffer: retryStart.videoBuffer,
+          artifactMeta: retryArtifactMeta,
+          session,
+          ai,
+          analysisModel,
+          patch: {
+            diagnostics: retryStart.diagnostics,
+            providerAttempt: retryDecision.nextProviderAttempt,
+            retrySubmissionState: 'submitted',
+          },
+        });
+      }
+
+      return await taskStateMachineService.markAutomaticRetryOutcomeUnknown({
+        taskId,
+        idempotencyKey: retryDecision.idempotencyKey,
+        message: 'Automatic provider retry returned neither operationName nor videoBuffer.',
+      });
+    } catch (retryErr: any) {
+      return await taskStateMachineService.markAutomaticRetryOutcomeUnknown({
+        taskId,
+        idempotencyKey: retryDecision.idempotencyKey,
+        message: `Automatic provider retry submission outcome is unknown: ${retryErr?.message || retryErr}`,
+      });
+    }
   }
 
   return await taskStateMachineService.transitionTask({
@@ -212,6 +354,7 @@ async function settlePersistedVideoThroughQa(params: {
     toStatus: 'failed',
     patch: {
       ...commonQaPatch,
+      automaticRetryPlan: retryDecision,
       failureReason: 'artifact_invalid',
       retryMode: failureDiagnosis?.retryRecommended === false ? 'NO_RETRY' : 'SAFE_TO_REGENERATE',
       error: `视频身份一致性质检失败 [${failureDiagnosis?.primaryCode || 'UNKNOWN_VIDEO_QA_FAILURE'}]: ${qaReport.summary}`,
@@ -1345,6 +1488,12 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         identityQaScore: gateResult.identityQaScore,
         identityCriticalIssues: gateResult.identityCriticalIssues,
         identityQaStatus: 'not_run',
+        providerAttempt: 1,
+        qaAttempt: 1,
+        retryCount: 0,
+        retrySubmissionState: 'none',
+        retryHistory: [],
+        artifactHistory: [],
         qaApprovedFirstFrameObjectPath,
         qaApprovedFirstFrameMimeType: approvedFirstFrameMime,
         qaMasterImageObjectPaths,
@@ -2283,7 +2432,10 @@ ${cleanPrompt}`
       serverVideoTaskStore.set(taskId, record);
 
       if (record.status === 'qa_pending') {
-        if (record.identityQaStatus === 'review') {
+        if (
+          record.identityQaStatus === 'review' ||
+          record.automaticRetryPlan?.action === 'MANUAL_REVIEW'
+        ) {
           return res.json({
             status: 'qa_pending',
             videoDataUrl: record.videoDataUrl || `/api/videos/stream/${taskId}`,
@@ -2292,6 +2444,8 @@ ${cleanPrompt}`
             qaReport: record.qaReport,
             identityQaStatus: 'review',
             requiresManualApproval: true,
+            automaticRetryPlan: record.automaticRetryPlan,
+            retryHistory: record.retryHistory,
             artifactPersisted: true,
           });
         }
@@ -2342,6 +2496,8 @@ ${cleanPrompt}`
           requiresManualApproval: settled.status === 'qa_pending' && settled.identityQaStatus === 'review',
           artifactPersisted: settled.artifactPersisted,
           diagnostics: settled.diagnostics,
+          automaticRetryPlan: settled.automaticRetryPlan,
+          retryHistory: settled.retryHistory,
         });
       }
 
@@ -2372,6 +2528,45 @@ ${cleanPrompt}`
             structuredError: errObj,
           });
         }
+      }
+
+      if (
+        record.status === 'generating' &&
+        record.retrySubmissionState === 'reserved' &&
+        !record.operationName
+      ) {
+        const reservedAgeMs = Date.now() - (record.retryReservedAt || record.updatedAt || Date.now());
+        if (reservedAgeMs > 180000) {
+          const unknown = await taskStateMachineService.markAutomaticRetryOutcomeUnknown({
+            taskId,
+            idempotencyKey: record.providerRetryIdempotencyKey || 'missing',
+            message: 'AUTOMATIC_RETRY_RESERVATION_STALE: retry reservation outlived the provider submission window; refusing automatic resubmission.',
+          });
+          return res.json({
+            status: unknown.status,
+            error: unknown.error,
+            structuredError: unknown.structuredError,
+            automaticRetryPlan: unknown.automaticRetryPlan,
+          });
+        }
+        return res.json({
+          status: 'submitting',
+          progressStage: '正在提交自动定向重试；已持久化 retry reservation，禁止重复提单',
+          providerAttempt: record.providerAttempt,
+          automaticRetryPlan: record.automaticRetryPlan,
+        });
+      }
+
+      if (record.status === 'submission_outcome_unknown') {
+        return res.json({
+          status: 'submission_outcome_unknown',
+          error: record.error,
+          structuredError: record.structuredError,
+          providerAttempt: record.providerAttempt,
+          automaticRetryPlan: record.automaticRetryPlan,
+          retryHistory: record.retryHistory,
+          requiresManualReview: true,
+        });
       }
 
       if (record.status === 'submitting' || !record.operationName) {
@@ -2411,14 +2606,18 @@ ${cleanPrompt}`
           if (reFetchBuf && reFetchBuf.length > 0) {
             let artifactMeta;
             try {
-              artifactMeta = await gcsArtifactStore.uploadVideoArtifact({
+              const artifactTaskKey = DurableVideoRetryService.getAttemptTaskKey(
                 taskId,
+                record.providerAttempt || 1
+              );
+              artifactMeta = await gcsArtifactStore.uploadVideoArtifact({
+                taskId: artifactTaskKey,
                 videoBuffer: reFetchBuf,
                 contentType: 'video/mp4',
               });
             } catch (uploadErr) {
               artifactMeta = await gcsArtifactStore.migrateArtifactToGcs({
-                taskId,
+                taskId: DurableVideoRetryService.getAttemptTaskKey(taskId, record.providerAttempt || 1),
                 videoUri: record.videoUri,
                 accessToken,
                 apiKey,
@@ -2737,7 +2936,7 @@ ${cleanPrompt}`
       let artifactMeta;
       try {
         artifactMeta = await gcsArtifactStore.uploadVideoArtifact({
-          taskId,
+          taskId: DurableVideoRetryService.getAttemptTaskKey(taskId, record.providerAttempt || 1),
           videoBuffer: videoBuf,
           contentType: 'video/mp4',
         });
