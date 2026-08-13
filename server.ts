@@ -934,6 +934,51 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         });
       }
 
+      const requestedTaskId = req.body.taskId;
+
+      // P0-5: Firestore is the idempotency authority across Cloud Run instances.
+      // Always check the durable task before consulting the process-local cache.
+      if (requestedTaskId && firestoreTaskRepository.isAvailable()) {
+        const durableExisting = await firestoreTaskRepository.getTask(requestedTaskId);
+        if (durableExisting) {
+          serverVideoTaskStore.set(requestedTaskId, durableExisting);
+          if (['submitting', 'submitted', 'polling', 'polling_timeout', 'generation_succeeded', 'artifact_persisting', 'artifact_persisted', 'qa_pending'].includes(durableExisting.status as string)) {
+            return res.json({
+              accepted: true,
+              serverPersisted: true,
+              taskId: durableExisting.taskId,
+              status: durableExisting.status,
+              submissionState: 'submitted',
+              operationNamePresent: Boolean(durableExisting.operationName),
+              isIdempotentReuse: true,
+              createdAt: durableExisting.createdAt,
+              updatedAt: durableExisting.updatedAt,
+              engine: durableExisting.modelId,
+              operationName: durableExisting.operationName,
+            });
+          }
+          if (durableExisting.status === 'completed' && durableExisting.artifactPersisted) {
+            return res.json({
+              accepted: true,
+              serverPersisted: true,
+              taskId: durableExisting.taskId,
+              status: 'completed',
+              submissionState: 'submitted',
+              operationNamePresent: Boolean(durableExisting.operationName),
+              isIdempotentReuse: true,
+              createdAt: durableExisting.createdAt,
+              updatedAt: durableExisting.updatedAt,
+              engine: durableExisting.modelId,
+              videoDataUrl: durableExisting.videoDataUrl || `/api/videos/stream/${durableExisting.taskId}`,
+              sizeBytes: durableExisting.sizeBytes,
+              durationSeconds: durableExisting.durationSeconds,
+              qaReport: durableExisting.qaReport,
+              diagnostics: durableExisting.diagnostics,
+            });
+          }
+        }
+      }
+
       const files = req.files as { [fieldname: string]: Express.Multer.File[] };
       const ffFile = files['firstFrame']?.[0];
       const sceneFile = files['sceneImage']?.[0];
@@ -1118,50 +1163,7 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         resolution,
       ].join('_')).digest('hex');
 
-      const requestedTaskId = req.body.taskId;
 
-      // P0-5: Firestore is the idempotency authority across Cloud Run instances.
-      // Always check the durable task before consulting the process-local cache.
-      if (requestedTaskId && firestoreTaskRepository.isAvailable()) {
-        const durableExisting = await firestoreTaskRepository.getTask(requestedTaskId);
-        if (durableExisting) {
-          serverVideoTaskStore.set(requestedTaskId, durableExisting);
-          if (['submitting', 'submitted', 'polling', 'polling_timeout', 'generation_succeeded', 'artifact_persisting', 'artifact_persisted', 'qa_pending'].includes(durableExisting.status as string)) {
-            return res.json({
-              accepted: true,
-              serverPersisted: true,
-              taskId: durableExisting.taskId,
-              status: durableExisting.status,
-              submissionState: 'submitted',
-              operationNamePresent: Boolean(durableExisting.operationName),
-              isIdempotentReuse: true,
-              createdAt: durableExisting.createdAt,
-              updatedAt: durableExisting.updatedAt,
-              engine: durableExisting.modelId,
-              operationName: durableExisting.operationName,
-            });
-          }
-          if (durableExisting.status === 'completed' && durableExisting.artifactPersisted) {
-            return res.json({
-              accepted: true,
-              serverPersisted: true,
-              taskId: durableExisting.taskId,
-              status: 'completed',
-              submissionState: 'submitted',
-              operationNamePresent: Boolean(durableExisting.operationName),
-              isIdempotentReuse: true,
-              createdAt: durableExisting.createdAt,
-              updatedAt: durableExisting.updatedAt,
-              engine: durableExisting.modelId,
-              videoDataUrl: durableExisting.videoDataUrl || `/api/videos/stream/${durableExisting.taskId}`,
-              sizeBytes: durableExisting.sizeBytes,
-              durationSeconds: durableExisting.durationSeconds,
-              qaReport: durableExisting.qaReport,
-              diagnostics: durableExisting.diagnostics,
-            });
-          }
-        }
-      }
 
       const taskId = req.body.taskId || `vtask_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const now = Date.now();
