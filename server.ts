@@ -2670,41 +2670,77 @@ ${cleanPrompt}`
     const { taskId } = req.params;
     console.log(`[Video Recover] Requesting artifact recovery for task ${taskId}...`);
     try {
-      let rec = firestoreTaskRepository.isAvailable() ? await firestoreTaskRepository.getTask(taskId) : null;
-      if (!rec) {
-        rec = serverVideoTaskStore.get(taskId) || null;
-      }
-      if (!rec) {
-        return res.status(404).json({ error: '任务不存在，无法恢复视频产物' });
+      if (!firestoreTaskRepository.isAvailable()) {
+        return res.status(503).json({
+          success: false,
+          storageAuthority: 'unavailable',
+          error: 'Firestore unavailable; artifact recovery cannot proceed safely.',
+        });
       }
 
-      // 1. If outputBucket and outputObjectPath already exist, check GCS existence
+      const rec = await firestoreTaskRepository.getTask(taskId);
+      if (!rec) {
+        return res.status(404).json({ error: '任务不存在，无法恢复视频产物', storageAuthority: 'firestore' });
+      }
+
+      // A completed task is allowed to stream only its authoritative owned GCS artifact.
+      // If that object vanished, do not silently repair a ghost-completed task from an
+      // external URI or stale process state; surface the integrity failure explicitly.
+      if (rec.status === 'completed') {
+        if (!rec.outputBucket || !rec.outputObjectPath || rec.artifactPersisted !== true) {
+          return res.status(409).json({
+            error: 'completed_invariant_violation',
+            storageAuthority: 'firestore',
+          });
+        }
+        const existing = await gcsArtifactStore.checkArtifactExists(rec.outputBucket, rec.outputObjectPath);
+        if (!existing.exists || (existing.sizeBytes || 0) <= 0) {
+          return res.status(404).json({
+            error: 'artifact_not_found',
+            storageAuthority: 'gcs',
+            outputBucket: rec.outputBucket,
+            outputObjectPath: rec.outputObjectPath,
+          });
+        }
+        return res.json({
+          success: true,
+          status: 'completed',
+          message: '视频产物已在 Cloud Storage 中确认就绪',
+          videoDataUrl: `/api/videos/stream/${taskId}`,
+          storageAuthority: 'gcs',
+        });
+      }
+
+      // 1. Reconcile an already-owned GCS object without resubmitting the provider.
       if (rec.outputBucket && rec.outputObjectPath) {
-        const check = await gcsArtifactStore.checkArtifactExists(rec.outputBucket, rec.outputObjectPath);
-        if (check.exists) {
-          const updates: Partial<ServerVideoTaskRecord> = {
-            status: 'completed',
-            artifactPersisted: true,
+        const existing = await gcsArtifactStore.checkArtifactExists(rec.outputBucket, rec.outputObjectPath);
+        if (existing.exists && (existing.sizeBytes || rec.sizeBytes || 0) > 0) {
+          const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+            taskId,
+            outputBucket: rec.outputBucket,
+            outputObjectPath: rec.outputObjectPath,
+            videoUri: rec.videoUri || `gs://${rec.outputBucket}/${rec.outputObjectPath}`,
+            sizeBytes: existing.sizeBytes || rec.sizeBytes,
+            contentType: rec.contentType || 'video/mp4',
             artifactPersistedAt: rec.artifactPersistedAt || Date.now(),
-            updatedAt: Date.now(),
-          };
-          await firestoreTaskRepository.updateTask(taskId, updates).catch(() => {});
-          Object.assign(rec, updates);
-          serverVideoTaskStore.set(taskId, rec);
+          });
+          serverVideoTaskStore.set(taskId, completedTask);
           return res.json({
             success: true,
             status: 'completed',
-            message: '视频产物已在 Cloud Storage 中确认就绪',
+            message: '已根据现有 Cloud Storage 产物完成任务状态对账',
             videoDataUrl: `/api/videos/stream/${taskId}`,
+            storageAuthority: 'gcs',
           });
         }
       }
 
-      // 2. If videoUri exists, migrate to GCS
-      if (rec.videoUri) {
+      // 2. Migrate a provider URI into owned GCS. CredentialService.getSession can
+      // reconstruct an ADC-backed Vertex session after a Cloud Run process restart.
+      if (rec.videoUri && !rec.videoUri.startsWith('gs://')) {
+        const session = CredentialService.getSession(rec.connectionId) || CredentialService.getSession();
         let accessToken: string | undefined;
-        const session = rec.connectionId ? CredentialService.getSession(rec.connectionId) : undefined;
-        if (session && session.type === 'vertex_ai') {
+        if (session?.type === 'vertex_ai') {
           accessToken = await VertexClient.getAccessToken(session);
         }
         const apiKey = session?.apiKey || process.env.GEMINI_API_KEY;
@@ -2714,80 +2750,85 @@ ${cleanPrompt}`
           accessToken,
           apiKey,
         });
-
-        const updates: Partial<ServerVideoTaskRecord> = {
-          status: 'completed',
+        const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+          taskId,
           outputBucket: artifactMeta.outputBucket,
           outputObjectPath: artifactMeta.outputObjectPath,
           videoUri: artifactMeta.videoUri,
           sizeBytes: artifactMeta.sizeBytes,
           contentType: artifactMeta.contentType,
-          artifactPersisted: true,
           artifactPersistedAt: artifactMeta.artifactPersistedAt,
-          updatedAt: Date.now(),
-        };
-        await firestoreTaskRepository.updateTask(taskId, updates).catch(() => {});
-        Object.assign(rec, updates);
-        serverVideoTaskStore.set(taskId, rec);
-
+        });
+        serverVideoTaskStore.set(taskId, completedTask);
         return res.json({
           success: true,
           status: 'completed',
-          message: '已成功从旧版云端 Uri 迁移视频产物至 Cloud Storage',
+          message: '已成功从 Provider Uri 迁移视频产物至 Cloud Storage',
           videoDataUrl: `/api/videos/stream/${taskId}`,
+          storageAuthority: 'gcs',
         });
       }
 
-      // 3. If operationName exists, poll existing operation to recover videoUri -> migrate
+      // 3. Resume a durable provider operation and migrate its result. No new generation
+      // is created here; this only polls the operationName already stored in Firestore.
       if (rec.operationName) {
-        const session = rec.connectionId ? CredentialService.getSession(rec.connectionId) : undefined;
-        if (session) {
-          const pollRes = await VertexClient.pollOperation(session, rec.operationName);
-          if (pollRes.done && pollRes.response) {
-            const extracted = VideoGenerator.extractVideoData(pollRes.response);
-            if (extracted.uri) {
-              const accessToken = await VertexClient.getAccessToken(session);
-              const apiKey = session.apiKey || process.env.GEMINI_API_KEY;
-              const artifactMeta = await gcsArtifactStore.migrateArtifactToGcs({
-                taskId,
-                videoUri: extracted.uri,
-                accessToken,
-                apiKey,
-              });
-
-              const updates: Partial<ServerVideoTaskRecord> = {
-                status: 'completed',
-                outputBucket: artifactMeta.outputBucket,
-                outputObjectPath: artifactMeta.outputObjectPath,
-                videoUri: artifactMeta.videoUri,
-                sizeBytes: artifactMeta.sizeBytes,
-                contentType: artifactMeta.contentType,
-                artifactPersisted: true,
-                artifactPersistedAt: artifactMeta.artifactPersistedAt,
-                updatedAt: Date.now(),
-              };
-              await firestoreTaskRepository.updateTask(taskId, updates).catch(() => {});
-              Object.assign(rec, updates);
-              serverVideoTaskStore.set(taskId, rec);
-
-              return res.json({
-                success: true,
-                status: 'completed',
-                message: '已成功从 Veo Operation 恢复并持久化视频产物至 Cloud Storage',
-                videoDataUrl: `/api/videos/stream/${taskId}`,
-              });
-            }
-          }
+        const session = CredentialService.getSession(rec.connectionId) || CredentialService.getSession();
+        if (!session || session.type !== 'vertex_ai') {
+          return res.status(503).json({
+            error: 'provider_session_unavailable',
+            storageAuthority: 'firestore',
+          });
+        }
+        const pollRes = await VertexClient.pollOperation(session, rec.operationName);
+        if (!pollRes.done) {
+          return res.status(202).json({
+            success: true,
+            status: rec.status,
+            operationName: rec.operationName,
+            message: 'Provider operation is still running; no resubmission was performed.',
+          });
+        }
+        if (pollRes.error) {
+          return res.status(502).json({ error: pollRes.error, status: 'failed' });
+        }
+        const extracted = pollRes.response ? VideoGenerator.extractVideoData(pollRes.response) : {} as any;
+        if (extracted.uri) {
+          const accessToken = await VertexClient.getAccessToken(session);
+          const artifactMeta = await gcsArtifactStore.migrateArtifactToGcs({
+            taskId,
+            videoUri: extracted.uri,
+            accessToken,
+            apiKey: session.apiKey || process.env.GEMINI_API_KEY,
+          });
+          const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+            taskId,
+            outputBucket: artifactMeta.outputBucket,
+            outputObjectPath: artifactMeta.outputObjectPath,
+            videoUri: artifactMeta.videoUri,
+            sizeBytes: artifactMeta.sizeBytes,
+            contentType: artifactMeta.contentType,
+            artifactPersistedAt: artifactMeta.artifactPersistedAt,
+          });
+          serverVideoTaskStore.set(taskId, completedTask);
+          return res.json({
+            success: true,
+            status: 'completed',
+            message: '已从 durable Veo Operation 恢复并持久化视频产物至 Cloud Storage',
+            videoDataUrl: `/api/videos/stream/${taskId}`,
+            storageAuthority: 'gcs',
+          });
         }
       }
 
       return res.status(400).json({
-        error: '当前任务不存在有效的 Cloud Storage 视频产物、videoUri 或 OperationName，无法直接恢复。请点击【重新生成】。',
+        error: '当前任务不存在可恢复的 GCS 产物、Provider URI 或 durable OperationName。',
+        storageAuthority: 'firestore',
       });
     } catch (err: any) {
       console.error(`[Video Recover Error] Task ${taskId}:`, err);
       return res.status(500).json({
         error: `恢复视频产物失败: ${err?.message || err}`,
+        storageAuthority: 'firestore',
       });
     }
   });
@@ -2798,129 +2839,47 @@ ${cleanPrompt}`
       const { taskId } = req.params;
       const isDownload = req.query.download === 'true' || req.query.download === '1';
 
-      let videoBuffer: Buffer | null = ephemeralVideoStore.get(taskId) || null;
-
-      // If buffer missing from ephemeral memory store, fetch directly from Cloud Storage (or migrate)
-      if (!videoBuffer || videoBuffer.length < 1000) {
-        let rec = firestoreTaskRepository.isAvailable() ? await firestoreTaskRepository.getTask(taskId) : null;
-        if (!rec) {
-          rec = serverVideoTaskStore.get(taskId) || null;
-        }
-
-        const queryVideoUri = req.query.videoUri ? String(req.query.videoUri) : undefined;
-        const queryOpName = req.query.operationName ? String(req.query.operationName) : undefined;
-        const candidateVideoUri = queryVideoUri || rec?.videoUri || rec?.outputUri;
-        const candidateOpName = queryOpName || rec?.operationName || (rec as any)?.externalOperationName;
-
-        const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
-        let accessToken: string | undefined;
-        let activeSession: any = undefined;
-        const connId = (req.headers['x-connection-id'] as string) || (req.query.connectionId as string) || rec?.connectionId;
-        if (connId) {
-          activeSession = CredentialService.getSession(connId);
-        }
-        if (!activeSession) {
-          const sessions = CredentialService.listSessions();
-          activeSession = sessions.find((s: any) => s.type === 'vertex_ai') || CredentialService.getSession();
-        }
-        if (activeSession && activeSession.type === 'vertex_ai') {
-          accessToken = await VertexClient.getAccessToken(activeSession).catch(() => undefined);
-        }
-
-        if (!accessToken) {
-          try {
-            const { GoogleAuth } = await import('google-auth-library');
-            const auth = new GoogleAuth({
-              scopes: [
-                'https://www.googleapis.com/auth/cloud-platform',
-                'https://www.googleapis.com/auth/devstorage.read_only',
-              ],
-            });
-            const client = await auth.getClient();
-            const tRes = await client.getAccessToken();
-            accessToken = typeof tRes === 'string' ? tRes : tRes?.token || undefined;
-          } catch {}
-        }
-
-        // A. Primary: Fetch from GCS bucket if outputObjectPath is stored
-        if (rec?.outputBucket && rec?.outputObjectPath) {
-          try {
-            videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(rec.outputBucket, rec.outputObjectPath, { accessToken, apiKey, session: activeSession });
-            console.log(`[Video Stream] Successfully fetched artifact from Cloud Storage gs://${rec.outputBucket}/${rec.outputObjectPath} (${videoBuffer.length} bytes)`);
-          } catch (gcsErr) {
-            console.info(`[Video Stream] Primary GCS fetch skipped for task ${taskId}:`, (gcsErr as any)?.message || gcsErr);
-          }
-        }
-
-        // B. Secondary: Migrate old task with candidateVideoUri
-        if ((!videoBuffer || videoBuffer.length < 1000) && candidateVideoUri) {
-          try {
-            console.log(`[Video Stream] Attempting GCS migration from candidateVideoUri (${candidateVideoUri}) for ${taskId}...`);
-
-            const artifactMeta = await gcsArtifactStore.migrateArtifactToGcs({
-              taskId,
-              videoUri: candidateVideoUri,
-              accessToken,
-              apiKey,
-            });
-
-            videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(artifactMeta.outputBucket, artifactMeta.outputObjectPath, { accessToken, apiKey });
-
-            if (rec) {
-              rec.outputBucket = artifactMeta.outputBucket;
-              rec.outputObjectPath = artifactMeta.outputObjectPath;
-              rec.videoUri = artifactMeta.videoUri;
-              rec.artifactPersisted = true;
-              rec.sizeBytes = artifactMeta.sizeBytes;
-              await firestoreTaskRepository.updateTask(taskId, {
-                outputBucket: artifactMeta.outputBucket,
-                outputObjectPath: artifactMeta.outputObjectPath,
-                videoUri: artifactMeta.videoUri,
-                artifactPersisted: true,
-                sizeBytes: artifactMeta.sizeBytes,
-                status: 'completed',
-              }).catch(() => {});
-            }
-          } catch (migrationErr) {
-            console.info(`[Video Stream] Migration from candidateVideoUri skipped for ${taskId}:`, (migrationErr as any)?.message || migrationErr);
-          }
-        }
-
-        // C. Tertiary: Poll candidateOpName to discover videoUri -> migrate
-        if ((!videoBuffer || videoBuffer.length < 1000) && candidateOpName) {
-          try {
-            console.log(`[Video Stream] Attempting operation poll recovery (${candidateOpName}) for ${taskId}...`);
-            const sessions = CredentialService.listSessions();
-            const vSession = sessions.find((s: any) => s.type === 'vertex_ai');
-            if (vSession) {
-              const pollRes = await VertexClient.pollOperation(vSession, candidateOpName);
-              if (pollRes.done && pollRes.response) {
-                const extracted = VideoGenerator.extractVideoData(pollRes.response);
-                if (extracted.uri) {
-                  const token = await VertexClient.getAccessToken(vSession).catch(() => accessToken);
-                  const artifactMeta = await gcsArtifactStore.migrateArtifactToGcs({
-                    taskId,
-                    videoUri: extracted.uri,
-                    accessToken: token,
-                    apiKey,
-                  });
-                  videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(artifactMeta.outputBucket, artifactMeta.outputObjectPath, { accessToken: token, apiKey });
-                }
-              }
-            }
-          } catch (opErr) {
-            console.info(`[Video Stream] Operation poll recovery skipped for ${taskId}:`, (opErr as any)?.message || opErr);
-          }
-        }
-
-        if (videoBuffer && videoBuffer.length >= 1000) {
-          ephemeralVideoStore.set(taskId, videoBuffer);
-        }
+      if (!firestoreTaskRepository.isAvailable()) {
+        return res.status(503).json({
+          error: 'task_metadata_authority_unavailable',
+          storageAuthority: 'unavailable',
+        });
       }
 
+      // Firestore must validate the task before an ephemeral cache hit can be served.
+      const rec = await firestoreTaskRepository.getTask(taskId);
+      if (!rec) {
+        return res.status(404).json({ error: 'task_not_found', storageAuthority: 'firestore' });
+      }
+      if (!rec.outputBucket || !rec.outputObjectPath || rec.artifactPersisted !== true) {
+        return res.status(404).json({
+          error: 'artifact_not_persisted',
+          storageAuthority: 'firestore',
+        });
+      }
+
+      let videoBuffer: Buffer | null = ephemeralVideoStore.get(taskId) || null;
       if (!videoBuffer || videoBuffer.length < 1000) {
-        res.setHeader('Content-Type', 'application/json');
-        return res.status(404).json({ error: '视频文件在 Cloud Storage 存储上不存在，请点击【重新获取视频】或【重新生成】。' });
+        try {
+          videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(rec.outputBucket, rec.outputObjectPath);
+          console.log(`[Video Stream] GCS authority read gs://${rec.outputBucket}/${rec.outputObjectPath} (${videoBuffer.length} bytes)`);
+        } catch (gcsErr) {
+          console.error(`[Video Stream] Authoritative GCS artifact missing for ${taskId}:`, (gcsErr as any)?.message || gcsErr);
+          return res.status(404).json({
+            error: 'artifact_not_found',
+            storageAuthority: 'gcs',
+            outputBucket: rec.outputBucket,
+            outputObjectPath: rec.outputObjectPath,
+          });
+        }
+
+        if (!videoBuffer || videoBuffer.length < 1000) {
+          return res.status(404).json({
+            error: 'artifact_not_found',
+            storageAuthority: 'gcs',
+          });
+        }
+        ephemeralVideoStore.set(taskId, videoBuffer);
       }
 
       const fileSize = videoBuffer.length;
@@ -2933,28 +2892,32 @@ ${cleanPrompt}`
         const parts = range.replace(/bytes=/, '').split('-');
         const start = parseInt(parts[0], 10);
         const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-        const chunksize = (end - start) + 1;
+        if (!Number.isFinite(start) || start < 0 || end < start || end >= fileSize) {
+          res.setHeader('Content-Range', `bytes */${fileSize}`);
+          return res.status(416).end();
+        }
+        const chunkSize = end - start + 1;
         res.writeHead(206, {
           'Content-Range': `bytes ${start}-${end}/${fileSize}`,
           'Accept-Ranges': 'bytes',
-          'Content-Length': chunksize,
-          'Content-Type': 'video/mp4',
+          'Content-Length': chunkSize,
+          'Content-Type': rec.contentType || 'video/mp4',
           'Access-Control-Allow-Origin': '*',
         });
         return res.end(videoBuffer.subarray(start, end + 1));
-      } else {
-        res.writeHead(200, {
-          'Content-Length': fileSize,
-          'Content-Type': 'video/mp4',
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Expose-Headers': 'Content-Disposition, Content-Length',
-          ...(isDownload ? { 'Content-Disposition': `attachment; filename="zaojing_${taskId}.mp4"` } : {}),
-        });
-        return res.end(videoBuffer);
       }
+
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': rec.contentType || 'video/mp4',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Expose-Headers': 'Content-Disposition, Content-Length',
+        ...(isDownload ? { 'Content-Disposition': `attachment; filename="zaojing_${taskId}.mp4"` } : {}),
+      });
+      return res.end(videoBuffer);
     } catch (err) {
       console.error('Error streaming video:', err);
-      res.status(500).json({ error: '读取视频流或下载失败' });
+      return res.status(500).json({ error: '读取视频流或下载失败' });
     }
   });
 
