@@ -3,9 +3,11 @@ import re
 
 IDENTITY = Path('src/services/character/identityLockService.ts')
 VISUAL = Path('src/services/qa/visualQaService.ts')
+ROUTE_TEST = Path('src/__tests__/apiVideoStartRouteIntegration.test.ts')
 
 identity = IDENTITY.read_text()
 visual = VISUAL.read_text()
+route_test = ROUTE_TEST.read_text()
 
 # DIRECT_CHARACTER_IMAGE only skips rebuild. It must never bypass identity QA.
 pattern = re.compile(
@@ -43,9 +45,38 @@ visual2 = visual2.replace(
     "      const residualPass = sceneMode === 'replace_primary_person' ? residualScore <= 5 : true;\n\n      const pass =\n        identityScore >= 95 &&\n        residualPass &&",
 )
 
-if identity2 == identity and visual2 == visual:
-    print('M2-1 identity gate hardening already applied')
-else:
+# Route integration: direct image skips rebuild, but must carry a master reference and pass QA before Veo.
+route2 = route_test.replace(
+    "it('Case 6: DIRECT + imageIsTargetCharacter=true -> rebuild调用0次 -> 允许进入mock Veo submission'",
+    "it('Case 6: DIRECT + master QA pass -> rebuild调用0次 -> 允许进入mock Veo submission'",
+)
+needle = """    const spyPredict = vi.spyOn(VertexClient, 'predictLongRunning').mockResolvedValueOnce({\n      operationName: 'projects/xp-vertex-project/locations/us-central1/operations/op_route_test_6',\n      endpoint: 'us-central1-aiplatform.googleapis.com',\n    });\n\n    const res = await request(app)\n"""
+insert = """    const spyPredict = vi.spyOn(VertexClient, 'predictLongRunning').mockResolvedValueOnce({\n      operationName: 'projects/xp-vertex-project/locations/us-central1/operations/op_route_test_6',\n      endpoint: 'us-central1-aiplatform.googleapis.com',\n    });\n\n    const spyQa = vi.spyOn(VisualQaService, 'qaFirstFrame').mockResolvedValueOnce({\n      pass: true,\n      identityScore: 98,\n      sourcePersonResidualScore: 0,\n      scenePreservationScore: 100,\n      posePreservationScore: 100,\n      outfitPreservationScore: 100,\n      anatomyScore: 98,\n      faceDetails: 'Direct image verified against master',\n      hairDetails: 'Direct image hair verified against master',\n      bodyDetails: 'Direct image body preserved',\n      summary: 'Direct target-character image passed mandatory master QA',\n      issues: [],\n    });\n\n    const res = await request(app)\n"""
+if needle in route2:
+    route2 = route2.replace(needle, insert, 1)
+route2 = route2.replace(
+    ".attach('firstFrame', createValidPngBuffer(), 'firstFrame.png')\n      .field('rawUserPrompt', 'A target character waving hand')",
+    ".attach('firstFrame', createValidPngBuffer(), 'firstFrame.png')\n      .attach('masterImages', createValidPngBuffer(), 'master.png')\n      .field('rawUserPrompt', 'A target character waving hand')",
+    1,
+)
+route2 = route2.replace(
+    "    expect(spyRebuild).not.toHaveBeenCalled();\n\n    await vi.waitFor(() => {",
+    "    expect(spyRebuild).not.toHaveBeenCalled();\n    expect(spyQa).toHaveBeenCalledTimes(1);\n\n    await vi.waitFor(() => {",
+    1,
+)
+
+changed = []
+if identity2 != identity:
     IDENTITY.write_text(identity2)
+    changed.append(str(IDENTITY))
+if visual2 != visual:
     VISUAL.write_text(visual2)
-    print('Applied M2-1 identity gate hardening')
+    changed.append(str(VISUAL))
+if route2 != route_test:
+    ROUTE_TEST.write_text(route2)
+    changed.append(str(ROUTE_TEST))
+
+if changed:
+    print('Applied M2-1 identity gate hardening:', ', '.join(changed))
+else:
+    print('M2-1 identity gate hardening already applied')
