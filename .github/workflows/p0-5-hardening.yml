@@ -50,6 +50,9 @@ jobs:
           if [ -f scripts/apply-p0-5-authority-route-hardening.py ] && ! grep -q "Firestore unavailable; task deletion was not performed" server.ts; then
             python3 scripts/apply-p0-5-authority-route-hardening.py
           fi
+          if [ -f scripts/apply-p0-5-recovery-stream-hardening.py ] && ! grep -q "task_metadata_authority_unavailable" server.ts; then
+            python3 scripts/apply-p0-5-recovery-stream-hardening.py
+          fi
 
       - name: Diff check
         run: git diff --check
@@ -79,5 +82,5 @@ jobs:
             src/__tests__/apiVideoStartRouteIntegration.test.ts \
             src/__tests__/p0DurableStateMachine.test.ts \
             src/__tests__/p0StorageAuthorityRegression.test.ts
-          git commit -m "ci(p0-5): apply verified authority route hardening"
+          git commit -m "ci(p0-5): apply verified recovery stream hardening"
           git push origin HEAD:p0-5-real-e2e-hardening
