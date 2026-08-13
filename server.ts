@@ -3086,92 +3086,36 @@ ${cleanPrompt}`
 
 export async function startServer() {
   const app = await createApp();
-  const PORT = 3000;
+  const configuredPort = Number(process.env.PORT || 3000);
+  const PORT = Number.isFinite(configuredPort) && configuredPort > 0 ? configuredPort : 3000;
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
-    
-    // Trigger task recovery engine after server starts listening
-    (async () => {
-      let recoveredCount = 0;
-      for (const [taskId, record] of serverVideoTaskStore.entries()) {
-        if ((record.status === 'polling' || record.status === 'submitting') && record.operationName) {
-          recoveredCount++;
-          console.log(`[Recovery Engine] Auto-resuming background polling for Task: ${taskId} (Operation: ${record.operationName})`);
 
-          (async () => {
-            try {
-              const connectionId = record.connectionId;
-              let session = connectionId ? CredentialService.getSession(connectionId) : undefined;
-              if (!session) {
-                console.warn(`[Recovery Engine] Task ${taskId} credential session expired, waiting for client reconnect.`);
-                return;
-              }
+    // P0-5 Cloud Run rule: startup recovery must read durable Firestore state,
+    // never enumerate process-local task memory and never write terminal state directly.
+    // Local Docker smoke can explicitly disable cloud recovery because GitHub runners
+    // have no ADC; the real Cloud Run certification must leave this flag unset.
+    if (process.env.P0_DISABLE_STARTUP_RECOVERY === '1') {
+      console.log('[Recovery Engine] Startup recovery disabled for local runtime smoke.');
+      return;
+    }
 
-              const ai = await GeminiClientFactory.getClientForSession(session);
-              const pollRes = await VideoGenerator.pollVeoOperation(ai, session, record.operationName!);
-              if (pollRes.done && pollRes.videoBuffer) {
-                try {
-                  const artifactMeta = await gcsArtifactStore.uploadVideoArtifact({
-                    taskId,
-                    videoBuffer: pollRes.videoBuffer,
-                    contentType: 'video/mp4',
-                  });
-                  ephemeralVideoStore.set(taskId, pollRes.videoBuffer);
-                  const updates: Partial<ServerVideoTaskRecord> = {
-                    status: 'completed',
-                    completedAt: Date.now(),
-                    videoDataUrl: `/api/videos/stream/${taskId}`,
-                    outputBucket: artifactMeta.outputBucket,
-                    outputObjectPath: artifactMeta.outputObjectPath,
-                    videoUri: artifactMeta.videoUri,
-                    sizeBytes: artifactMeta.sizeBytes,
-                    contentType: artifactMeta.contentType,
-                    artifactPersisted: true,
-                    artifactPersistedAt: artifactMeta.artifactPersistedAt,
-                    updatedAt: Date.now(),
-                  };
-                  if (firestoreTaskRepository.isAvailable()) {
-                    await safeUpdateTaskRecord(taskId, updates);
-                  } else {
-                    Object.assign(record, updates);
-                    serverVideoTaskStore.set(taskId, record);
-                  }
-                  console.log(`[Recovery Engine] Task ${taskId} successfully recovered & saved to GCS (${artifactMeta.sizeBytes} bytes)!`);
-                } catch (persistErr: any) {
-                  console.error(`[Recovery Engine GCS Upload Error] Task ${taskId}:`, persistErr);
-                  const errObj = createStructuredError({
-                    source: 'artifact_persist',
-                    failureStage: 'artifact_persist',
-                    httpStatus: 500,
-                    customUserMessage: `恢复渲染完成，但视频产物写入 Cloud Storage 失败: ${persistErr?.message || persistErr}`,
-                    endpointPathRedacted: '/recovery_engine',
-                  });
-                  const failUpdates: Partial<ServerVideoTaskRecord> = {
-                    status: 'artifact_persist_failed',
-                    error: `视频产物写入 Cloud Storage 失败: ${persistErr?.message || persistErr}`,
-                    structuredError: errObj,
-                    updatedAt: Date.now(),
-                  };
-                  if (firestoreTaskRepository.isAvailable()) {
-                    await safeUpdateTaskRecord(taskId, failUpdates);
-                  } else {
-                    Object.assign(record, failUpdates);
-                    serverVideoTaskStore.set(taskId, record);
-                  }
-                }
-              }
-            } catch (err) {
-              console.error(`[Recovery Engine] Error recovering task ${taskId}:`, err);
-            }
-          })().catch((err) => console.error('[Recovery Engine BG Async Error]:', err));
-        }
-      }
-      if (recoveredCount > 0) {
-        console.log(`[Recovery Engine] Successfully initialized auto-recovery for ${recoveredCount} in-flight video tasks.`);
-      }
-    })().catch((err) => console.error('[Recovery Engine Initialization Error]:', err));
+    void taskStateMachineService
+      .recoverAbandonedTasks()
+      .then(({ recoveredCount, evaluatedCount }) => {
+        console.log(
+          `[Recovery Engine] Durable startup scan complete: evaluated=${evaluatedCount}, recovered=${recoveredCount}.`
+        );
+      })
+      .catch((err) => {
+        // Recovery failure must not prevent the HTTP service from becoming healthy.
+        // Firestore/status/recover routes remain fail-closed and can retry explicitly.
+        console.error('[Recovery Engine Initialization Error]:', err);
+      });
   });
+
+  return server;
 }
 
 if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
