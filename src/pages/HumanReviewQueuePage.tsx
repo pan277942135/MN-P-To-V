@@ -44,7 +44,7 @@ export const HumanReviewQueuePage: React.FC<HumanReviewQueuePageProps> = ({ onNa
       // into IndexedDB, then returns the merged local projection. Review eligibility is
       // still derived from durable server fields (qa_pending / QA REVIEW / GCS authority).
       const tasks = await taskRepository.getAll();
-      const durableTasks = tasks as HumanReviewQueueTask[];
+      const durableTasks = tasks as unknown as HumanReviewQueueTask[];
       setReviewTasks(sortHumanReviewTasks(durableTasks.filter(isHumanReviewEligibleTask)));
       setUnknownTasks(durableTasks.filter(isSubmissionOutcomeUnknownTask));
       setLastFetchedAt(Date.now());
