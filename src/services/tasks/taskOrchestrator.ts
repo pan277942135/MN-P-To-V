@@ -1,19 +1,17 @@
-import { GoogleGenAI } from '@google/genai';
+import crypto from 'crypto';
 import type {
   GenerationTask,
   CharacterProfile,
   AttemptRecord,
 } from '../../types';
-import { SceneAnalyzer } from '../scene/sceneAnalyzer';
-import { FirstFrameGenerator } from '../image/firstFrameGenerator';
-import { VisualQaService } from '../qa/visualQaService';
+import { IdentityLockService } from '../character/identityLockService';
 import { VideoGenerator, type VideoStartResult } from '../video/videoGenerator';
 import { VideoInspector } from '../video/videoInspector';
-import { CredentialService, type ActiveSession } from '../google/credentialService';
+import { VideoIdentityQaService } from '../qa/videoIdentityQaService';
+import { CredentialService } from '../google/credentialService';
 import { GeminiClientFactory } from '../google/geminiClient';
 import { ModelRouter } from '../google/modelRouter';
 import { redactSecrets } from '../../utils/redactSecrets';
-
 import { safeCreateObjectURL } from '../../utils/imageHelper';
 
 export class TaskOrchestrator {
@@ -46,72 +44,141 @@ export class TaskOrchestrator {
     );
 
     try {
-      // 直通模式：跳过 1、2、3、5 步骤，首帧直接取上传图片
+      const masterRefs = character.referenceImages.slice(0, 3);
+      if (masterRefs.length === 0) {
+        throw new Error('identity_reference_missing: 当前角色没有可用于身份锁定的母板图');
+      }
+
+      const masterBuffers = await Promise.all(
+        masterRefs.map(async (ref) => Buffer.from(await ref.blob.arrayBuffer()))
+      );
+      const masterMimeTypes = masterRefs.map((ref) => ref.mimeType || 'image/jpeg');
+      const sceneBuffer = Buffer.from(await task.sceneImageBlob.arrayBuffer());
+      const sceneMimeType = task.sceneImageBlob.type || 'image/jpeg';
+
+      const imageIsTargetCharacter = task.sceneMode === 'animate_existing_character';
+
       task.status = 'generating_first_frame';
-      task.progressStage = '直通模式：首帧直接取上传图片';
-      task.progressPercent = 40;
+      task.progressStage = imageIsTargetCharacter
+        ? '目标角色原图：跳过重建，进入母板身份质检'
+        : '根据角色母板重建首帧身份';
+      task.progressPercent = 35;
       await onTaskUpdated(task);
 
-      const candidateId = `ff_scene_${crypto.randomUUID().slice(0, 8)}`;
-      task.firstFrameCandidates = [
-        {
-          id: candidateId,
-          blob: task.sceneImageBlob,
-          dataUrl: safeCreateObjectURL(task.sceneImageBlob),
-          width: 1080,
-          height: 1920,
-          mimeType: task.sceneImageBlob.type || 'image/jpeg',
-          createdAt: Date.now(),
-          qaReport: {
-            pass: true,
-            identityScore: 100,
-            sourcePersonResidualScore: 0,
-            scenePreservationScore: 100,
-            posePreservationScore: 100,
-            outfitPreservationScore: 100,
-            anatomyScore: 100,
-            faceDetails: '保持原图面部',
-            hairDetails: '保持原图发型',
-            bodyDetails: '保持原图姿态',
-            summary: '直通模式：首帧直接使用上传图片，跳过重绘与质检',
-            issues: [],
-          },
-        },
-      ];
-      task.selectedFirstFrameId = candidateId;
+      const rebuilt = await IdentityLockService.rebuildFirstFrame({
+        ai,
+        imageModelName: effectiveModels.imageModel,
+        sceneImageBuffer: sceneBuffer,
+        sceneMimeType,
+        identitySpec: character.identitySpec,
+        masterBuffers,
+        masterMimeTypes,
+        sceneMode: task.sceneMode,
+        userPrompt: task.userPromptChinese,
+        imageIsTargetCharacter,
+      });
+
+      const candidate = rebuilt.candidateFirstFrame;
+      const candidateBuffer = Buffer.from(await candidate.blob.arrayBuffer());
+
+      task.status = 'qa_first_frame';
+      task.progressStage = '首帧与角色母板执行 Identity Gate';
+      task.progressPercent = 45;
+      await onTaskUpdated(task);
+
+      const identityGate = await IdentityLockService.evaluateIdentityGate({
+        ai,
+        analysisModel: effectiveModels.analysisModel,
+        masterImageBuffer: masterBuffers[0],
+        masterMimeType: masterMimeTypes[0],
+        sceneImageBuffer: sceneBuffer,
+        sceneMimeType,
+        candidateBuffer,
+        candidateMimeType: candidate.mimeType || sceneMimeType,
+        identitySpec: character.identitySpec,
+        sceneMode: task.sceneMode,
+        imageIsTargetCharacter,
+        manualApproved: false,
+      });
+
+      candidate.qaReport = identityGate.identityQaReport;
+      candidate.dataUrl = candidate.dataUrl || safeCreateObjectURL(candidate.blob);
+      task.firstFrameCandidates = [candidate];
+      task.selectedFirstFrameId = candidate.id;
+      task.identitySourceMode = rebuilt.sourceMode;
+      task.firstFrameIdentityQaStatus = identityGate.status;
+      task.identityQaScore = identityGate.identityQaScore;
+      task.identityCriticalIssues = identityGate.identityCriticalIssues;
+
+      if (identityGate.status === 'fail') {
+        task.status = 'failed';
+        task.progressStage = '首帧身份质检失败';
+        task.progressPercent = 50;
+        task.error = {
+          code: 'IDENTITY_QA_FAILED',
+          stage: 'qa_first_frame',
+          messageChinese: identityGate.identityQaReport.summary || '首帧与角色母板身份不一致',
+          technicalMessageRedacted: 'First-frame identity gate failed',
+          httpStatus: 422,
+          retryable: true,
+          recommendedAction: identityGate.identityQaReport.issues?.[0]?.repairInstruction || '重新生成首帧后再次执行身份质检',
+        };
+        task.updatedAt = Date.now();
+        await onTaskUpdated(task);
+        return task;
+      }
+
+      const durationSeconds = task.settings.durationSeconds || 6;
+      const half = Number((durationSeconds / 2).toFixed(1));
+      const prepared = IdentityLockService.prepareI2VSubmission({
+        userPrompt: task.userPromptChinese || 'Natural subtle breathing motion and gentle posture shift.',
+        durationSeconds,
+        identityGatePassed: identityGate.canStartVeo,
+      });
 
       task.promptScript = {
         subjectAction: task.userPromptChinese || '角色保持自然动态',
-        facialExpression: '自然表情',
-        gaze: '面向镜头',
-        handAction: '自然微动',
-        bodyMotion: '微幅呼吸变幻',
-        cameraMotion: '平稳推拉',
-        environmentMotion: '自然光影',
-        lighting: '原图光照',
+        facialExpression: '自然、稳定、符合原图表情',
+        gaze: '保持原图视线逻辑，不强制重新居中或转正',
+        handAction: '保持自然且符合原图遮挡关系',
+        bodyMotion: '自然呼吸与轻微重心变化',
+        cameraMotion: '默认固定机位，除非用户明确要求相机运动',
+        environmentMotion: '仅允许符合场景物理规律的轻微环境动态',
+        lighting: '保持原图光照与色温连续',
         audio: '无',
         timeline: [
-          { timeRange: '0s-4s', description: '自然动作变幻' },
-          { timeRange: '4s-8s', description: '动作延续' },
+          { timeRange: `0s-${half}s`, description: '建立自然动作并保持身份稳定' },
+          { timeRange: `${half}s-${durationSeconds}s`, description: '延续动作，避免后段换脸与五官漂移' },
         ],
-        negativeConstraints: ['deformed', 'flicker', 'distortion'],
+        negativeConstraints: [
+          'face drift',
+          'identity swap',
+          'eye flicker',
+          'frontalization',
+          'pose normalization',
+          'extra limbs',
+          'object disappearance',
+        ],
         primaryVisualStyle: task.settings.primaryStyle || '照片级写实',
         secondaryVisualStyle: task.settings.secondaryStyle || '',
         styleStrength: task.settings.styleStrength ?? 0.5,
       };
 
-      task.normalizedPromptEnglish = `${task.userPromptChinese || 'A character with natural motion'}, 8s cinematic video, highly detailed`;
+      task.normalizedPromptEnglish = prepared.compiledMotionPrompt || task.userPromptChinese;
 
-      // Check Pause for First Frame Approval
-      if (task.settings.pauseForFirstFrameApproval) {
+      // Review status always requires an explicit human continuation. A normal PASS may
+      // also pause when the user enabled first-frame approval.
+      if (identityGate.status === 'review' || task.settings.pauseForFirstFrameApproval) {
         task.status = 'waiting_first_frame_approval';
-        task.progressStage = '等待用户确认首帧';
+        task.progressStage = identityGate.status === 'review'
+          ? 'Identity Gate 需要人工确认首帧'
+          : '等待用户确认首帧';
         task.progressPercent = 50;
+        task.updatedAt = Date.now();
         await onTaskUpdated(task);
         return task;
       }
 
-      // Step 6: Start Video Generation
       return await this.continueVideoPipeline(connectionId, task, character, onTaskUpdated);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -128,6 +195,7 @@ export class TaskOrchestrator {
           ? '可在历史列表中直接点击【一键重试】重新发起渲染'
           : '可在历史列表中点击【一键重试】，如多次失败请检查算力连接',
       };
+      task.updatedAt = Date.now();
       await onTaskUpdated(task);
       return task;
     }
@@ -155,6 +223,10 @@ export class TaskOrchestrator {
       return task;
     }
 
+    if (task.firstFrameIdentityQaStatus === 'fail') {
+      throw new Error('IDENTITY_GATE_BLOCKED: 首帧身份质检失败，不允许启动视频生成');
+    }
+
     const ai = await GeminiClientFactory.getClientForSession(session);
     const effectiveModels = ModelRouter.getEffectiveModels(
       session,
@@ -162,7 +234,7 @@ export class TaskOrchestrator {
     );
 
     const selectedFF =
-      task.firstFrameCandidates.find((c) => c.id === task.selectedFirstFrameId) ||
+      task.firstFrameCandidates.find((candidate) => candidate.id === task.selectedFirstFrameId) ||
       task.firstFrameCandidates[0];
 
     if (!selectedFF) {
@@ -170,23 +242,24 @@ export class TaskOrchestrator {
     }
 
     const firstFrameBuf = Buffer.from(await selectedFF.blob.arrayBuffer());
-
-    let videoPass = false;
-    let videoAttempts = 0;
-    let directionalRepair: string | undefined = undefined;
-
     const videoMasterRefs = character.referenceImages.slice(0, 3);
-    const videoMasterBuffers = await Promise.all(
-      videoMasterRefs.map(async (r) => Buffer.from(await r.blob.arrayBuffer()))
-    );
-    const videoMasterMimeTypes = videoMasterRefs.map((r) => r.mimeType || 'image/jpeg');
+    if (videoMasterRefs.length === 0) {
+      throw new Error('identity_reference_missing: 视频身份质检缺失角色母板');
+    }
 
-    while (!videoPass && videoAttempts <= 2) {
-      videoAttempts++;
+    const videoMasterBuffers = await Promise.all(
+      videoMasterRefs.map(async (ref) => Buffer.from(await ref.blob.arrayBuffer()))
+    );
+    const videoMasterMimeTypes = videoMasterRefs.map((ref) => ref.mimeType || 'image/jpeg');
+
+    const maxVideoAttempts = 2;
+    let directionalRepair: string | undefined;
+
+    for (let videoAttempts = 1; videoAttempts <= maxVideoAttempts; videoAttempts++) {
       const startTime = Date.now();
 
-      task.status = 'starting_video';
-      task.progressStage = `启动视频引擎 (第 ${videoAttempts} 轮)`;
+      task.status = videoAttempts === 1 ? 'starting_video' : 'repairing';
+      task.progressStage = `启动视频引擎 (第 ${videoAttempts}/${maxVideoAttempts} 轮)`;
       task.progressPercent = 60 + (videoAttempts - 1) * 10;
       await onTaskUpdated(task);
 
@@ -199,11 +272,13 @@ export class TaskOrchestrator {
         videoMasterBuffers,
         videoMasterMimeTypes,
         task.normalizedPromptEnglish,
-        character.identitySpec!,
+        character.identitySpec,
         task.previousInteractionId,
         directionalRepair,
         task.sceneMode,
-        character.description
+        character.description,
+        task.settings.durationSeconds,
+        task.id
       );
 
       if (startResult.interactionId) {
@@ -213,7 +288,6 @@ export class TaskOrchestrator {
       let videoBuf: Buffer | undefined = startResult.videoBuffer;
 
       if (!videoBuf && startResult.operationName) {
-        // Poll Veo Operation
         task.status = 'polling_video';
         task.progressStage = '轮询 Veo 算力生成进度 (最长等待 12 分钟)';
         task.externalOperationName = startResult.operationName;
@@ -223,9 +297,8 @@ export class TaskOrchestrator {
         let pollCount = 0;
 
         while (!polledDone && pollCount < 72) {
-          // 72 * 10s = 720s (12 mins)
           pollCount++;
-          await new Promise((res) => setTimeout(res, 10000));
+          await new Promise((resolve) => setTimeout(resolve, 10000));
 
           const pollRes = await VideoGenerator.pollVeoOperation(
             ai,
@@ -250,40 +323,45 @@ export class TaskOrchestrator {
         }
       }
 
-      // Step 7: Validating Video
+      if (!videoBuf) {
+        throw new Error('Veo 渲染完成但未取得真实视频 artifact');
+      }
+
       task.status = 'validating_video';
-      task.progressStage = '检验 8s MP4 容器与画面合法性';
+      task.progressStage = '读取真实 MP4 元数据并抽取视频关键帧';
       task.progressPercent = 85;
       await onTaskUpdated(task);
 
-      const inspection = await VideoInspector.inspectAndExtractFrames(videoBuf!);
+      const inspection = await VideoInspector.inspectAndExtractFrames(videoBuf);
       if (!inspection.valid) {
         throw new Error(`视频画质检查未通过: ${inspection.issueReason}`);
       }
 
-      // Step 8: QA Video Frames
       task.status = 'qa_video';
-      task.progressStage = '抽取 6 关键帧执行 95+ 分身份与连贯性质检';
+      task.progressStage = `对 ${inspection.extractedFrames.length} 个真实抽帧执行逐帧 Identity QA`;
       task.progressPercent = 92;
       await onTaskUpdated(task);
 
-      const sceneArrayBuf = await task.sceneImageBlob.arrayBuffer();
-      const sceneBuffer = Buffer.from(sceneArrayBuf);
-
-      const videoQaReport = await VisualQaService.qaVideoFrames(
+      const videoQaReport = await VideoIdentityQaService.qaVideoIdentity({
         ai,
-        effectiveModels.analysisModel,
-        inspection.extractedFrameBuffers,
-        firstFrameBuf,
-        videoMasterBuffers,
-        character.identitySpec!,
-        character.description,
-        sceneBuffer
-      );
+        analysisModel: effectiveModels.analysisModel,
+        samples: inspection.extractedFrames,
+        approvedFirstFrame: firstFrameBuf,
+        approvedFirstFrameMimeType: selectedFF.mimeType,
+        masterImages: videoMasterBuffers,
+        masterMimeTypes: videoMasterMimeTypes,
+        identitySpec: character.identitySpec,
+        characterDescription: character.description,
+      });
 
       task.qaReport = videoQaReport;
+      task.identityQaStatus = videoQaReport.pass ? 'pass' : 'fail';
+      task.identityFrameScores = videoQaReport.frameReports.map((frame) => frame.identityScore);
+      task.identityDriftDetected = videoQaReport.identityDriftDetected;
+      task.worstFrameTimestamp = videoQaReport.worstFrameTimestamp;
+      task.retryCount = Math.max(0, videoAttempts - 1);
 
-      const videoBlob = new Blob([new Uint8Array(videoBuf!)], { type: 'video/mp4' });
+      const videoBlob = new Blob([new Uint8Array(videoBuf)], { type: 'video/mp4' });
       task.videoResult = {
         blob: videoBlob,
         mimeType: 'video/mp4',
@@ -291,7 +369,7 @@ export class TaskOrchestrator {
         durationSeconds: inspection.durationSeconds,
         width: inspection.width,
         height: inspection.height,
-        fps: 24,
+        fps: inspection.fps,
         diagnostics: startResult.diagnostics,
       };
 
@@ -303,29 +381,57 @@ export class TaskOrchestrator {
         endTime: Date.now(),
         success: videoQaReport.pass,
         qaScore: videoQaReport.averageIdentityScore,
-        triggeredRetry: !videoQaReport.pass && videoAttempts <= 2,
-        notes: videoQaReport.summary,
+        triggeredRetry: !videoQaReport.pass && videoAttempts < maxVideoAttempts,
+        notes: `[${videoQaReport.gateStatus}] ${videoQaReport.summary}`,
       };
       task.attempts.push(attemptRecord);
 
-      if (videoQaReport.pass) {
-        videoPass = true;
+      if (videoQaReport.gateStatus === 'pass') {
         task.status = 'completed';
-        task.progressStage = '生成与质检全部完成';
+        task.progressStage = '生成与逐帧身份质检全部完成';
         task.progressPercent = 100;
-      } else {
-        directionalRepair = videoQaReport.repairInstruction || '恢复主体身份与 Approved 首帧一致';
-        if (videoAttempts >= 2) {
-          task.status = 'completed_with_warning';
-          task.progressStage = '生成完成 (带质检警告)';
-          task.progressPercent = 100;
-        }
+        task.updatedAt = Date.now();
+        await onTaskUpdated(task);
+        return task;
       }
 
+      directionalRepair =
+        videoQaReport.repairInstruction ||
+        '恢复所有视频帧与 Approved First Frame 和角色母板的一致身份特征';
+
+      if (videoAttempts < maxVideoAttempts) {
+        task.progressStage = `Identity QA ${videoQaReport.gateStatus}，按最差帧问题执行定向重试`;
+        task.updatedAt = Date.now();
+        await onTaskUpdated(task);
+        continue;
+      }
+
+      if (videoQaReport.gateStatus === 'review') {
+        task.status = 'completed_with_warning';
+        task.progressStage = '视频生成完成，但 Identity QA 需要人工复核';
+        task.progressPercent = 100;
+        task.updatedAt = Date.now();
+        await onTaskUpdated(task);
+        return task;
+      }
+
+      task.status = 'failed';
+      task.progressStage = '视频身份质检失败';
+      task.progressPercent = 100;
+      task.error = {
+        code: 'VIDEO_IDENTITY_QA_FAILED',
+        stage: 'qa_video',
+        messageChinese: `视频身份一致性未通过：${videoQaReport.summary}`,
+        technicalMessageRedacted: 'Video identity QA gate failed after maximum attempts',
+        httpStatus: 422,
+        retryable: true,
+        recommendedAction: directionalRepair,
+      };
       task.updatedAt = Date.now();
       await onTaskUpdated(task);
+      return task;
     }
 
-    return task;
+    throw new Error('VIDEO_QA_CONTROL_FLOW_ERROR: 未得到可接受的视频质检终态');
   }
 }
