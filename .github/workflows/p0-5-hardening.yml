@@ -1,0 +1,58 @@
+name: P0-5 Hardening
+
+on:
+  push:
+    branches:
+      - p0-5-real-e2e-hardening
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  harden-and-verify:
+    if: ${{ !contains(github.event.head_commit.message || '', 'ci(p0-5): apply server hardening') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Apply deterministic P0-5 server hardening
+        run: node scripts/apply-p0-5-server-hardening.mjs
+
+      - name: Diff check
+        run: git diff --check
+
+      - name: Typecheck
+        run: bun run lint
+
+      - name: Test
+        run: bun run test
+
+      - name: Build
+        run: bun run build
+
+      - name: Commit verified server hardening
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No generated server changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.ts
+          git commit -m "ci(p0-5): apply server hardening"
+          git push origin HEAD:p0-5-real-e2e-hardening
