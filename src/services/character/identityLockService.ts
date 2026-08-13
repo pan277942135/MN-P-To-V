@@ -113,8 +113,9 @@ export class IdentityLockService {
   /**
    * 2. Determine whether the uploaded picture is already the target character
    * DIRECT_CHARACTER_IMAGE:
-   *   -> Bypasses image-to-image rebuild
-   *   -> Picture is set directly as Approved First Frame
+   *   -> Bypasses image-to-image rebuild only
+   *   -> Picture is set directly as the candidate first frame
+   *   -> Identity QA against the character master still remains mandatory
    * IDENTITY_REBUILD_REQUIRED:
    *   -> Enters Identity Rebuild
    */
@@ -212,25 +213,8 @@ export class IdentityLockService {
     let report: FirstFrameQaReport;
 
     const isTestMode = process.env.NODE_ENV === 'test';
-    const isDirectUserConfirmed = input.imageIsTargetCharacter === true;
 
-    if (isDirectUserConfirmed) {
-      // Rule A: Direct character image confirmed by user (DIRECT_CHARACTER_IMAGE)
-      report = {
-        pass: true,
-        identityScore: 100,
-        sourcePersonResidualScore: 0,
-        scenePreservationScore: 100,
-        posePreservationScore: 100,
-        outfitPreservationScore: 100,
-        anatomyScore: 100,
-        faceDetails: '用户明确确认目标角色图 (Direct character image user confirmed)',
-        hairDetails: '保持原图',
-        bodyDetails: '保持原图',
-        summary: 'User explicitly confirmed direct target character image',
-        issues: [],
-      };
-    } else if (input.ai && input.masterImageBuffer && input.masterImageBuffer.length > 0) {
+    if (input.ai && input.masterImageBuffer && input.masterImageBuffer.length > 0) {
       // Rule C: Real Visual QA when master image and AI client exist
       report = await VisualQaService.qaFirstFrame(
         input.ai,

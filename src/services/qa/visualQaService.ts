@@ -21,23 +21,6 @@ export class VisualQaService {
     identitySpec: IdentitySpec,
     sceneMode: SceneMode
   ): Promise<FirstFrameQaReport> {
-    if (sceneMode === 'animate_existing_character') {
-      return {
-        pass: true,
-        identityScore: 100,
-        sourcePersonResidualScore: 0,
-        scenePreservationScore: 100,
-        posePreservationScore: 100,
-        outfitPreservationScore: 100,
-        anatomyScore: 100,
-        faceDetails: '保持原场景图像面部特征',
-        hairDetails: '保持原场景图像发型特征',
-        bodyDetails: '保持原场景图像肢体姿态',
-        summary: '已直通：首帧直接使用上传场景图，免重绘与质检',
-        issues: [],
-      };
-    }
-
     const promptText = `
 你是一名 AI 视觉质检专家与电影剪辑指导。请对生成的首帧候选图进行多维度严格视觉比对测试。
 
@@ -53,7 +36,7 @@ ${JSON.stringify(identitySpec)}
 
 评分标准 (0~100 分):
 - identityScore: 生成首帧与角色母板的脸部五官、眼型瞳色、发型发色一致性。合格线 >= 95。
-- sourcePersonResidualScore: 是否残存原场景图人物的脸部特征。合格线 <= 5 (在 replace_primary_person 模式下必须彻底替换)。
+- sourcePersonResidualScore: 仅用于 replace_primary_person，判断是否残存原场景人物脸部特征，合格线 <= 5。对于 animate_existing_character，原场景人物本身就是目标角色，此项不参与 Gate，请返回 0。
 - scenePreservationScore: 场景背景、光影、色温保留度。合格线 >= 90。
 - posePreservationScore: 原姿态、身体轮廓保留度。合格线 >= 90。
 - outfitPreservationScore: 原服装、鞋靴、饰品保留度。合格线 >= 90。
@@ -168,9 +151,11 @@ ${JSON.stringify(identitySpec)}
         (i: any) => i.severity === 'critical'
       );
 
+      const residualPass = sceneMode === 'replace_primary_person' ? residualScore <= 5 : true;
+
       const pass =
         identityScore >= 95 &&
-        residualScore <= 5 &&
+        residualPass &&
         sceneScore >= 90 &&
         poseScore >= 90 &&
         outfitScore >= 90 &&
