@@ -10,7 +10,7 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   failure-diagnosis:
@@ -21,31 +21,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
-          fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Apply M2-3 diagnosis integration
-        run: python scripts/apply-m2-3-failure-diagnosis.py
 
       - name: Diagnosis contract gate
         run: |
+          test ! -e scripts/apply-m2-3-failure-diagnosis.py
           grep -q "VideoFailureDiagnosisService.diagnose(qaReport)" server.ts
           grep -q "VideoFailureDiagnosisService.diagnose(videoQaReport)" src/services/tasks/taskOrchestrator.ts
           grep -q "failureDiagnosis?.repairPromptAppend" src/services/tasks/taskOrchestrator.ts
           grep -q "IDENTITY_SWAP_OR_SEVERE_LOSS" src/services/qa/videoFailureDiagnosisService.ts
           grep -q "QA_EVIDENCE_INCOMPLETE" src/services/qa/videoFailureDiagnosisService.ts
+          grep -q "failureDiagnosis" server.ts
           if grep -q "generateContent" src/services/qa/videoFailureDiagnosisService.ts; then
             echo 'Failure diagnosis must be deterministic and must not call a generative model.' >&2
-            exit 1
-          fi
-          if grep -q "repairInstruction ||" src/services/tasks/taskOrchestrator.ts && ! grep -q "failureDiagnosis?.repairPromptAppend" src/services/tasks/taskOrchestrator.ts; then
-            echo 'Directional repair is not diagnosis-first.' >&2
             exit 1
           fi
 
@@ -68,16 +55,3 @@ jobs:
 
       - name: Diff integrity
         run: git diff --check
-
-      - name: Commit diagnosis integration
-        if: github.event_name == 'push'
-        run: |
-          if git diff --quiet; then
-            echo 'Diagnosis integration already applied.'
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add server.ts src/services/tasks/taskOrchestrator.ts
-          git commit -m 'feat(m2-3): persist structured video failure diagnosis'
-          git push origin HEAD:${GITHUB_REF_NAME}
