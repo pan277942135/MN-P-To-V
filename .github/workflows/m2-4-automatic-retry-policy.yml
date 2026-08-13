@@ -31,7 +31,9 @@ jobs:
           python-version: '3.11'
 
       - name: Apply M2-4 retry integration
-        run: python scripts/apply-m2-4-retry-integration.py
+        run: |
+          python scripts/apply-m2-4-retry-integration.py
+          python scripts/apply-m2-4-followup.py
 
       - name: Retry contract gate
         run: |
@@ -46,7 +48,7 @@ jobs:
             echo 'Blind provider retry loop remains in TaskOrchestrator.' >&2
             exit 1
           fi
-          grep -q "retryDecision.action === 'REGENERATE_VIDEO'" src/services/tasks/taskOrchestrator.ts
+          grep -q "if (retryDecision.action === 'REGENERATE_VIDEO')" src/services/tasks/taskOrchestrator.ts
           grep -q "QA_REVIEW_REQUIRES_HUMAN" src/services/qa/videoRetryPolicyService.ts
           grep -q "QA_EVIDENCE_INCOMPLETE_REQA" src/services/qa/videoRetryPolicyService.ts
 
