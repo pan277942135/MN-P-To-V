@@ -10,7 +10,7 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   automatic-retry:
@@ -21,27 +21,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
-          fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Apply M2-4 retry integration
-        run: |
-          if grep -q "reserveAutomaticProviderRetry" server.ts; then
-            echo 'Primary durable retry integration already applied.'
-          else
-            python scripts/apply-m2-4-retry-integration.py
-          fi
-          python scripts/apply-m2-4-followup.py
-          python scripts/apply-m2-4-postaudit.py
 
       - name: Retry contract gate
         run: |
+          test ! -e scripts/apply-m2-4-retry-integration.py
+          test ! -e scripts/apply-m2-4-followup.py
+          test ! -e scripts/apply-m2-4-postaudit.py
           grep -q "VideoRetryPolicyService.decide" server.ts
           grep -q "reserveAutomaticProviderRetry" server.ts
           grep -q "DurableVideoRetryService.launch" server.ts
@@ -53,6 +38,7 @@ jobs:
           grep -q "requiresManualReview: true" server.ts
           grep -q "retryHistoryForOutcome" server.ts
           grep -q "retryHistoryForQaError" server.ts
+          grep -q "AUTOMATIC_RETRY_SUBMISSION_OUTCOME_UNKNOWN" src/__tests__/m24RetryOutcomeUnknown.test.ts
           if grep -q "videoAttempts < maxVideoAttempts" src/services/tasks/taskOrchestrator.ts; then
             echo 'Blind provider retry loop remains in TaskOrchestrator.' >&2
             exit 1
@@ -80,16 +66,3 @@ jobs:
 
       - name: Diff integrity
         run: git diff --check
-
-      - name: Commit retry integration
-        if: github.event_name == 'push'
-        run: |
-          if git diff --quiet; then
-            echo 'Retry integration already applied.'
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add server.ts src/types/index.ts src/server/services/taskStateMachineService.ts src/services/tasks/taskOrchestrator.ts
-          git commit -m 'feat(m2-4): enforce durable automatic retry policy'
-          git push origin HEAD:${GITHUB_REF_NAME}
