@@ -45,6 +45,14 @@ function assertCompletedInvariant(task: Partial<ServerVideoTaskRecord>): void {
   }
 }
 
+function createAlreadyExistsError(taskId: string): Error & { code: string } {
+  const err = new Error(`[FirestoreTaskRepository] Task ${taskId} already exists`) as Error & {
+    code: string;
+  };
+  err.code = 'ALREADY_EXISTS';
+  return err;
+}
+
 export class FirestoreTaskRepository {
   private collectionName = 'video_tasks';
 
@@ -185,10 +193,16 @@ export class FirestoreTaskRepository {
         createdAt: record.createdAt || Date.now(),
       });
 
-      // create() is intentionally used instead of set(). Cross-instance duplicate starts
-      // with the same durable taskId must not overwrite an existing task and then invoke
-      // the provider a second time.
-      await docRef.create(payload);
+      // Atomic create-if-absent implemented with a transaction rather than
+      // DocumentReference.create(). This preserves cross-instance idempotency while
+      // using the same transaction primitive as the rest of the durable state machine.
+      await db.runTransaction(async (transaction) => {
+        const snap = await transaction.get(docRef);
+        if (snap.exists) {
+          throw createAlreadyExistsError(taskId);
+        }
+        transaction.set(docRef, payload);
+      });
     });
   }
 
