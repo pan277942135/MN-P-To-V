@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { CredentialService, type ActiveSession } from './credentialService';
+import { VertexClient } from './vertexClient';
 import { redactSecrets } from '../../utils/redactSecrets';
 
 export class GeminiClientFactory {
@@ -25,14 +26,14 @@ export class GeminiClientFactory {
         throw new Error('连接已失效或缺失服务账号凭据');
       }
 
-      // Refresh OAuth token if necessary
+      // P0-5: all Vertex OAuth token resolution goes through VertexClient.
+      // Runtime ADC reconstruction intentionally stores auth.getClient() as a Promise
+      // so cold starts stay lazy; VertexClient.getAccessToken() knows how to await that
+      // promise before invoking getAccessToken(). Directly calling the field here made
+      // second/cold Cloud Run instances fail before reaching the durable idempotency gate.
       let accessToken: string;
       try {
-        const tokenRes = await session.serviceAccountJwt.getAccessToken();
-        if (!tokenRes.token) {
-          throw new Error('获取 OAuth Access Token 失败');
-        }
-        accessToken = tokenRes.token;
+        accessToken = await VertexClient.getAccessToken(session);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(`服务账号 Token 刷新失败: ${redactSecrets(msg)}`);
