@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+
 jobs:
   harden-and-verify:
     runs-on: ubuntu-latest
@@ -35,6 +38,9 @@ jobs:
           else
             python3 scripts/apply-p0-5-server-hardening.py
           fi
+          if [ -f scripts/apply-p0-5-test-hardening.py ]; then
+            python3 scripts/apply-p0-5-test-hardening.py
+          fi
 
       - name: Diff check
         run: git diff --check
@@ -48,15 +54,15 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Commit verified server hardening
+      - name: Commit verified hardening
         shell: bash
         run: |
           if git diff --quiet; then
-            echo "No generated server changes to commit."
+            echo "No generated changes to commit."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add server.ts
-          git commit -m "ci(p0-5): apply server hardening"
+          git add server.ts src/__tests__/firestoreTaskRepository.test.ts src/__tests__/apiVideoStartRouteIntegration.test.ts
+          git commit -m "ci(p0-5): apply verified hardening"
           git push origin HEAD:p0-5-real-e2e-hardening
