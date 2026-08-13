@@ -56,6 +56,7 @@ jobs:
           grep -q "persistArtifactForQa" server.ts
           grep -q "completeAfterQa" server.ts
           grep -q "DurableVideoIdentityQaService" server.ts
+          grep -q "expect(recovered?.status).toBe('qa_pending')" src/__tests__/p0DurableStateMachine.test.ts
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -91,6 +92,7 @@ jobs:
             src/server/services/taskStateMachineService.ts \
             src/types/index.ts \
             src/pages/StudioPage.tsx \
-            src/services/tasks/taskOrchestrator.ts
+            src/services/tasks/taskOrchestrator.ts \
+            src/__tests__/p0DurableStateMachine.test.ts
           git commit -m 'feat(m2-2): enforce durable video QA before completed'
           git push origin HEAD:${GITHUB_REF_NAME}
