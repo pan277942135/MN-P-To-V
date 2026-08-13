@@ -577,20 +577,6 @@ export const StudioPage: React.FC<{
           height: 1920,
           mimeType: capturedSceneFile.type || 'image/jpeg',
           createdAt: Date.now(),
-          qaReport: {
-            pass: true,
-            identityScore: 100,
-            sourcePersonResidualScore: 0,
-            scenePreservationScore: 100,
-            posePreservationScore: 100,
-            outfitPreservationScore: 100,
-            anatomyScore: 100,
-            faceDetails: '保持原场景图像面部特征',
-            hairDetails: '保持原场景图像发型特征',
-            bodyDetails: '保持原场景图像肢体姿态',
-            summary: '直通模式：首帧直接取上传图片，免重绘与质检',
-            issues: [],
-          },
         },
       ];
       task.selectedFirstFrameId = candidateId;
@@ -891,9 +877,17 @@ export const StudioPage: React.FC<{
       if (videoData.videoUri) task.videoUri = videoData.videoUri;
       if (videoData.outputUri) task.outputUri = videoData.outputUri;
       task.qaReport = videoData.qaReport;
-      task.status = 'completed';
-      task.progressStage = '合成与全帧视频生成完成';
-      task.progressPercent = 100;
+      task.identityQaStatus = videoData.identityQaStatus || task.identityQaStatus;
+      task.status = videoData.status || task.status;
+      if (task.status === 'completed') {
+        task.progressStage = '视频生成与身份质检完成';
+        task.progressPercent = 100;
+      } else if (task.status === 'qa_pending') {
+        task.progressStage = videoData.requiresManualApproval
+          ? '视频身份质检需要人工复核'
+          : '视频已持久化，等待身份质检';
+        task.progressPercent = 95;
+      }
       task.updatedAt = Date.now();
 
       setCurrentTask({ ...task });
@@ -1515,7 +1509,7 @@ export const StudioPage: React.FC<{
                             首帧模式：原图直通
                           </span>
                           <span className="px-1.5 py-0.5 rounded bg-black/80 text-zinc-300 border border-zinc-700">
-                            身份自动质检：未执行
+                            视频身份质检：等待服务端 Authority 结果
                           </span>
                           <span className="px-1.5 py-0.5 rounded bg-black/80 text-zinc-300 border border-zinc-700">
                             角色母板发送数量：0

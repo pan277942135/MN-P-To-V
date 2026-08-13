@@ -1,0 +1,73 @@
+name: M2-2 Video Identity QA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - m2-2-video-identity-qa
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  video-identity-qa:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Source contract gate
+        run: |
+          if grep -R "身份自动质检：未执行" server.ts src/pages/StudioPage.tsx; then
+            echo 'Forbidden fake QA text remains.' >&2
+            exit 1
+          fi
+          if grep -R "identityScore: 100" src/pages/StudioPage.tsx src/services/tasks/taskOrchestrator.ts; then
+            echo 'Forbidden synthetic identity score remains.' >&2
+            exit 1
+          fi
+          if grep -R "dummyFrame\|100 \* 1024" src/services/video/videoInspector.ts; then
+            echo 'Forbidden synthetic video inspection fallback remains.' >&2
+            exit 1
+          fi
+          if grep -R "completeWithPersistedArtifact" server.ts; then
+            echo 'Production server still contains auto-complete artifact helper.' >&2
+            exit 1
+          fi
+          test ! -e scripts/apply-m2-2-production-qa-integration.py
+          test ! -e scripts/apply-m2-2-followup.py
+          grep -q "persistArtifactForQa" server.ts
+          grep -q "completeAfterQa" server.ts
+          grep -q "DurableVideoIdentityQaService" server.ts
+          grep -q "VIDEO_QA_COMPLETION_INVARIANT" src/server/services/taskStateMachineService.ts
+          if grep -q "artifact_persisted: \['qa_pending', 'completed'" src/server/services/taskStateMachineService.ts; then
+            echo 'artifact_persisted may still jump directly to completed.' >&2
+            exit 1
+          fi
+          grep -q "expect(recovered?.status).toBe('qa_pending')" src/__tests__/p0DurableStateMachine.test.ts
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check

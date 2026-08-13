@@ -84,7 +84,6 @@ export class IdentityLockService {
       const imgId = img.id || `master_${i}_${crypto.randomUUID().slice(0, 8)}`;
       const objectPath = `characters/${characterId}/${imgId}.jpg`;
 
-      // Persist to GCS
       await gcsArtifactStore.uploadImageArtifact({
         objectPath,
         buffer: img.buffer,
@@ -111,13 +110,8 @@ export class IdentityLockService {
   }
 
   /**
-   * 2. Determine whether the uploaded picture is already the target character
-   * DIRECT_CHARACTER_IMAGE:
-   *   -> Bypasses image-to-image rebuild only
-   *   -> Picture is set directly as the candidate first frame
-   *   -> Identity QA against the character master still remains mandatory
-   * IDENTITY_REBUILD_REQUIRED:
-   *   -> Enters Identity Rebuild
+   * 2. Determine whether the uploaded picture is already the target character.
+   * DIRECT_CHARACTER_IMAGE skips rebuild only; master-based identity QA is still mandatory.
    */
   static determineIdentitySourceMode(input: DetermineModeInput): IdentitySourceMode {
     if (input.imageIsTargetCharacter === true) {
@@ -128,8 +122,6 @@ export class IdentityLockService {
 
   /**
    * 3. Identity Rebuild
-   * Reconstructs character head/facial features using Gemini image models while preserving
-   * pose, body shape, bust, waist, hip, legs, wardrobe, camera, composition, background, and lighting.
    */
   static async rebuildFirstFrame(input: RebuildInput & { imageIsTargetCharacter?: boolean }): Promise<{
     candidateFirstFrame: FirstFrameCandidate;
@@ -158,9 +150,7 @@ export class IdentityLockService {
       };
     }
 
-    // Rebuild required
     if (!input.ai) {
-      // Mock / test fallback candidate
       const candidateId = `ff_rebuilt_mock_${crypto.randomUUID().slice(0, 8)}`;
       const blob = new Blob([new Uint8Array(input.sceneImageBuffer)], { type: input.sceneMimeType || 'image/jpeg' });
       return {
@@ -203,11 +193,10 @@ export class IdentityLockService {
   }
 
   /**
-   * 4. First Frame Identity Gate (firstFrameIdentityQa)
-   * Evaluates candidateFirstFrame.
-   * - status === 'pass': canStartVeo = true
-   * - status === 'review': requires manual approval -> canStartVeo = true ONLY if manualApproved === true
-   * - status === 'fail': canStartVeo = false
+   * 4. First Frame Identity Gate.
+   * PASS = all strict thresholds met.
+   * REVIEW = no severe defect, but one or more strict thresholds are borderline.
+   * FAIL = missing evidence, critical issue, severe identity loss, or severe preservation/anatomy failure.
    */
   static async evaluateIdentityGate(input: QaInput): Promise<IdentityGateResult> {
     let report: FirstFrameQaReport;
@@ -215,7 +204,6 @@ export class IdentityLockService {
     const isTestMode = process.env.NODE_ENV === 'test';
 
     if (input.ai && input.masterImageBuffer && input.masterImageBuffer.length > 0) {
-      // Rule C: Real Visual QA when master image and AI client exist
       report = await VisualQaService.qaFirstFrame(
         input.ai,
         input.analysisModel || 'gemini-3.6-flash',
@@ -229,7 +217,6 @@ export class IdentityLockService {
         input.sceneMode as SceneMode
       );
     } else if (isTestMode && !input.ai && input.masterImageBuffer && input.masterImageBuffer.length > 0) {
-      // Rule D: Test environment mock QA allowed ONLY when NODE_ENV === 'test' AND master image provided
       report = {
         pass: true,
         identityScore: 98,
@@ -245,7 +232,6 @@ export class IdentityLockService {
         issues: [],
       };
     } else {
-      // Production fail closed if missing master image reference for rebuild mode
       report = {
         pass: false,
         identityScore: 0,
@@ -262,37 +248,56 @@ export class IdentityLockService {
           code: 'IDENTITY_REFERENCE_MISSING',
           severity: 'critical',
           description: '缺失目标角色母板图 (identity_reference_missing)',
-          repairInstruction: '请提供目标角色母板图或显式确认当前图为目标角色。',
+          repairInstruction: '请提供目标角色母板图后重新执行身份质检。',
         }],
       };
     }
 
     const criticalIssues = (report.issues || [])
-      .filter((i) => i.severity === 'critical')
-      .map((i) => `${i.code}: ${i.description}`);
+      .filter((issue) => issue.severity === 'critical')
+      .map((issue) => `${issue.code}: ${issue.description}`);
 
-    let status: FirstFrameIdentityQaStatus = 'pass';
-    let requiresManualApproval = false;
+    const isReplaceMode = input.sceneMode === 'replace_primary_person';
+    const residualStrictPass = !isReplaceMode || report.sourcePersonResidualScore <= 5;
+    const residualHardFail = isReplaceMode && report.sourcePersonResidualScore > 20;
 
-    if (!report.pass || criticalIssues.length > 0 || report.identityScore < 80) {
+    const severeQualityFailure =
+      report.scenePreservationScore < 80 ||
+      report.posePreservationScore < 80 ||
+      report.outfitPreservationScore < 80 ||
+      report.anatomyScore < 80;
+
+    const hardFail =
+      criticalIssues.length > 0 ||
+      report.identityScore < 80 ||
+      residualHardFail ||
+      severeQualityFailure;
+
+    const strictPass =
+      report.identityScore >= 95 &&
+      residualStrictPass &&
+      report.scenePreservationScore >= 90 &&
+      report.posePreservationScore >= 90 &&
+      report.outfitPreservationScore >= 90 &&
+      report.anatomyScore >= 90 &&
+      criticalIssues.length === 0;
+
+    let status: FirstFrameIdentityQaStatus;
+    let requiresManualApproval: boolean;
+
+    if (hardFail) {
       status = 'fail';
       requiresManualApproval = false;
-    } else if (report.identityScore < 95) {
-      status = 'review';
-      requiresManualApproval = true;
-    } else {
+    } else if (strictPass) {
       status = 'pass';
       requiresManualApproval = false;
+    } else {
+      status = 'review';
+      requiresManualApproval = true;
     }
 
-    let canStartVeo = false;
-    if (status === 'pass') {
-      canStartVeo = true;
-    } else if (status === 'review') {
-      canStartVeo = Boolean(input.manualApproved);
-    } else {
-      canStartVeo = false;
-    }
+    const canStartVeo =
+      status === 'pass' || (status === 'review' && Boolean(input.manualApproved));
 
     return {
       status,
@@ -305,10 +310,7 @@ export class IdentityLockService {
   }
 
   /**
-   * 5. Prepare I2V submission and verify rules:
-   * - Uses motion-first prompt strategy
-   * - Evaluates motion drift risk (LOW vs HIGH)
-   * - Verifies master images are NOT sent as unsupported reference fields to Veo
+   * 5. Prepare I2V submission and verify rules.
    */
   static prepareI2VSubmission(params: {
     userPrompt: string;
@@ -342,7 +344,7 @@ export class IdentityLockService {
       compiledMotionPrompt,
       riskResult,
       veoSubmissionAllowed: true,
-      masterImagesSentToVeo: false, // Master images are NOT sent as unsupported Veo reference fields!
+      masterImagesSentToVeo: false,
     };
   }
 }

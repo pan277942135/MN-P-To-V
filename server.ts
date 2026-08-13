@@ -13,6 +13,7 @@ import { FirstFrameGenerator } from './src/services/image/firstFrameGenerator';
 import { VisualQaService } from './src/services/qa/visualQaService';
 import { VideoGenerator } from './src/services/video/videoGenerator';
 import { VideoInspector } from './src/services/video/videoInspector';
+import { DurableVideoIdentityQaService } from './src/server/services/durableVideoIdentityQaService';
 import { GeminiClientFactory } from './src/services/google/geminiClient';
 import { ModelRouter } from './src/services/google/modelRouter';
 import { PromptCompiler } from './src/services/prompt/PromptCompiler';
@@ -112,6 +113,116 @@ async function safeUpdateTaskRecord(taskId: string, updates: Partial<ServerVideo
 }
 
 export const serverVideoTaskStore = new Map<string, ServerVideoTaskRecord>();
+
+
+async function settlePersistedVideoThroughQa(params: {
+  taskId: string;
+  videoBuffer: Buffer;
+  artifactMeta: {
+    outputBucket: string;
+    outputObjectPath: string;
+    videoUri: string;
+    sizeBytes: number;
+    contentType: string;
+    artifactPersistedAt: number;
+  };
+  session: any;
+  ai: any;
+  analysisModel: string;
+  patch?: Partial<ServerVideoTaskRecord>;
+}): Promise<ServerVideoTaskRecord> {
+  const { taskId, videoBuffer, artifactMeta, session, ai, analysisModel, patch = {} } = params;
+
+  const qaPendingTask = await taskStateMachineService.persistArtifactForQa({
+    taskId,
+    outputBucket: artifactMeta.outputBucket,
+    outputObjectPath: artifactMeta.outputObjectPath,
+    videoUri: artifactMeta.videoUri,
+    sizeBytes: artifactMeta.sizeBytes,
+    contentType: artifactMeta.contentType,
+    artifactPersistedAt: artifactMeta.artifactPersistedAt,
+    patch: {
+      ...patch,
+      identityQaStatus: 'not_run',
+    },
+  });
+
+  let qaReport;
+  try {
+    qaReport = await DurableVideoIdentityQaService.run({
+      task: qaPendingTask,
+      videoBuffer,
+      ai,
+      analysisModel,
+      session,
+    });
+  } catch (qaErr: any) {
+    const qaError = {
+      code: 'VIDEO_IDENTITY_QA_EXECUTION_FAILED',
+      message: qaErr?.message || String(qaErr),
+      stage: 'qa_video',
+      retryable: true,
+      timestamp: Date.now(),
+    };
+    return await taskStateMachineService.transitionTask({
+      taskId,
+      toStatus: 'qa_pending',
+      patch: {
+        structuredError: qaError,
+        error: qaError.message,
+        identityQaStatus: 'not_run',
+      },
+    });
+  }
+
+  if (qaReport.gateStatus === 'pass') {
+    return await taskStateMachineService.completeAfterQa({
+      taskId,
+      qaReport,
+      patch,
+    });
+  }
+
+  const commonQaPatch: Partial<ServerVideoTaskRecord> = {
+    ...patch,
+    qaReport,
+    identityQaReport: qaReport,
+    identityQaStatus: qaReport.gateStatus,
+    identityFrameScores: qaReport.frameReports.map((frame) => frame.identityScore),
+    identityDriftDetected: qaReport.identityDriftDetected,
+    worstFrameTimestamp: qaReport.worstFrameTimestamp,
+  };
+
+  if (qaReport.gateStatus === 'review') {
+    return await taskStateMachineService.transitionTask({
+      taskId,
+      toStatus: 'qa_pending',
+      patch: commonQaPatch,
+    });
+  }
+
+  return await taskStateMachineService.transitionTask({
+    taskId,
+    toStatus: 'failed',
+    patch: {
+      ...commonQaPatch,
+      failureReason: 'artifact_invalid',
+      retryMode: 'SAFE_TO_REGENERATE',
+      error: `视频身份一致性质检失败: ${qaReport.summary}`,
+      structuredError: {
+        code: 'VIDEO_IDENTITY_QA_FAILED',
+        message: qaReport.summary,
+        stage: 'qa_video',
+        retryable: true,
+        timestamp: Date.now(),
+        details: {
+          minimumIdentityScore: qaReport.minimumIdentityScore,
+          worstFrameTimestamp: qaReport.worstFrameTimestamp,
+        },
+      },
+    },
+  });
+}
 
 export async function createApp() {
   const app = express();
@@ -1027,9 +1138,6 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         masterMimeTypes = storedChar.referenceImages.slice(0, 3).map((r) => r.mimeType || 'image/jpeg');
       }
 
-      if (masterBuffers.length === 0) {
-        console.log(`[Video Start] 未提交单独角色母板图，以首帧原图直通模式运行 (sceneMode: ${sceneMode || 'animate_existing_character'})`);
-      }
 
       const imageIsTargetCharacter = req.body.imageIsTargetCharacter === 'true' || req.body.imageIsTargetCharacter === true || req.body.isTargetCharacter === 'true' || req.body.isTargetCharacter === true;
       const manualApproved = req.body.manualApproved === 'true' || req.body.manualApproved === true;
@@ -1040,14 +1148,14 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         imageIsTargetCharacter,
       });
 
-      // Fail-closed Rule B: If rebuild is required, at least 1 master image must exist
-      if (sourceMode === 'IDENTITY_REBUILD_REQUIRED' && masterBuffers.length === 0) {
+      // M2-1/M2-2 fail closed: every identity mode requires at least one durable master reference.
+      if (masterBuffers.length === 0) {
         console.warn(`[Video Start] 拒绝启动 Veo: 缺失目标角色母板图 (identity_reference_missing)`);
         const errObj = createStructuredError({
           source: 'internal_api',
           failureStage: 'submit',
           httpStatus: 400,
-          customUserMessage: '未提供目标角色母板图 (master image)，且当前图像未标记为确认目标角色图，无法进行角色重建与质检。',
+          customUserMessage: '未提供目标角色母板图 (master image)，无法执行强制角色身份质检。',
           endpointPathRedacted: '/api/videos/start',
         });
 
@@ -1168,6 +1276,26 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const taskId = req.body.taskId || `vtask_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const now = Date.now();
 
+      // Persist QA anchors before the provider call. Cloud Run memory/local files are never
+      // accepted as post-generation identity evidence.
+      const qaApprovedFirstFrameObjectPath = `veo/${taskId}/qa/approved-first-frame`;
+      await gcsArtifactStore.uploadImageArtifact({
+        objectPath: qaApprovedFirstFrameObjectPath,
+        buffer: approvedFirstFrameBuf,
+        contentType: approvedFirstFrameMime,
+      });
+
+      const qaMasterImageObjectPaths: string[] = [];
+      for (let i = 0; i < masterBuffers.slice(0, 3).length; i++) {
+        const objectPath = `veo/${taskId}/qa/master-${i}`;
+        await gcsArtifactStore.uploadImageArtifact({
+          objectPath,
+          buffer: masterBuffers[i],
+          contentType: masterMimeTypes[i] || 'image/jpeg',
+        });
+        qaMasterImageObjectPaths.push(objectPath);
+      }
+
       const sceneImgBuf = sceneFile ? sceneFile.buffer : approvedFirstFrameBuf;
       const sceneImgMime = sceneFile ? (sceneFile.mimetype || 'image/jpeg') : approvedFirstFrameMime;
       const sceneImageUrl = saveImageBufferToFile(taskId, sceneImgBuf, sceneImgMime);
@@ -1202,6 +1330,18 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         schemaVersion: 'v1.1-stable',
         connectionId,
         sceneMode: sceneMode || 'animate_existing_character',
+        characterId,
+        characterDescription,
+        identitySpec,
+        identitySourceMode: sourceMode,
+        firstFrameIdentityQaStatus: gateResult.status,
+        identityQaScore: gateResult.identityQaScore,
+        identityCriticalIssues: gateResult.identityCriticalIssues,
+        identityQaStatus: 'not_run',
+        qaApprovedFirstFrameObjectPath,
+        qaApprovedFirstFrameMimeType: approvedFirstFrameMime,
+        qaMasterImageObjectPaths,
+        qaMasterImageMimeTypes: masterMimeTypes.slice(0, qaMasterImageObjectPaths.length),
       };
 
       // Ensure task creation in Firestore before invoking background Veo execution
@@ -1394,53 +1534,39 @@ ${cleanPrompt}`
                 contentType: 'video/mp4',
               });
               ephemeralVideoStore.set(taskId, startResult.videoBuffer);
-              const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+              const settledTask = await settlePersistedVideoThroughQa({
                 taskId,
-                outputBucket: artifactMeta.outputBucket,
-                outputObjectPath: artifactMeta.outputObjectPath,
-                videoUri: artifactMeta.videoUri,
-                sizeBytes: artifactMeta.sizeBytes,
-                contentType: artifactMeta.contentType,
-                artifactPersistedAt: artifactMeta.artifactPersistedAt,
+                videoBuffer: startResult.videoBuffer,
+                artifactMeta,
+                session,
+                ai,
+                analysisModel: session.analysisModel || 'gemini-3.6-flash',
                 patch: {
-                  qaReport: {
-                    pass: true,
-                    firstFrameMode: '首帧模式：原图直通',
-                    identityQaStatus: '身份自动质检：未执行',
-                    masterImagesSentCount: 0,
-                    summary: '首帧原图直通模式已生效，角色母板未发送至Veo',
-                    criticalIssues: [],
-                  },
                   diagnostics: startResult.diagnostics,
                   submitHttpStatus: 200,
                 },
               });
-              serverVideoTaskStore.set(taskId, completedTask);
+              serverVideoTaskStore.set(taskId, settledTask);
               await taskStateMachineService.releaseLease(taskId, taskRecord.executionId);
-              console.log(`[Video Start Sync Complete] 任务 ${taskId} 直接渲染完成并上传至 GCS (${artifactMeta.sizeBytes} bytes)`);
+              console.log(`[Video Start Sync Settled] Task ${taskId} => ${settledTask.status} after durable video QA`);
               return;
             } catch (persistErr: any) {
-              console.error(`[Video Start GCS Upload Error] Task ${taskId}:`, persistErr);
+              console.error(`[Video Start GCS/QA Error] Task ${taskId}:`, persistErr);
               const errObj = createStructuredError({
                 source: 'artifact_persist',
                 failureStage: 'artifact_persist',
                 httpStatus: 500,
-                customUserMessage: `视频生成成功但无法写入 Cloud Storage: ${persistErr?.message || persistErr}`,
+                customUserMessage: `视频生成成功但持久化或进入 QA 失败: ${persistErr?.message || persistErr}`,
                 endpointPathRedacted: '/api/videos/start',
               });
               const updates: Partial<ServerVideoTaskRecord> = {
                 status: 'artifact_persist_failed',
                 artifactPersisted: false,
-                error: `视频产物写入 Cloud Storage 失败: ${persistErr?.message || persistErr}`,
+                error: `视频产物持久化失败: ${persistErr?.message || persistErr}`,
                 structuredError: errObj,
                 updatedAt: Date.now(),
               };
-              if (firestoreTaskRepository.isAvailable()) {
-                await safeUpdateTaskRecord(taskId, updates);
-              } else {
-                Object.assign(rec, updates);
-                serverVideoTaskStore.set(taskId, rec);
-              }
+              if (firestoreTaskRepository.isAvailable()) await safeUpdateTaskRecord(taskId, updates);
               return;
             }
           }
@@ -1521,6 +1647,9 @@ ${cleanPrompt}`
         engine: durableTask?.modelId || models.videoModel,
         videoDataUrl: durableTask?.videoDataUrl,
         artifactPersisted: durableTask?.artifactPersisted,
+        qaReport: durableTask?.qaReport,
+        identityQaStatus: durableTask?.identityQaStatus,
+        requiresManualApproval: durableTask?.status === 'qa_pending' && durableTask?.identityQaStatus === 'review',
       });
     } catch (err: unknown) {
       const httpStatus = (err as any)?.httpStatus || 500;
@@ -2146,6 +2275,69 @@ ${cleanPrompt}`
       // Update memory cache with authority record from Firestore
       serverVideoTaskStore.set(taskId, record);
 
+      if (record.status === 'qa_pending') {
+        if (record.identityQaStatus === 'review') {
+          return res.json({
+            status: 'qa_pending',
+            videoDataUrl: record.videoDataUrl || `/api/videos/stream/${taskId}`,
+            sizeBytes: record.sizeBytes,
+            durationSeconds: record.durationSeconds,
+            qaReport: record.qaReport,
+            identityQaStatus: 'review',
+            requiresManualApproval: true,
+            artifactPersisted: true,
+          });
+        }
+
+        const qaConnectionId = (req.headers['x-connection-id'] as string) || record.connectionId;
+        const qaSession = CredentialService.getSession(qaConnectionId);
+        if (!qaSession) {
+          return res.json({
+            status: 'qa_pending',
+            videoDataUrl: record.videoDataUrl || `/api/videos/stream/${taskId}`,
+            qaReport: record.qaReport,
+            identityQaStatus: record.identityQaStatus || 'not_run',
+            requiresConnection: true,
+            artifactPersisted: true,
+          });
+        }
+
+        const qaVideoBuffer = await gcsArtifactStore.fetchArtifactBuffer(
+          record.outputBucket!,
+          record.outputObjectPath!,
+          { session: qaSession }
+        );
+        const qaAi = await GeminiClientFactory.getClientForSession(qaSession);
+        const settled = await settlePersistedVideoThroughQa({
+          taskId,
+          videoBuffer: qaVideoBuffer,
+          artifactMeta: {
+            outputBucket: record.outputBucket!,
+            outputObjectPath: record.outputObjectPath!,
+            videoUri: record.videoUri!,
+            sizeBytes: record.sizeBytes || qaVideoBuffer.length,
+            contentType: record.contentType || 'video/mp4',
+            artifactPersistedAt: record.artifactPersistedAt || Date.now(),
+          },
+          session: qaSession,
+          ai: qaAi,
+          analysisModel: qaSession.analysisModel || 'gemini-3.6-flash',
+          patch: { pollAttempt: record.pollAttempt, pollHttpStatus: record.pollHttpStatus },
+        });
+        serverVideoTaskStore.set(taskId, settled);
+        return res.json({
+          status: settled.status,
+          videoDataUrl: settled.videoDataUrl || `/api/videos/stream/${taskId}`,
+          sizeBytes: settled.sizeBytes,
+          durationSeconds: settled.durationSeconds,
+          qaReport: settled.qaReport,
+          identityQaStatus: settled.identityQaStatus,
+          requiresManualApproval: settled.status === 'qa_pending' && settled.identityQaStatus === 'review',
+          artifactPersisted: settled.artifactPersisted,
+          diagnostics: settled.diagnostics,
+        });
+      }
+
       if (record.status === 'completed') {
         return res.json({
           status: 'completed',
@@ -2209,7 +2401,7 @@ ${cleanPrompt}`
           }
           const apiKey = session.apiKey || process.env.GEMINI_API_KEY;
           const reFetchBuf = await VideoGenerator.fetchGcsVideoBuffer(record.videoUri, accessToken, apiKey);
-          if (reFetchBuf && reFetchBuf.length > 50 * 1024) {
+          if (reFetchBuf && reFetchBuf.length > 0) {
             let artifactMeta;
             try {
               artifactMeta = await gcsArtifactStore.uploadVideoArtifact({
@@ -2227,41 +2419,29 @@ ${cleanPrompt}`
             }
 
             ephemeralVideoStore.set(taskId, reFetchBuf);
-            const defaultQaReport = {
-              pass: true,
-              firstFrameMode: '首帧模式：原图直通',
-              identityQaStatus: '身份自动质检：未执行',
-              masterImagesSentCount: 0,
-              summary: '首帧原图直通模式已生效，角色母板未发送至Veo',
-              criticalIssues: [],
-            };
-
-            const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+            const settledTask = await settlePersistedVideoThroughQa({
               taskId,
-              outputBucket: artifactMeta.outputBucket,
-              outputObjectPath: artifactMeta.outputObjectPath,
-              videoUri: artifactMeta.videoUri,
-              sizeBytes: artifactMeta.sizeBytes,
-              contentType: artifactMeta.contentType,
-              artifactPersistedAt: artifactMeta.artifactPersistedAt,
-              patch: {
-                qaReport: defaultQaReport,
-                pollHttpStatus: 200,
-                pollAttempt: record.pollAttempt,
-              },
+              videoBuffer: reFetchBuf,
+              artifactMeta,
+              session,
+              ai: await GeminiClientFactory.getClientForSession(session),
+              analysisModel: session.analysisModel || 'gemini-3.6-flash',
+              patch: { pollHttpStatus: 200, pollAttempt: record.pollAttempt },
             });
-            serverVideoTaskStore.set(taskId, completedTask);
+            serverVideoTaskStore.set(taskId, settledTask);
 
             return res.json({
-              status: 'completed',
-              videoDataUrl: `/api/videos/stream/${taskId}`,
-              sizeBytes: artifactMeta.sizeBytes,
-              durationSeconds: record.durationSeconds,
-              qaReport: defaultQaReport,
-              diagnostics: record.diagnostics,
-              outputBucket: artifactMeta.outputBucket,
-              outputObjectPath: artifactMeta.outputObjectPath,
-              artifactPersisted: true,
+              status: settledTask.status,
+              videoDataUrl: settledTask.videoDataUrl || `/api/videos/stream/${taskId}`,
+              sizeBytes: settledTask.sizeBytes,
+              durationSeconds: settledTask.durationSeconds,
+              qaReport: settledTask.qaReport,
+              identityQaStatus: settledTask.identityQaStatus,
+              requiresManualApproval: settledTask.status === 'qa_pending' && settledTask.identityQaStatus === 'review',
+              diagnostics: settledTask.diagnostics,
+              outputBucket: settledTask.outputBucket,
+              outputObjectPath: settledTask.outputObjectPath,
+              artifactPersisted: settledTask.artifactPersisted,
             });
           }
         } catch (reFetchErr) {
@@ -2579,45 +2759,31 @@ ${cleanPrompt}`
           structuredError: errObj,
         });
       }
-
-      // Save local cache for fast stream reads
-      const { videoUrl } = saveVideoBufferToFile(taskId, videoBuf);
-      const defaultQaReport = {
-        pass: true,
-        firstFrameMode: '首帧模式：原图直通',
-        identityQaStatus: '身份自动质检：未执行',
-        masterImagesSentCount: 0,
-        summary: '首帧原图直通模式已生效，角色母板未发送至Veo',
-        criticalIssues: [],
-      };
-
-      const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+      // Cache is optional only; durable GCS + Firestore remain the authorities.
+      saveVideoBufferToFile(taskId, videoBuf);
+      const settledTask = await settlePersistedVideoThroughQa({
         taskId,
-        outputBucket: artifactMeta.outputBucket,
-        outputObjectPath: artifactMeta.outputObjectPath,
-        videoUri: artifactMeta.videoUri,
-        sizeBytes: artifactMeta.sizeBytes,
-        contentType: artifactMeta.contentType,
-        artifactPersistedAt: artifactMeta.artifactPersistedAt,
-        patch: {
-          qaReport: defaultQaReport,
-          pollHttpStatus: 200,
-          pollAttempt: record.pollAttempt,
-        },
+        videoBuffer: videoBuf,
+        artifactMeta,
+        session,
+        ai,
+        analysisModel: session.analysisModel || 'gemini-3.6-flash',
+        patch: { pollHttpStatus: 200, pollAttempt: record.pollAttempt },
       });
-      Object.assign(record, completedTask);
-      serverVideoTaskStore.set(taskId, completedTask);
+      serverVideoTaskStore.set(taskId, settledTask);
 
       return res.json({
-        status: 'completed',
-        videoDataUrl: `/api/videos/stream/${taskId}`,
-        sizeBytes: artifactMeta.sizeBytes,
-        durationSeconds: record.durationSeconds,
-        qaReport: defaultQaReport,
-        diagnostics: record.diagnostics,
-        outputBucket: artifactMeta.outputBucket,
-        outputObjectPath: artifactMeta.outputObjectPath,
-        artifactPersisted: true,
+        status: settledTask.status,
+        videoDataUrl: settledTask.videoDataUrl || `/api/videos/stream/${taskId}`,
+        sizeBytes: settledTask.sizeBytes,
+        durationSeconds: settledTask.durationSeconds,
+        qaReport: settledTask.qaReport,
+        identityQaStatus: settledTask.identityQaStatus,
+        requiresManualApproval: settledTask.status === 'qa_pending' && settledTask.identityQaStatus === 'review',
+        diagnostics: settledTask.diagnostics,
+        outputBucket: settledTask.outputBucket,
+        outputObjectPath: settledTask.outputObjectPath,
+        artifactPersisted: settledTask.artifactPersisted,
       });
     } catch (err: unknown) {
       const httpStatus = (err as any)?.httpStatus || 500;
@@ -2717,7 +2883,7 @@ ${cleanPrompt}`
       if (rec.outputBucket && rec.outputObjectPath) {
         const existing = await gcsArtifactStore.checkArtifactExists(rec.outputBucket, rec.outputObjectPath);
         if (existing.exists && (existing.sizeBytes || rec.sizeBytes || 0) > 0) {
-          const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+          const completedTask = await taskStateMachineService.persistArtifactForQa({
             taskId,
             outputBucket: rec.outputBucket,
             outputObjectPath: rec.outputObjectPath,
@@ -2729,8 +2895,8 @@ ${cleanPrompt}`
           serverVideoTaskStore.set(taskId, completedTask);
           return res.json({
             success: true,
-            status: 'completed',
-            message: '已根据现有 Cloud Storage 产物完成任务状态对账',
+            status: 'qa_pending',
+            message: '已恢复 Cloud Storage 产物，等待视频身份质检',
             videoDataUrl: `/api/videos/stream/${taskId}`,
             storageAuthority: 'gcs',
           });
@@ -2752,7 +2918,7 @@ ${cleanPrompt}`
           accessToken,
           apiKey,
         });
-        const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+        const completedTask = await taskStateMachineService.persistArtifactForQa({
           taskId,
           outputBucket: artifactMeta.outputBucket,
           outputObjectPath: artifactMeta.outputObjectPath,
@@ -2764,8 +2930,8 @@ ${cleanPrompt}`
         serverVideoTaskStore.set(taskId, completedTask);
         return res.json({
           success: true,
-          status: 'completed',
-          message: '已成功从 Provider Uri 迁移视频产物至 Cloud Storage',
+          status: 'qa_pending',
+          message: '已从 Provider URI 持久化视频产物，等待视频身份质检',
           videoDataUrl: `/api/videos/stream/${taskId}`,
           storageAuthority: 'gcs',
         });
@@ -2802,7 +2968,7 @@ ${cleanPrompt}`
             accessToken,
             apiKey: session.apiKey || process.env.GEMINI_API_KEY,
           });
-          const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+          const completedTask = await taskStateMachineService.persistArtifactForQa({
             taskId,
             outputBucket: artifactMeta.outputBucket,
             outputObjectPath: artifactMeta.outputObjectPath,
@@ -2814,8 +2980,8 @@ ${cleanPrompt}`
           serverVideoTaskStore.set(taskId, completedTask);
           return res.json({
             success: true,
-            status: 'completed',
-            message: '已从 durable Veo Operation 恢复并持久化视频产物至 Cloud Storage',
+            status: 'qa_pending',
+            message: '已从 durable Veo Operation 恢复并持久化视频产物，等待视频身份质检',
             videoDataUrl: `/api/videos/stream/${taskId}`,
             storageAuthority: 'gcs',
           });
@@ -2923,128 +3089,13 @@ ${cleanPrompt}`
     }
   });
 
-  // Video Generation & QA Endpoint (Legacy Synchronous Fallback)
-  app.post('/api/videos/generate-and-qa', upload.fields([
-    { name: 'firstFrame', maxCount: 1 },
-    { name: 'sceneImage', maxCount: 1 },
-    { name: 'masterImages', maxCount: 4 },
-    { name: 'masterImage', maxCount: 1 },
-  ]), async (req, res) => {
-    try {
-      const connectionId = req.headers['x-connection-id'] as string;
-      const session = CredentialService.getSession(connectionId);
-      if (!session) {
-        return res.status(401).json({ error: '算力连接已失效，请重新连接' });
-      }
-
-      const files = req.files as { [fieldname: string]: Express.Multer.File[] };
-      const ffFile = files['firstFrame']?.[0];
-      const sceneFile = files['sceneImage']?.[0];
-      const masterFiles = [
-        ...(files['masterImages'] || []),
-        ...(files['masterImage'] || []),
-      ];
-
-      if (masterFiles.length === 0) {
-        return res.status(400).json({ error: '缺少角色母板图 (masterImages)，禁止启动生成任务' });
-      }
-
-      if (!ffFile && !sceneFile) {
-        return res.status(400).json({ error: '缺少首帧图或场景输入图' });
-      }
-
-      const characterId = req.body.characterId;
-      let characterDescription = req.body.characterDescription || '';
-      let identitySpec = req.body.identitySpec ? JSON.parse(req.body.identitySpec || '{}') : { lockedTraits: [] };
-
-      const storedChar = characterId ? serverCharacterStore.get(characterId) : undefined;
-      if (storedChar) {
-        characterDescription = storedChar.description;
-        identitySpec = storedChar.identitySpec;
-      }
-
-      const normalizedPrompt = req.body.normalizedPrompt || '';
-      const sceneMode = req.body.sceneMode || 'replace_primary_person';
-
-      const ai = await GeminiClientFactory.getClientForSession(session);
-      const models = ModelRouter.getEffectiveModels(session);
-
-      let masterBuffers = masterFiles.slice(0, 3).map((f) => f.buffer);
-      let masterMimeTypes = masterFiles.slice(0, 3).map((f) => f.mimetype || 'image/jpeg');
-
-      if (masterBuffers.length === 0 && storedChar && storedChar.referenceImages.length > 0) {
-        masterBuffers = storedChar.referenceImages.slice(0, 3).map((r) => r.buffer);
-        masterMimeTypes = storedChar.referenceImages.slice(0, 3).map((r) => r.mimeType || 'image/jpeg');
-      }
-
-      // Simplified Direct Generation Path (guaranteeing flow through)
-      const approvedFirstFrameBuf = ffFile ? ffFile.buffer : sceneFile!.buffer;
-      const approvedFirstFrameMime = ffFile ? (ffFile.mimetype || 'image/jpeg') : (sceneFile!.mimetype || 'image/jpeg');
-
-      console.log(`[Video Route] 启动直接视频生成流程 (模型: ${models.videoModel})...`);
-
-      const startResult = await VideoGenerator.startVideoGeneration(
-        ai,
-        session,
-        models.videoModel,
-        approvedFirstFrameBuf,
-        approvedFirstFrameMime,
-        masterBuffers,
-        masterMimeTypes,
-        normalizedPrompt,
-        identitySpec,
-        undefined,
-        '',
-        sceneMode,
-        characterDescription
-      );
-
-      const finalDiagnostics = startResult.diagnostics;
-      let videoBuf = startResult.videoBuffer;
-
-      if (!videoBuf && startResult.operationName) {
-        let done = false;
-        let pollCount = 0;
-        while (!done && pollCount < 72) {
-          pollCount++;
-          await new Promise((r) => setTimeout(r, 8000));
-          const pollRes = await VideoGenerator.pollVeoOperation(ai, session, startResult.operationName);
-          if (pollRes.done) {
-            done = true;
-            if (pollRes.error) throw new Error(pollRes.error);
-            videoBuf = pollRes.videoBuffer;
-          }
-        }
-      }
-
-      if (!videoBuf) {
-        throw new Error('未能获得视频数据');
-      }
-
-      const videoDataUrl = `data:video/mp4;base64,${videoBuf.toString('base64')}`;
-
-      const defaultQaReport = {
-        pass: true,
-        identityScore: 98,
-        movementNaturalnessScore: 96,
-        overallScore: 97,
-        criticalIssues: [],
-        repairInstruction: '',
-        keyframes: [],
-      };
-
-      return res.json({
-        videoDataUrl,
-        sizeBytes: videoBuf.length,
-        durationSeconds: 8,
-        qaReport: defaultQaReport,
-        diagnostics: finalDiagnostics,
-        interactionId: startResult.interactionId,
-      });
-    } catch (err: unknown) {
-      const { redactedMessage } = sanitizeError(err);
-      return res.status(500).json({ error: redactedMessage });
-    }
+  // Legacy synchronous generation endpoint is disabled because it bypasses
+  // Firestore/GCS authority and durable post-artifact Identity QA.
+  app.post('/api/videos/generate-and-qa', (_req, res) => {
+    return res.status(410).json({
+      error: 'legacy_video_generation_disabled',
+      useEndpoint: '/api/videos/start',
+    });
   });
 
   // Fallback 404 handler for unmatched /api/* routes to prevent serving HTML

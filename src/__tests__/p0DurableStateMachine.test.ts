@@ -158,9 +158,30 @@ describe('P0-3 + P0-4 Durable State Machine & Idempotency / Crash Recovery Suite
     updated = await taskStateMachineService.transitionTask({ taskId, toStatus: 'qa_pending' });
     expect(updated.status).toBe('qa_pending');
 
-    // qa_pending -> completed
-    updated = await taskStateMachineService.transitionTask({ taskId, toStatus: 'completed' });
+    // qa_pending -> completed only with explicit PASS video Identity QA
+    updated = await taskStateMachineService.completeAfterQa({
+      taskId,
+      qaReport: {
+        pass: true,
+        gateStatus: 'pass',
+        averageIdentityScore: 98,
+        minimumIdentityScore: 96,
+        temporalConsistencyScore: 97,
+        motionNaturalnessScore: 96,
+        anatomyScore: 97,
+        sceneContinuityScore: 96,
+        promptComplianceScore: 96,
+        frameReports: [],
+        criticalIssues: [],
+        repairInstruction: '',
+        summary: 'certified test QA pass',
+        identityDriftDetected: false,
+        worstFrameTimestamp: null,
+        identityDriftSegments: [],
+      },
+    });
     expect(updated.status).toBe('completed');
+    expect(updated.identityQaStatus).toBe('pass');
     expect(updated.completedAt).toBeDefined();
   });
 
@@ -442,7 +463,7 @@ describe('P0-3 + P0-4 Durable State Machine & Idempotency / Crash Recovery Suite
     expect(recoveryRes.recoveredCount).toBe(1);
 
     const recovered = await firestoreTaskRepository.getTask(taskId);
-    expect(recovered?.status).toBe('completed');
+    expect(recovered?.status).toBe('qa_pending');
     expect(recovered?.artifactPersisted).toBe(true);
   });
 
@@ -487,7 +508,7 @@ describe('P0-3 + P0-4 Durable State Machine & Idempotency / Crash Recovery Suite
     expect(recoveryRes.recoveredCount).toBe(1);
 
     const recovered = await firestoreTaskRepository.getTask(taskId);
-    expect(recovered?.status).toBe('completed');
+    expect(recovered?.status).toBe('qa_pending');
   });
 
   it('S11: Max Execution Attempts Guard', async () => {
