@@ -53,6 +53,9 @@ jobs:
           if [ -f scripts/apply-p0-5-recovery-stream-hardening.py ] && ! grep -q "task_metadata_authority_unavailable" server.ts; then
             python3 scripts/apply-p0-5-recovery-stream-hardening.py
           fi
+          if [ -f scripts/apply-p0-5-cloudrun-runtime-hardening.py ] && ! grep -q "const configuredPort = Number(process.env.PORT || 3000);" server.ts; then
+            python3 scripts/apply-p0-5-cloudrun-runtime-hardening.py
+          fi
 
       - name: Diff check
         run: git diff --check
@@ -68,6 +71,23 @@ jobs:
 
       - name: Build Cloud Run container
         run: docker build -t zaojing-p0-5:ci .
+
+      - name: Smoke Cloud Run container on PORT 8080
+        shell: bash
+        run: |
+          set -euo pipefail
+          cid="$(docker run -d -e PORT=8080 -p 18080:8080 zaojing-p0-5:ci)"
+          cleanup() { docker rm -f "$cid" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/api/health >/tmp/p0-5-health.json; then
+              cat /tmp/p0-5-health.json
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$cid" || true
+          exit 1
 
       - name: Commit verified hardening
         shell: bash
@@ -85,5 +105,5 @@ jobs:
             src/__tests__/apiVideoStartRouteIntegration.test.ts \
             src/__tests__/p0DurableStateMachine.test.ts \
             src/__tests__/p0StorageAuthorityRegression.test.ts
-          git commit -m "ci(p0-5): apply verified recovery stream hardening"
+          git commit -m "ci(p0-5): apply verified Cloud Run runtime hardening"
           git push origin HEAD:p0-5-real-e2e-hardening
