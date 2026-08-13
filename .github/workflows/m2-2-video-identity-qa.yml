@@ -10,7 +10,7 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   video-identity-qa:
@@ -21,23 +21,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
-          fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Apply M2-2 production QA integration
-        run: |
-          if grep -q "settlePersistedVideoThroughQa" server.ts; then
-            echo 'Primary production integration already applied.'
-          else
-            python scripts/apply-m2-2-production-qa-integration.py
-          fi
-          python scripts/apply-m2-2-followup.py
 
       - name: Source contract gate
         run: |
@@ -57,6 +40,8 @@ jobs:
             echo 'Production server still contains auto-complete artifact helper.' >&2
             exit 1
           fi
+          test ! -e scripts/apply-m2-2-production-qa-integration.py
+          test ! -e scripts/apply-m2-2-followup.py
           grep -q "persistArtifactForQa" server.ts
           grep -q "completeAfterQa" server.ts
           grep -q "DurableVideoIdentityQaService" server.ts
@@ -86,22 +71,3 @@ jobs:
 
       - name: Diff integrity
         run: git diff --check
-
-      - name: Commit production integration
-        if: github.event_name == 'push'
-        run: |
-          if git diff --quiet; then
-            echo 'Production QA integration already applied.'
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add \
-            server.ts \
-            src/server/services/taskStateMachineService.ts \
-            src/types/index.ts \
-            src/pages/StudioPage.tsx \
-            src/services/tasks/taskOrchestrator.ts \
-            src/__tests__/p0DurableStateMachine.test.ts
-          git commit -m 'feat(m2-2): enforce durable video QA before completed'
-          git push origin HEAD:${GITHUB_REF_NAME}
