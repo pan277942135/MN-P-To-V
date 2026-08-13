@@ -133,7 +133,9 @@ export class TaskOrchestrator {
       const prepared = IdentityLockService.prepareI2VSubmission({
         userPrompt: task.userPromptChinese || 'Natural subtle breathing motion and gentle posture shift.',
         durationSeconds,
-        identityGatePassed: identityGate.canStartVeo,
+        // REVIEW is not allowed to auto-start Veo, but its approved continuation must keep
+        // the exact same compiled motion prompt rather than rebuilding from an empty string.
+        identityGatePassed: identityGate.status !== 'fail',
       });
 
       task.promptScript = {
@@ -355,7 +357,7 @@ export class TaskOrchestrator {
       });
 
       task.qaReport = videoQaReport;
-      task.identityQaStatus = videoQaReport.pass ? 'pass' : 'fail';
+      task.identityQaStatus = videoQaReport.gateStatus;
       task.identityFrameScores = videoQaReport.frameReports.map((frame) => frame.identityScore);
       task.identityDriftDetected = videoQaReport.identityDriftDetected;
       task.worstFrameTimestamp = videoQaReport.worstFrameTimestamp;
