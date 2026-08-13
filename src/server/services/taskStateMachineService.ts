@@ -153,9 +153,16 @@ export class TaskStateMachineService {
           updatedRecord.identityQaStatus === 'pass' &&
           qaReport?.pass === true &&
           qaReport?.gateStatus === 'pass';
-        if (!artifactValid || !qaValid) {
+        const humanReviewValid =
+          updatedRecord.identityQaStatus === 'review' &&
+          qaReport?.gateStatus === 'review' &&
+          updatedRecord.humanReviewDecision === 'accepted' &&
+          updatedRecord.humanReviewRecord?.decision === 'accepted' &&
+          updatedRecord.humanReviewRecord?.sourceQaStatus === 'review' &&
+          Boolean(updatedRecord.humanReviewRecord?.reviewedAt);
+        if (!artifactValid || (!qaValid && !humanReviewValid)) {
           throw new Error(
-            `[VIDEO_QA_COMPLETION_INVARIANT] Task ${taskId} cannot become completed without persisted artifact authority and PASS video identity QA.`
+            `[VIDEO_QA_COMPLETION_INVARIANT] Task ${taskId} cannot become completed without persisted artifact authority and either PASS video identity QA or a durable accepted human review of QA REVIEW.`
           );
         }
       }
@@ -459,6 +466,110 @@ export class TaskStateMachineService {
           retryable: false,
           attempt: currentTask.providerAttempt,
         }),
+        updatedAt: now,
+      };
+      return { taskPatch: patch, result: { ...currentTask, ...patch } as ServerVideoTaskRecord };
+    });
+  }
+
+  public async resolveHumanReview(params: {
+    taskId: string;
+    decision: 'accepted' | 'rejected';
+    reviewerId: string;
+    note?: string;
+  }): Promise<ServerVideoTaskRecord> {
+    const { taskId, decision, reviewerId, note } = params;
+    if (!reviewerId || !reviewerId.trim()) {
+      throw new Error('[HUMAN_REVIEW_REVIEWER_REQUIRED] reviewerId is required.');
+    }
+
+    return await firestoreTaskRepository.runTaskTransaction<ServerVideoTaskRecord>(taskId, (currentTask) => {
+      if (!currentTask) throw new Error(`[TaskStateMachine] Task ${taskId} not found.`);
+
+      if (currentTask.humanReviewRecord) {
+        if (currentTask.humanReviewRecord.decision === decision) {
+          return { taskPatch: undefined, result: currentTask };
+        }
+        throw new Error(
+          `[HUMAN_REVIEW_DECISION_CONFLICT] Task ${taskId} already has durable decision ${currentTask.humanReviewRecord.decision}.`
+        );
+      }
+
+      const qaReport = currentTask.qaReport || currentTask.identityQaReport;
+      const artifactValid =
+        currentTask.artifactPersisted === true &&
+        Boolean(currentTask.outputBucket) &&
+        Boolean(currentTask.outputObjectPath) &&
+        Boolean(currentTask.videoUri);
+      const reviewEligible =
+        currentTask.status === 'qa_pending' &&
+        currentTask.identityQaStatus === 'review' &&
+        qaReport?.gateStatus === 'review' &&
+        artifactValid;
+
+      if (!reviewEligible) {
+        throw new Error(
+          `[HUMAN_REVIEW_NOT_ELIGIBLE] Task ${taskId} must be qa_pending with persisted artifact and QA REVIEW; current status=${currentTask.status}, identityQaStatus=${currentTask.identityQaStatus || 'unset'}.`
+        );
+      }
+
+      const now = Date.now();
+      const version = currentVersion(currentTask);
+      const reviewRecord = {
+        decision,
+        reviewerId: reviewerId.trim().slice(0, 128),
+        note: note?.trim().slice(0, 1000) || undefined,
+        reviewedAt: now,
+        sourceQaStatus: 'review' as const,
+        sourceStateVersion: version,
+        qaSummary: typeof qaReport?.summary === 'string' ? qaReport.summary : undefined,
+        worstFrameTimestamp: currentTask.worstFrameTimestamp ?? qaReport?.worstFrameTimestamp ?? null,
+      };
+
+      if (decision === 'accepted') {
+        const patch: Partial<ServerVideoTaskRecord> = {
+          status: 'completed',
+          stateVersion: version + 1,
+          statusVersion: version + 1,
+          humanReviewDecision: 'accepted',
+          humanReviewRecord: reviewRecord,
+          completedAt: now,
+          error: '',
+          structuredError: null,
+          automaticRetryPlan: {
+            version: 'm2-5-v1',
+            action: 'HUMAN_ACCEPTED_REVIEW',
+            reasonCode: 'HUMAN_ACCEPTED_QA_REVIEW',
+            automatic: false,
+            requiresHumanReview: false,
+          },
+          updatedAt: now,
+        };
+        return { taskPatch: patch, result: { ...currentTask, ...patch } as ServerVideoTaskRecord };
+      }
+
+      const patch: Partial<ServerVideoTaskRecord> = {
+        status: 'failed',
+        stateVersion: version + 1,
+        statusVersion: version + 1,
+        humanReviewDecision: 'rejected',
+        humanReviewRecord: reviewRecord,
+        retryMode: 'NO_RETRY',
+        error: `人工审核拒绝：${reviewRecord.note || '视频未达到人工验收标准'}`,
+        structuredError: buildStructuredError({
+          code: 'HUMAN_REVIEW_REJECTED',
+          message: reviewRecord.note || 'Video was rejected during human review.',
+          stage: 'human_review',
+          retryable: false,
+          attempt: currentTask.providerAttempt,
+        }),
+        automaticRetryPlan: {
+          version: 'm2-5-v1',
+          action: 'HUMAN_REJECTED_REVIEW',
+          reasonCode: 'HUMAN_REJECTED_QA_REVIEW',
+          automatic: false,
+          requiresHumanReview: false,
+        },
         updatedAt: now,
       };
       return { taskPatch: patch, result: { ...currentTask, ...patch } as ServerVideoTaskRecord };

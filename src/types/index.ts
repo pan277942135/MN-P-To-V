@@ -268,6 +268,20 @@ export interface VideoArtifactHistoryRecord {
   archivedAt: number;
 }
 
+
+export type HumanReviewDecision = 'accepted' | 'rejected';
+
+export interface HumanReviewRecord {
+  decision: HumanReviewDecision;
+  reviewerId: string;
+  note?: string;
+  reviewedAt: number;
+  sourceQaStatus: 'review';
+  sourceStateVersion: number;
+  qaSummary?: string;
+  worstFrameTimestamp?: number | null;
+}
+
 export interface MasterImageSpec {
   id: string;
   type: 'front_hd' | 'three_quarter' | 'full_body' | 'other';
@@ -355,6 +369,8 @@ export interface ServerVideoTaskRecord {
   retryReservedAt?: number;
   retryHistory?: VideoRetryHistoryRecord[];
   artifactHistory?: VideoArtifactHistoryRecord[];
+  humanReviewDecision?: HumanReviewDecision;
+  humanReviewRecord?: HumanReviewRecord;
   attempts?: AttemptRecord[];
   diagnostics?: any;
   qaReport?: any;
@@ -552,6 +568,8 @@ export interface GenerationTask {
   identityFrameScores?: number[];
   identityDriftDetected?: boolean;
   worstFrameTimestamp?: number | null;
+  humanReviewDecision?: HumanReviewDecision;
+  humanReviewRecord?: HumanReviewRecord;
   retryCount: number;
   attempts: AttemptRecord[];
   error?: UnifiedError;

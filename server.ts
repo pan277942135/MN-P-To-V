@@ -2444,6 +2444,10 @@ ${cleanPrompt}`
             qaReport: record.qaReport,
             identityQaStatus: 'review',
             requiresManualApproval: true,
+            reviewActions: ['accepted', 'rejected'],
+            humanReviewDecision: record.humanReviewDecision,
+            humanReviewRecord: record.humanReviewRecord,
+            stateVersion: record.stateVersion,
             automaticRetryPlan: record.automaticRetryPlan,
             retryHistory: record.retryHistory,
             artifactPersisted: true,
@@ -3036,6 +3040,48 @@ ${cleanPrompt}`
     } catch (err) {
       console.error(`[Scene Image] Error serving image for ${req.params.taskId}:`, err);
       return res.status(500).send('Error serving image');
+    }
+  });
+
+  // M2-5 Durable Human Review Endpoint
+  app.post('/api/videos/review/:taskId', async (req, res) => {
+    try {
+      const taskId = String(req.params.taskId || '').trim();
+      const decisionRaw = String(req.body?.decision || '').trim().toLowerCase();
+      const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+      if (!taskId) return res.status(400).json({ error: 'taskId is required' });
+      if (decisionRaw !== 'accepted' && decisionRaw !== 'rejected') {
+        return res.status(400).json({ error: 'decision must be accepted or rejected' });
+      }
+
+      const reviewerHeader = String(req.headers['x-reviewer-id'] || 'studio-workbench').trim();
+      const reviewedTask = await taskStateMachineService.resolveHumanReview({
+        taskId,
+        decision: decisionRaw as 'accepted' | 'rejected',
+        reviewerId: reviewerHeader || 'studio-workbench',
+        note,
+      });
+      serverVideoTaskStore.set(taskId, reviewedTask);
+
+      return res.json({
+        status: reviewedTask.status,
+        taskId,
+        stateVersion: reviewedTask.stateVersion,
+        humanReviewDecision: reviewedTask.humanReviewDecision,
+        humanReviewRecord: reviewedTask.humanReviewRecord,
+        identityQaStatus: reviewedTask.identityQaStatus,
+        qaReport: reviewedTask.qaReport,
+        artifactPersisted: reviewedTask.artifactPersisted,
+        videoDataUrl: reviewedTask.videoDataUrl || `/api/videos/stream/${taskId}`,
+        error: reviewedTask.error,
+      });
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      const status = message.includes('HUMAN_REVIEW_DECISION_CONFLICT') ? 409
+        : message.includes('HUMAN_REVIEW_NOT_ELIGIBLE') ? 422
+        : message.includes('HUMAN_REVIEW_REVIEWER_REQUIRED') ? 400
+        : 500;
+      return res.status(status).json({ error: message });
     }
   });
 

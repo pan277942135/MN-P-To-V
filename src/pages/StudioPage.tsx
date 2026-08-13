@@ -332,6 +332,8 @@ export const StudioPage: React.FC<{
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
   const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
   const [isCopiedCurrentTaskParams, setIsCopiedCurrentTaskParams] = useState<boolean>(false);
+  const [isResolvingHumanReview, setIsResolvingHumanReview] = useState<boolean>(false);
+  const [humanReviewNote, setHumanReviewNote] = useState<string>('');
   const timerRef = useRef<any>(null);
 
   const handleCopyCurrentTaskParams = async () => {
@@ -765,14 +767,17 @@ export const StudioPage: React.FC<{
       if (startData.operationName) {
         task.externalOperationName = startData.operationName;
       }
-      task.status = startData.status === 'completed' ? 'completed' : 'polling_video';
+      task.status = startData.status === 'completed' || startData.status === 'qa_pending' ? startData.status : 'polling_video';
       task.progressStage = `视频渲染生成中 (${targetDuration}s 9:16 MP4)`;
       setCurrentTask({ ...task });
       await taskRepository.save(task);
 
       let videoData: any = null;
 
-      if (startData.status === 'completed' && (startData.videoDataUrl || startData.resultVideoUrl)) {
+      if (
+        (startData.status === 'completed' || (startData.status === 'qa_pending' && startData.requiresManualApproval)) &&
+        (startData.videoDataUrl || startData.resultVideoUrl)
+      ) {
         videoData = startData;
       } else {
         // 2. 轮询等待视频渲染完成 (防止 HTTP 长连接超时)
@@ -833,6 +838,15 @@ export const StudioPage: React.FC<{
               }
               pollDone = true;
               videoData = statusData;
+            } else if (statusData.status === 'qa_pending' && statusData.requiresManualApproval) {
+              if (!statusData.videoDataUrl && !statusData.resultVideoUrl) {
+                throw new Error('视频已进入人工复核，但服务端未提供持久化视频播放地址');
+              }
+              pollDone = true;
+              videoData = statusData;
+            } else if (statusData.status === 'submission_outcome_unknown') {
+              pollDone = true;
+              throw new Error(statusData.error || '自动重试提交结果未知，已停止自动重提，请人工核对。');
             } else if (statusData.status === 'polling_timeout') {
               pollDone = true;
               task.status = 'polling_timeout';
@@ -847,7 +861,13 @@ export const StudioPage: React.FC<{
             }
           } catch (pollErr: any) {
             const msg = typeof pollErr?.message === 'string' ? pollErr.message : String(pollErr || '');
-            if (msg.includes('未能成功传输') || msg.includes('异常中断') || msg.includes('多次查询视频')) {
+            if (
+              msg.includes('未能成功传输') ||
+              msg.includes('人工复核') ||
+              msg.includes('自动重试提交结果未知') ||
+              msg.includes('异常中断') ||
+              msg.includes('多次查询视频')
+            ) {
               throw pollErr;
             }
             consecutiveFailures++;
@@ -878,6 +898,8 @@ export const StudioPage: React.FC<{
       if (videoData.outputUri) task.outputUri = videoData.outputUri;
       task.qaReport = videoData.qaReport;
       task.identityQaStatus = videoData.identityQaStatus || task.identityQaStatus;
+      task.humanReviewDecision = videoData.humanReviewDecision || task.humanReviewDecision;
+      task.humanReviewRecord = videoData.humanReviewRecord || task.humanReviewRecord;
       task.status = videoData.status || task.status;
       if (task.status === 'completed') {
         task.progressStage = '视频生成与身份质检完成';
@@ -911,6 +933,61 @@ export const StudioPage: React.FC<{
       setCurrentTask({ ...task });
       await taskRepository.save(task);
       setIsExecuting(false);
+    }
+  };
+
+  const handleVideoHumanReview = async (decision: 'accepted' | 'rejected') => {
+    if (!currentTask || isResolvingHumanReview) return;
+    const storedConnectionId = localStorage.getItem('zaojing_connection_id') || '';
+    setIsResolvingHumanReview(true);
+    try {
+      const { res, data } = await safeFetchApi<any>(`/api/videos/review/${encodeURIComponent(currentTask.id)}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-reviewer-id': 'studio-workbench',
+          ...(storedConnectionId ? { 'x-connection-id': storedConnectionId } : {}),
+        },
+        body: JSON.stringify({
+          decision,
+          note: humanReviewNote.trim() || undefined,
+        }),
+      });
+      if (!res.ok) throw new Error(data.error || `人工审核提交失败 (HTTP ${res.status})`);
+
+      const updatedTask: GenerationTask = {
+        ...currentTask,
+        status: data.status || currentTask.status,
+        identityQaStatus: data.identityQaStatus || currentTask.identityQaStatus,
+        humanReviewDecision: data.humanReviewDecision,
+        humanReviewRecord: data.humanReviewRecord,
+        qaReport: data.qaReport || currentTask.qaReport,
+        resultVideoUrl: data.videoDataUrl || currentTask.resultVideoUrl,
+        progressStage: decision === 'accepted'
+          ? '人工复核已接受，视频正式完成'
+          : '人工复核已拒绝，视频保留用于诊断',
+        progressPercent: 100,
+        updatedAt: Date.now(),
+        ...(data.error
+          ? {
+              error: {
+                code: decision === 'rejected' ? 'HUMAN_REVIEW_REJECTED' : 'HUMAN_REVIEW_ERROR',
+                stage: 'human_review',
+                messageChinese: data.error,
+                technicalMessageRedacted: data.error,
+                httpStatus: null,
+                retryable: false,
+                recommendedAction: '根据人工审核意见调整后重新生成',
+              },
+            }
+          : {}),
+      };
+      setCurrentTask(updatedTask);
+      await taskRepository.save(updatedTask);
+    } catch (err: any) {
+      alert(err?.message || '人工审核提交失败');
+    } finally {
+      setIsResolvingHumanReview(false);
     }
   };
 
@@ -1582,6 +1659,101 @@ export const StudioPage: React.FC<{
                   </div>
                 );
               })()}
+
+              {/* M2-5 Durable Human Review */}
+              {currentTask.status === 'qa_pending' && currentTask.identityQaStatus === 'review' && (
+                <div className="p-4 rounded-xl bg-amber-950/35 border border-amber-700/60 space-y-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="font-bold text-amber-200 text-sm flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4" />
+                        视频身份质检进入人工复核
+                      </div>
+                      <div className="text-[11px] text-amber-100/70 mt-1">
+                        自动 QA 未达到严格 PASS，但未触发硬 FAIL。只有人工明确接受后，服务端才会将任务置为 completed。
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-mono px-2 py-1 rounded bg-amber-900/60 border border-amber-700 text-amber-200">
+                      QA REVIEW
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                    <div className="p-2 rounded bg-black/30 border border-amber-900/40">
+                      <div className="text-zinc-500">平均身份分</div>
+                      <div className="text-zinc-100 font-bold">{String((currentTask.qaReport as any)?.averageIdentityScore ?? 'N/A')}</div>
+                    </div>
+                    <div className="p-2 rounded bg-black/30 border border-amber-900/40">
+                      <div className="text-zinc-500">最低身份分</div>
+                      <div className="text-zinc-100 font-bold">{String((currentTask.qaReport as any)?.minimumIdentityScore ?? 'N/A')}</div>
+                    </div>
+                    <div className="p-2 rounded bg-black/30 border border-amber-900/40">
+                      <div className="text-zinc-500">时序一致性</div>
+                      <div className="text-zinc-100 font-bold">{String((currentTask.qaReport as any)?.temporalConsistencyScore ?? 'N/A')}</div>
+                    </div>
+                    <div className="p-2 rounded bg-black/30 border border-amber-900/40">
+                      <div className="text-zinc-500">最差帧时间</div>
+                      <div className="text-zinc-100 font-bold">{String((currentTask.qaReport as any)?.worstFrameTimestamp ?? currentTask.worstFrameTimestamp ?? 'N/A')}s</div>
+                    </div>
+                  </div>
+
+                  {(currentTask.qaReport as any)?.failureDiagnosis && (
+                    <div className="p-3 rounded-lg bg-black/35 border border-amber-900/40 text-[11px] space-y-1">
+                      <div className="text-zinc-500">结构化诊断</div>
+                      <div className="text-amber-200 font-mono font-bold">
+                        {String((currentTask.qaReport as any).failureDiagnosis.primaryCode || 'REVIEW')}
+                      </div>
+                      <div className="text-zinc-300">
+                        {String((currentTask.qaReport as any).failureDiagnosis.summary || currentTask.qaReport?.summary || '')}
+                      </div>
+                    </div>
+                  )}
+
+                  <textarea
+                    rows={2}
+                    value={humanReviewNote}
+                    onChange={(e) => setHumanReviewNote(e.target.value)}
+                    placeholder="可选：记录接受/拒绝理由，写入 durable review audit（最多 1000 字）"
+                    className="w-full bg-black/30 border border-amber-800/50 rounded-lg p-2.5 text-xs text-zinc-200 focus:outline-none focus:border-amber-500"
+                  />
+
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={isResolvingHumanReview}
+                      onClick={() => handleVideoHumanReview('accepted')}
+                      className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      接受并完成
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isResolvingHumanReview}
+                      onClick={() => handleVideoHumanReview('rejected')}
+                      className="px-4 py-2 rounded-lg bg-rose-800 hover:bg-rose-700 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5"
+                    >
+                      <AlertTriangle className="w-4 h-4" />
+                      拒绝该视频
+                    </button>
+                    {isResolvingHumanReview && (
+                      <span className="text-[11px] text-amber-200 flex items-center gap-1">
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        正在写入服务端审核决策…
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {currentTask.status === 'submission_outcome_unknown' && (
+                <div className="p-4 rounded-xl bg-rose-950/50 border border-rose-700/70 text-xs space-y-2">
+                  <div className="font-bold text-rose-200">自动重试提交结果未知</div>
+                  <div className="text-rose-100/80">
+                    系统已停止自动重提，避免重复消耗 Veo 配额。该状态不能通过“接受视频”解除，需要在任务历史/Provider 侧核对 operation 后再恢复。
+                  </div>
+                </div>
+              )}
 
               {/* Error Box */}
               {(currentTask.error || currentTask.status === 'failed') && (() => {
