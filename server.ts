@@ -162,6 +162,18 @@ async function settlePersistedVideoThroughQa(params: {
   } catch (qaErr: any) {
     const currentQaAttempt = qaPendingTask.qaAttempt || 1;
     const canReQa = currentQaAttempt < 2;
+    const retryHistoryForQaError = [...(qaPendingTask.retryHistory || [])];
+    if ((qaPendingTask.providerAttempt || 1) > 1) {
+      for (let i = retryHistoryForQaError.length - 1; i >= 0; i--) {
+        if (retryHistoryForQaError[i].providerAttempt === (qaPendingTask.providerAttempt || 1)) {
+          retryHistoryForQaError[i] = {
+            ...retryHistoryForQaError[i],
+            state: canReQa ? 'qa_retry' : 'manual_review',
+          };
+          break;
+        }
+      }
+    }
     const qaError = {
       code: 'VIDEO_IDENTITY_QA_EXECUTION_FAILED',
       message: qaErr?.message || String(qaErr),
@@ -177,6 +189,7 @@ async function settlePersistedVideoThroughQa(params: {
         error: qaError.message,
         identityQaStatus: canReQa ? 'not_run' : 'review',
         qaAttempt: canReQa ? currentQaAttempt + 1 : currentQaAttempt,
+        retryHistory: retryHistoryForQaError,
         automaticRetryPlan: {
           version: 'm2-4-v1',
           action: canReQa ? 'REQA_SAME_ARTIFACT' : 'MANUAL_REVIEW',
@@ -205,16 +218,41 @@ async function settlePersistedVideoThroughQa(params: {
     ? { ...qaReport, failureDiagnosis, retryDecision }
     : { ...qaReport, retryDecision };
 
+  const retryHistoryForOutcome = [...(qaPendingTask.retryHistory || [])];
+  if ((qaPendingTask.providerAttempt || 1) > 1) {
+    const retryOutcomeState =
+      qaReport.gateStatus === 'pass'
+        ? 'completed'
+        : retryDecision.action === 'REQA_SAME_ARTIFACT'
+          ? 'qa_retry'
+          : (qaReport.gateStatus === 'review' || retryDecision.action === 'MANUAL_REVIEW')
+            ? 'manual_review'
+            : 'failed';
+    for (let i = retryHistoryForOutcome.length - 1; i >= 0; i--) {
+      if (retryHistoryForOutcome[i].providerAttempt === (qaPendingTask.providerAttempt || 1)) {
+        retryHistoryForOutcome[i] = {
+          ...retryHistoryForOutcome[i],
+          state: retryOutcomeState,
+        };
+        break;
+      }
+    }
+  }
+
   if (qaReport.gateStatus === 'pass') {
     return await taskStateMachineService.completeAfterQa({
       taskId,
       qaReport: diagnosedQaReport,
-      patch,
+      patch: {
+        ...patch,
+        retryHistory: retryHistoryForOutcome,
+      },
     });
   }
 
   const commonQaPatch: Partial<ServerVideoTaskRecord> = {
     ...patch,
+    retryHistory: retryHistoryForOutcome,
     qaReport: diagnosedQaReport,
     identityQaReport: diagnosedQaReport,
     identityQaStatus: qaReport.gateStatus,
@@ -2516,6 +2554,18 @@ ${cleanPrompt}`
           progressStage: '正在提交自动定向重试；已持久化 retry reservation，禁止重复提单',
           providerAttempt: record.providerAttempt,
           automaticRetryPlan: record.automaticRetryPlan,
+        });
+      }
+
+      if (record.status === 'submission_outcome_unknown') {
+        return res.json({
+          status: 'submission_outcome_unknown',
+          error: record.error,
+          structuredError: record.structuredError,
+          providerAttempt: record.providerAttempt,
+          automaticRetryPlan: record.automaticRetryPlan,
+          retryHistory: record.retryHistory,
+          requiresManualReview: true,
         });
       }
 
