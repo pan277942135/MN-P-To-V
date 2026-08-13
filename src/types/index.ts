@@ -239,6 +239,7 @@ export interface GenerationConfig {
 
 export type IdentitySourceMode = 'DIRECT_CHARACTER_IMAGE' | 'IDENTITY_REBUILD_REQUIRED';
 export type FirstFrameIdentityQaStatus = 'pass' | 'fail' | 'review';
+export type VideoIdentityQaStatus = 'not_run' | 'pass' | 'review' | 'fail';
 
 export interface MasterImageSpec {
   id: string;
@@ -332,8 +333,8 @@ export interface ServerVideoTaskRecord {
   identityDriftRisk?: 'low' | 'medium' | 'high';
   identityDriftWarning?: string;
 
-  // M2-2 Reserved Video QA fields
-  identityQaStatus?: 'not_run' | 'pass' | 'fail';
+  // M2-2 Video QA fields
+  identityQaStatus?: VideoIdentityQaStatus;
   identityQaReport?: any;
   identityFrameScores?: number[];
   identityDriftDetected?: boolean;
@@ -507,7 +508,7 @@ export interface GenerationTask {
   identityCriticalIssues?: string[];
   identityDriftRisk?: 'low' | 'medium' | 'high';
   identityDriftWarning?: string;
-  identityQaStatus?: 'not_run' | 'pass' | 'fail';
+  identityQaStatus?: VideoIdentityQaStatus;
   identityFrameScores?: number[];
   identityDriftDetected?: boolean;
   worstFrameTimestamp?: number | null;
