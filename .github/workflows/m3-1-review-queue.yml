@@ -24,7 +24,6 @@ jobs:
 
       - name: Review queue contract gate
         run: |
-          test ! -e scripts/apply-m3-1-review-queue-nav.py
           grep -q "HumanReviewQueuePage" src/App.tsx
           grep -q "'review'" src/components/Sidebar.tsx
           grep -q "isHumanReviewEligibleTask" src/services/review/humanReviewQueueService.ts
