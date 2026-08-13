@@ -1,0 +1,57 @@
+name: M2-3 Failure Diagnosis
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - m2-3-failure-diagnosis
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  failure-diagnosis:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Diagnosis contract gate
+        run: |
+          test ! -e scripts/apply-m2-3-failure-diagnosis.py
+          grep -q "VideoFailureDiagnosisService.diagnose(qaReport)" server.ts
+          grep -q "VideoFailureDiagnosisService.diagnose(videoQaReport)" src/services/tasks/taskOrchestrator.ts
+          grep -q "failureDiagnosis?.repairPromptAppend" src/services/tasks/taskOrchestrator.ts
+          grep -q "IDENTITY_SWAP_OR_SEVERE_LOSS" src/services/qa/videoFailureDiagnosisService.ts
+          grep -q "QA_EVIDENCE_INCOMPLETE" src/services/qa/videoFailureDiagnosisService.ts
+          grep -q "failureDiagnosis" server.ts
+          if grep -q "generateContent" src/services/qa/videoFailureDiagnosisService.ts; then
+            echo 'Failure diagnosis must be deterministic and must not call a generative model.' >&2
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check

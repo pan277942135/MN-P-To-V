@@ -14,6 +14,7 @@ import { VisualQaService } from './src/services/qa/visualQaService';
 import { VideoGenerator } from './src/services/video/videoGenerator';
 import { VideoInspector } from './src/services/video/videoInspector';
 import { DurableVideoIdentityQaService } from './src/server/services/durableVideoIdentityQaService';
+import { VideoFailureDiagnosisService } from './src/services/qa/videoFailureDiagnosisService';
 import { GeminiClientFactory } from './src/services/google/geminiClient';
 import { ModelRouter } from './src/services/google/modelRouter';
 import { PromptCompiler } from './src/services/prompt/PromptCompiler';
@@ -175,18 +176,23 @@ async function settlePersistedVideoThroughQa(params: {
     });
   }
 
+  const failureDiagnosis = VideoFailureDiagnosisService.diagnose(qaReport);
+  const diagnosedQaReport = failureDiagnosis
+    ? { ...qaReport, failureDiagnosis }
+    : qaReport;
+
   if (qaReport.gateStatus === 'pass') {
     return await taskStateMachineService.completeAfterQa({
       taskId,
-      qaReport,
+      qaReport: diagnosedQaReport,
       patch,
     });
   }
 
   const commonQaPatch: Partial<ServerVideoTaskRecord> = {
     ...patch,
-    qaReport,
-    identityQaReport: qaReport,
+    qaReport: diagnosedQaReport,
+    identityQaReport: diagnosedQaReport,
     identityQaStatus: qaReport.gateStatus,
     identityFrameScores: qaReport.frameReports.map((frame) => frame.identityScore),
     identityDriftDetected: qaReport.identityDriftDetected,
@@ -207,10 +213,10 @@ async function settlePersistedVideoThroughQa(params: {
     patch: {
       ...commonQaPatch,
       failureReason: 'artifact_invalid',
-      retryMode: 'SAFE_TO_REGENERATE',
-      error: `视频身份一致性质检失败: ${qaReport.summary}`,
+      retryMode: failureDiagnosis?.retryRecommended === false ? 'NO_RETRY' : 'SAFE_TO_REGENERATE',
+      error: `视频身份一致性质检失败 [${failureDiagnosis?.primaryCode || 'UNKNOWN_VIDEO_QA_FAILURE'}]: ${qaReport.summary}`,
       structuredError: {
-        code: 'VIDEO_IDENTITY_QA_FAILED',
+        code: `VIDEO_IDENTITY_QA_${failureDiagnosis?.primaryCode || 'UNKNOWN_VIDEO_QA_FAILURE'}`,
         message: qaReport.summary,
         stage: 'qa_video',
         retryable: true,
@@ -218,6 +224,7 @@ async function settlePersistedVideoThroughQa(params: {
         details: {
           minimumIdentityScore: qaReport.minimumIdentityScore,
           worstFrameTimestamp: qaReport.worstFrameTimestamp,
+          failureDiagnosis,
         },
       },
     },
