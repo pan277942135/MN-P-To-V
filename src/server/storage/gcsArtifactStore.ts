@@ -78,6 +78,43 @@ function getStorageClient(): Storage {
   return storageClientInstance;
 }
 
+function getStorageClientsForSessions(options?: { session?: any; accessToken?: string }): Storage[] {
+  const clients: Storage[] = [];
+  const seenKeys = new Set<string>();
+
+  const addClientForSession = (s: any) => {
+    if (!s) return;
+    if (s.serviceAccountJsonRaw && !seenKeys.has(s.serviceAccountJsonRaw)) {
+      seenKeys.add(s.serviceAccountJsonRaw);
+      try {
+        const credentials = JSON.parse(s.serviceAccountJsonRaw);
+        clients.push(new Storage({ credentials, projectId: s.projectId }));
+      } catch {}
+    } else if (s.serviceAccountJwt && !seenKeys.has('jwt_' + (s.connectionId || s.projectId))) {
+      seenKeys.add('jwt_' + (s.connectionId || s.projectId));
+      try {
+        clients.push(new Storage({ authClient: s.serviceAccountJwt, projectId: s.projectId }));
+      } catch {}
+    }
+  };
+
+  if (options?.session) {
+    addClientForSession(options.session);
+  }
+
+  try {
+    const { CredentialService } = require('../../services/google/credentialService');
+    const sessions = CredentialService.listSessions();
+    for (const s of sessions) {
+      addClientForSession(s);
+    }
+  } catch {}
+
+  // Fallback to container default ADC
+  clients.push(getStorageClient());
+  return clients;
+}
+
 export interface ArtifactMetadata {
   outputBucket: string;
   outputObjectPath: string;
@@ -320,7 +357,7 @@ export class GcsArtifactStore {
   public async fetchArtifactBuffer(
     bucketName: string,
     objectPath: string,
-    options?: { accessToken?: string; apiKey?: string }
+    options?: { accessToken?: string; apiKey?: string; session?: any }
   ): Promise<Buffer> {
     const activeBucket = getVeoBucketName();
     const candidateBuckets = Array.from(
@@ -338,33 +375,53 @@ export class GcsArtifactStore {
       throw new Error(`[GcsArtifactStore Mock] Artifact gs://${bucketName}/${objectPath} not found in mock store.`);
     }
 
-    // Tier 1: Try Node @google-cloud/storage SDK
+    // Tier 1: Try Node @google-cloud/storage SDK with session credentials then ADC
     let lastError = '';
-    for (const b of candidateBuckets) {
-      try {
-        const storage = getStorageClient();
-        const file = storage.bucket(b).file(objectPath);
-        const [buffer] = await file.download();
-        if (buffer && buffer.length > 0) {
-          return buffer;
+    const storageClients = getStorageClientsForSessions(options);
+
+    for (const storage of storageClients) {
+      for (const b of candidateBuckets) {
+        try {
+          const file = storage.bucket(b).file(objectPath);
+          const [buffer] = await file.download();
+          if (buffer && buffer.length > 0) {
+            return buffer;
+          }
+        } catch (err: any) {
+          lastError = err?.message || String(err);
+          const firstLine = lastError.split('\n')[0];
+          console.debug(`[GcsArtifactStore Notice] SDK download for gs://${b}/${objectPath} skipped: ${firstLine}`);
         }
-      } catch (err: any) {
-        lastError = err?.message || String(err);
-        const firstLine = lastError.split('\n')[0];
-        console.debug(`[GcsArtifactStore Notice] SDK download for gs://${b}/${objectPath} skipped: ${firstLine}`);
       }
     }
 
     // Tier 2: Fallback to HTTP REST fetch via Vertex Access Token or API Key
     try {
       let token = options?.accessToken;
+      let activeSession = options?.session;
+
+      if (!activeSession) {
+        try {
+          const { CredentialService } = await import('../../services/google/credentialService');
+          activeSession = CredentialService.getSession();
+        } catch {}
+      }
+
+      if (!token && activeSession && activeSession.type === 'vertex_ai') {
+        try {
+          const { VertexClient } = await import('../../services/google/vertexClient');
+          token = await VertexClient.getAccessToken(activeSession).catch(() => undefined);
+        } catch {}
+      }
+
       if (!token) {
         try {
           const { CredentialService } = await import('../../services/google/credentialService');
           const { VertexClient } = await import('../../services/google/vertexClient');
-          const session = CredentialService.getSession();
-          if (session && session.type === 'vertex_ai') {
-            token = await VertexClient.getAccessToken(session).catch(() => undefined);
+          const sessions = CredentialService.listSessions();
+          const vSession = sessions.find((s: any) => s.type === 'vertex_ai');
+          if (vSession) {
+            token = await VertexClient.getAccessToken(vSession).catch(() => undefined);
           }
         } catch {}
       }
@@ -384,7 +441,7 @@ export class GcsArtifactStore {
         } catch {}
       }
 
-      const apiKey = options?.apiKey || process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
+      const apiKey = options?.apiKey || activeSession?.apiKey || process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
 
       for (const b of candidateBuckets) {
         try {

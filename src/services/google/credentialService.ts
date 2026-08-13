@@ -136,6 +136,10 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 export class CredentialService {
+  static setSession(session: ActiveSession): void {
+    sessionsMap.set(session.connectionId, session);
+  }
+
   static getSession(connectionId?: string): ActiveSession | undefined {
     const now = Date.now();
     if (connectionId) {

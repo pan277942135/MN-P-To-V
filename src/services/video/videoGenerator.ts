@@ -652,6 +652,24 @@ export class VideoGenerator {
       new Set([uriBucket, activeBucket, EXPECTED_PRODUCTION_VEO_BUCKET].filter(Boolean))
     );
 
+    let resolvedToken = accessToken;
+    let resolvedApiKey = apiKey;
+    if (!resolvedToken) {
+      try {
+        const { CredentialService } = await import('../google/credentialService');
+        const { VertexClient } = await import('../google/vertexClient');
+        const sessions = CredentialService.listSessions();
+        const vSession = sessions.find((s: any) => s.type === 'vertex_ai');
+        if (vSession) {
+          resolvedToken = await VertexClient.getAccessToken(vSession).catch(() => undefined);
+          if (!resolvedApiKey) resolvedApiKey = vSession.apiKey;
+        }
+      } catch {}
+    }
+    if (!resolvedApiKey) {
+      resolvedApiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
+    }
+
     const candidateUrls: string[] = [];
     for (const b of candidateBuckets) {
       candidateUrls.push(
@@ -669,13 +687,12 @@ export class VideoGenerator {
       for (const rawUrl of candidateUrls) {
         try {
           let url = rawUrl;
-          const isGcsUrl = url.includes('storage.googleapis.com') || url.includes('storage.cloud.google.com');
-          if (!isGcsUrl && apiKey && !url.includes('key=')) {
-            url += (url.includes('?') ? '&' : '?') + `key=${apiKey}`;
+          if (resolvedApiKey && !url.includes('key=')) {
+            url += (url.includes('?') ? '&' : '?') + `key=${resolvedApiKey}`;
           }
           const headers: Record<string, string> = {};
-          if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
-          if (!isGcsUrl && apiKey) headers['x-goog-api-key'] = apiKey;
+          if (resolvedToken) headers['Authorization'] = `Bearer ${resolvedToken}`;
+          if (resolvedApiKey) headers['x-goog-api-key'] = resolvedApiKey;
 
           const res = await fetch(url, { headers });
           if (res.ok) {

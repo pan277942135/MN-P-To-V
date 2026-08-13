@@ -7,6 +7,7 @@ import { createServer as createViteServer } from 'vite';
 import { CredentialService } from './src/services/google/credentialService';
 import { VertexClient } from './src/services/google/vertexClient';
 import { IdentityBuilder } from './src/services/character/identityBuilder';
+import { IdentityLockService } from './src/services/character/identityLockService';
 import { SceneAnalyzer } from './src/services/scene/sceneAnalyzer';
 import { FirstFrameGenerator } from './src/services/image/firstFrameGenerator';
 import { VisualQaService } from './src/services/qa/visualQaService';
@@ -23,7 +24,166 @@ import { firestoreTaskRepository } from './src/server/repositories/firestoreTask
 import { getStorageAuthority } from './src/server/db/firestore';
 import { gcsArtifactStore, resolveVeoOutputBucket, resolveVeoStorageUri, getVeoBucketName, getVeoStorageUri, assertProductionStorageConfig, EXPECTED_PRODUCTION_VEO_BUCKET } from './src/server/storage/gcsArtifactStore';
 
-async function startServer() {
+// Server Video Task Store & Physical Video File Persistence
+const TASKS_FILE_PATH = path.join(process.cwd(), 'data', 'video_tasks.json');
+const VIDEOS_DIR = path.join(process.cwd(), 'data', 'videos');
+const IMAGES_DIR = path.join(process.cwd(), 'data', 'images');
+
+function saveImageBufferToFile(taskId: string, buffer: Buffer, mimeType = 'image/jpeg'): string {
+  try {
+    if (!fs.existsSync(IMAGES_DIR)) {
+      fs.mkdirSync(IMAGES_DIR, { recursive: true });
+    }
+    const ext = mimeType.includes('png') ? 'png' : 'jpg';
+    const filePath = path.join(IMAGES_DIR, `${taskId}.${ext}`);
+    fs.writeFileSync(filePath, buffer);
+    console.log(`[Image Storage] Saved scene image file: ${filePath} (${buffer.length} bytes)`);
+    return `/api/videos/image/${taskId}`;
+  } catch (err) {
+    console.error(`[Image Storage] Error saving image file for ${taskId}:`, err);
+    return `/api/videos/image/${taskId}`;
+  }
+}
+
+function saveVideoBufferToFile(taskId: string, buffer: Buffer): { videoUrl: string; sizeBytes: number } {
+  try {
+    if (!fs.existsSync(VIDEOS_DIR)) {
+      fs.mkdirSync(VIDEOS_DIR, { recursive: true });
+    }
+    const filePath = path.join(VIDEOS_DIR, `${taskId}.mp4`);
+    fs.writeFileSync(filePath, buffer);
+    console.log(`[Video Storage] Saved physical MP4 video file: ${filePath} (${buffer.length} bytes)`);
+
+    const rec = serverVideoTaskStore.get(taskId);
+    if (rec) {
+      rec.videoBase64 = buffer.toString('base64');
+      rec.sizeBytes = buffer.length;
+      rec.videoDataUrl = `/api/videos/stream/${taskId}`;
+      saveTasksToDisk(serverVideoTaskStore);
+    }
+
+    return {
+      videoUrl: `/api/videos/stream/${taskId}`,
+      sizeBytes: buffer.length,
+    };
+  } catch (err) {
+    console.error(`[Video Storage] Error saving video file for ${taskId}:`, err);
+    return {
+      videoUrl: `data:video/mp4;base64,${buffer.toString('base64')}`,
+      sizeBytes: buffer.length,
+    };
+  }
+}
+
+function loadTasksFromDisk(): Map<string, ServerVideoTaskRecord> {
+  const map = new Map<string, ServerVideoTaskRecord>();
+  try {
+    if (!fs.existsSync(VIDEOS_DIR)) {
+      fs.mkdirSync(VIDEOS_DIR, { recursive: true });
+    }
+    if (fs.existsSync(TASKS_FILE_PATH)) {
+      const content = fs.readFileSync(TASKS_FILE_PATH, 'utf-8');
+      const list: ServerVideoTaskRecord[] = JSON.parse(content);
+      for (const t of list) {
+        const tid = t.taskId || t.id;
+        if (!tid) continue;
+
+        const filePath = path.join(VIDEOS_DIR, `${tid}.mp4`);
+        const base64Data = t.videoBase64 || (t.videoDataUrl && t.videoDataUrl.startsWith('data:video/') ? t.videoDataUrl.split(',')[1] : undefined);
+        if (base64Data && (!fs.existsSync(filePath) || fs.statSync(filePath).size < 1000)) {
+          try {
+            const buf = Buffer.from(base64Data, 'base64');
+            if (buf.length > 1000) {
+              fs.writeFileSync(filePath, buf);
+              t.videoDataUrl = `/api/videos/stream/${tid}`;
+              t.sizeBytes = buf.length;
+              console.log(`[Disk Store] Restored MP4 file from base64 cache for task ${tid} (${buf.length} bytes)`);
+            }
+          } catch (migErr) {
+            console.warn(`[Task Migration] Failed to restore Base64 video for ${tid}:`, migErr);
+          }
+        }
+        map.set(tid, t);
+      }
+    }
+  } catch (err) {
+    console.warn('[Disk Store] Warning: Could not load tasks from disk:', err);
+  }
+  return map;
+}
+
+function saveTasksToDisk(map: Map<string, ServerVideoTaskRecord>) {
+  try {
+    const dir = path.dirname(TASKS_FILE_PATH);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const list = Array.from(map.values()).map(rec => {
+      const tid = rec.taskId || rec.id;
+      if (tid) {
+        const mp4Path = path.join(VIDEOS_DIR, `${tid}.mp4`);
+        if (fs.existsSync(mp4Path) && fs.statSync(mp4Path).size > 1000 && rec.videoBase64) {
+          const { videoBase64, ...rest } = rec;
+          return rest;
+        }
+      }
+      return rec;
+    });
+    fs.writeFileSync(TASKS_FILE_PATH, JSON.stringify(list, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('[Disk Store] Warning: Could not save tasks to disk:', err);
+  }
+}
+
+function getStatusRank(status: string): number {
+  switch (status) {
+    case 'submitting': return 1;
+    case 'submitted': return 2;
+    case 'polling':
+    case 'processing': return 3;
+    case 'polling_timeout': return 3.5;
+    case 'completed':
+    case 'failed': return 5;
+    default: return 0;
+  }
+}
+
+async function safeUpdateTaskRecord(taskId: string, updates: Partial<ServerVideoTaskRecord>): Promise<ServerVideoTaskRecord> {
+  if (!firestoreTaskRepository.isAvailable()) {
+    throw new Error(`[safeUpdateTaskRecord] Firestore is unavailable. Cannot update task ${taskId}.`);
+  }
+
+  const currentRecord = await firestoreTaskRepository.getTask(taskId);
+  if (!currentRecord) {
+    throw new Error(`[safeUpdateTaskRecord] Task ${taskId} does not exist in Firestore.`);
+  }
+
+  if ((currentRecord.status === 'completed' || currentRecord.status === 'failed') && updates.status && updates.status !== currentRecord.status) {
+    console.warn(`[Task State Machine] Blocked illegal status transition for Task ${taskId}: ${currentRecord.status} -> ${updates.status}`);
+    delete updates.status;
+  }
+
+  const nextUpdates: Partial<ServerVideoTaskRecord> = {
+    ...updates,
+    statusVersion: (currentRecord.statusVersion || 0) + 1,
+    updatedAt: Date.now(),
+    evidenceSource: 'firestore',
+  };
+
+  const updatedRecord = await firestoreTaskRepository.updateTask(taskId, nextUpdates);
+  if (!updatedRecord) {
+    throw new Error(`[safeUpdateTaskRecord] Firestore updateTask failed for task ${taskId}.`);
+  }
+
+  serverVideoTaskStore.set(taskId, updatedRecord);
+  saveTasksToDisk(serverVideoTaskStore);
+
+  return updatedRecord;
+}
+
+export const serverVideoTaskStore = loadTasksFromDisk();
+
+export async function createApp() {
   const app = express();
   const PORT = 3000;
 
@@ -799,165 +959,6 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
     }
   });
 
-  // Server Video Task Store & Physical Video File Persistence
-  const TASKS_FILE_PATH = path.join(process.cwd(), 'data', 'video_tasks.json');
-  const VIDEOS_DIR = path.join(process.cwd(), 'data', 'videos');
-  const IMAGES_DIR = path.join(process.cwd(), 'data', 'images');
-
-  function saveImageBufferToFile(taskId: string, buffer: Buffer, mimeType = 'image/jpeg'): string {
-    try {
-      if (!fs.existsSync(IMAGES_DIR)) {
-        fs.mkdirSync(IMAGES_DIR, { recursive: true });
-      }
-      const ext = mimeType.includes('png') ? 'png' : 'jpg';
-      const filePath = path.join(IMAGES_DIR, `${taskId}.${ext}`);
-      fs.writeFileSync(filePath, buffer);
-      console.log(`[Image Storage] Saved scene image file: ${filePath} (${buffer.length} bytes)`);
-      return `/api/videos/image/${taskId}`;
-    } catch (err) {
-      console.error(`[Image Storage] Error saving image file for ${taskId}:`, err);
-      return `/api/videos/image/${taskId}`;
-    }
-  }
-
-  function saveVideoBufferToFile(taskId: string, buffer: Buffer): { videoUrl: string; sizeBytes: number } {
-    try {
-      if (!fs.existsSync(VIDEOS_DIR)) {
-        fs.mkdirSync(VIDEOS_DIR, { recursive: true });
-      }
-      const filePath = path.join(VIDEOS_DIR, `${taskId}.mp4`);
-      fs.writeFileSync(filePath, buffer);
-      console.log(`[Video Storage] Saved physical MP4 video file: ${filePath} (${buffer.length} bytes)`);
-
-      const rec = serverVideoTaskStore.get(taskId);
-      if (rec) {
-        rec.videoBase64 = buffer.toString('base64');
-        rec.sizeBytes = buffer.length;
-        rec.videoDataUrl = `/api/videos/stream/${taskId}`;
-        saveTasksToDisk(serverVideoTaskStore);
-      }
-
-      return {
-        videoUrl: `/api/videos/stream/${taskId}`,
-        sizeBytes: buffer.length,
-      };
-    } catch (err) {
-      console.error(`[Video Storage] Error saving video file for ${taskId}:`, err);
-      return {
-        videoUrl: `data:video/mp4;base64,${buffer.toString('base64')}`,
-        sizeBytes: buffer.length,
-      };
-    }
-  }
-
-  function loadTasksFromDisk(): Map<string, ServerVideoTaskRecord> {
-    const map = new Map<string, ServerVideoTaskRecord>();
-    try {
-      if (!fs.existsSync(VIDEOS_DIR)) {
-        fs.mkdirSync(VIDEOS_DIR, { recursive: true });
-      }
-      if (fs.existsSync(TASKS_FILE_PATH)) {
-        const content = fs.readFileSync(TASKS_FILE_PATH, 'utf-8');
-        const list: ServerVideoTaskRecord[] = JSON.parse(content);
-        for (const t of list) {
-          const tid = t.taskId || t.id;
-          if (!tid) continue;
-
-          const filePath = path.join(VIDEOS_DIR, `${tid}.mp4`);
-          const base64Data = t.videoBase64 || (t.videoDataUrl && t.videoDataUrl.startsWith('data:video/') ? t.videoDataUrl.split(',')[1] : undefined);
-          if (base64Data && (!fs.existsSync(filePath) || fs.statSync(filePath).size < 1000)) {
-            try {
-              const buf = Buffer.from(base64Data, 'base64');
-              if (buf.length > 1000) {
-                fs.writeFileSync(filePath, buf);
-                t.videoDataUrl = `/api/videos/stream/${tid}`;
-                t.sizeBytes = buf.length;
-                console.log(`[Disk Store] Restored MP4 file from base64 cache for task ${tid} (${buf.length} bytes)`);
-              }
-            } catch (migErr) {
-              console.warn(`[Task Migration] Failed to restore Base64 video for ${tid}:`, migErr);
-            }
-          }
-          map.set(tid, t);
-        }
-      }
-    } catch (err) {
-      console.warn('[Disk Store] Warning: Could not load tasks from disk:', err);
-    }
-    return map;
-  }
-
-  function saveTasksToDisk(map: Map<string, ServerVideoTaskRecord>) {
-    try {
-      const dir = path.dirname(TASKS_FILE_PATH);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      const list = Array.from(map.values()).map(rec => {
-        const tid = rec.taskId || rec.id;
-        if (tid) {
-          const mp4Path = path.join(VIDEOS_DIR, `${tid}.mp4`);
-          if (fs.existsSync(mp4Path) && fs.statSync(mp4Path).size > 1000 && rec.videoBase64) {
-            const { videoBase64, ...rest } = rec;
-            return rest;
-          }
-        }
-        return rec;
-      });
-      fs.writeFileSync(TASKS_FILE_PATH, JSON.stringify(list, null, 2), 'utf-8');
-    } catch (err) {
-      console.warn('[Disk Store] Warning: Could not save tasks to disk:', err);
-    }
-  }
-
-  function getStatusRank(status: string): number {
-    switch (status) {
-      case 'submitting': return 1;
-      case 'submitted': return 2;
-      case 'polling':
-      case 'processing': return 3;
-      case 'polling_timeout': return 3.5;
-      case 'completed':
-      case 'failed': return 5;
-      default: return 0;
-    }
-  }
-
-  async function safeUpdateTaskRecord(taskId: string, updates: Partial<ServerVideoTaskRecord>): Promise<ServerVideoTaskRecord> {
-    if (!firestoreTaskRepository.isAvailable()) {
-      throw new Error(`[safeUpdateTaskRecord] Firestore is unavailable. Cannot update task ${taskId}.`);
-    }
-
-    const currentRecord = await firestoreTaskRepository.getTask(taskId);
-    if (!currentRecord) {
-      throw new Error(`[safeUpdateTaskRecord] Task ${taskId} does not exist in Firestore.`);
-    }
-
-    if ((currentRecord.status === 'completed' || currentRecord.status === 'failed') && updates.status && updates.status !== currentRecord.status) {
-      console.warn(`[Task State Machine] Blocked illegal status transition for Task ${taskId}: ${currentRecord.status} -> ${updates.status}`);
-      delete updates.status;
-    }
-
-    const nextUpdates: Partial<ServerVideoTaskRecord> = {
-      ...updates,
-      statusVersion: (currentRecord.statusVersion || 0) + 1,
-      updatedAt: Date.now(),
-      evidenceSource: 'firestore',
-    };
-
-    const updatedRecord = await firestoreTaskRepository.updateTask(taskId, nextUpdates);
-    if (!updatedRecord) {
-      throw new Error(`[safeUpdateTaskRecord] Firestore updateTask failed for task ${taskId}.`);
-    }
-
-    serverVideoTaskStore.set(taskId, updatedRecord);
-    saveTasksToDisk(serverVideoTaskStore);
-
-    return updatedRecord;
-  }
-
-  const serverVideoTaskStore = loadTasksFromDisk();
-
   // Async Video Task Start Endpoint
   app.post('/api/videos/start', upload.fields([
     { name: 'firstFrame', maxCount: 1 },
@@ -1063,6 +1064,29 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         sceneMode,
         imageIsTargetCharacter,
       });
+
+      // Fail-closed Rule B: If rebuild is required, at least 1 master image must exist
+      if (sourceMode === 'IDENTITY_REBUILD_REQUIRED' && masterBuffers.length === 0) {
+        console.warn(`[Video Start] 拒绝启动 Veo: 缺失目标角色母板图 (identity_reference_missing)`);
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'submit',
+          httpStatus: 400,
+          customUserMessage: '未提供目标角色母板图 (master image)，且当前图像未标记为确认目标角色图，无法进行角色重建与质检。',
+          endpointPathRedacted: '/api/videos/start',
+        });
+
+        return res.status(400).json({
+          accepted: false,
+          serverPersisted: false,
+          status: 'failed',
+          submissionState: 'not_submitted',
+          failureReason: 'identity_reference_missing',
+          error: errObj.userMessage,
+          predictLongRunningCalls: 0,
+          structuredError: errObj,
+        });
+      }
 
       const rawSceneBuf = sceneFile ? sceneFile.buffer : ffFile!.buffer;
       const rawSceneMime = sceneFile ? (sceneFile.mimetype || 'image/jpeg') : (ffFile!.mimetype || 'image/jpeg');
@@ -2807,20 +2831,19 @@ ${cleanPrompt}`
 
         const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
         let accessToken: string | undefined;
+        let activeSession: any = undefined;
         const connId = (req.headers['x-connection-id'] as string) || (req.query.connectionId as string) || rec?.connectionId;
         if (connId) {
-          const session = CredentialService.getSession(connId);
-          if (session && session.type === 'vertex_ai') {
-            accessToken = await VertexClient.getAccessToken(session).catch(() => undefined);
-          }
+          activeSession = CredentialService.getSession(connId);
         }
-        if (!accessToken) {
+        if (!activeSession) {
           const sessions = CredentialService.listSessions();
-          const vSession = sessions.find((s: any) => s.type === 'vertex_ai');
-          if (vSession) {
-            accessToken = await VertexClient.getAccessToken(vSession).catch(() => undefined);
-          }
+          activeSession = sessions.find((s: any) => s.type === 'vertex_ai') || CredentialService.getSession();
         }
+        if (activeSession && activeSession.type === 'vertex_ai') {
+          accessToken = await VertexClient.getAccessToken(activeSession).catch(() => undefined);
+        }
+
         if (!accessToken) {
           try {
             const { GoogleAuth } = await import('google-auth-library');
@@ -2841,7 +2864,7 @@ ${cleanPrompt}`
         // A. Primary: Fetch from GCS bucket if outputObjectPath is stored
         if (rec?.outputBucket && rec?.outputObjectPath) {
           try {
-            videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(rec.outputBucket, rec.outputObjectPath, { accessToken, apiKey });
+            videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(rec.outputBucket, rec.outputObjectPath, { accessToken, apiKey, session: activeSession });
             console.log(`[Video Stream] Successfully fetched artifact from Cloud Storage gs://${rec.outputBucket}/${rec.outputObjectPath} (${videoBuffer.length} bytes)`);
           } catch (gcsErr) {
             console.warn(`[Video Stream] GCS fetch failed for task ${taskId}:`, gcsErr);
@@ -3130,6 +3153,13 @@ ${cleanPrompt}`
     });
   }
 
+  return app;
+}
+
+export async function startServer() {
+  const app = await createApp();
+  const PORT = 3000;
+
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
     
@@ -3175,4 +3205,6 @@ ${cleanPrompt}`
   });
 }
 
-startServer();
+if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+  startServer();
+}

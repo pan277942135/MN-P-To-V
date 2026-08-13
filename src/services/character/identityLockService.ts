@@ -207,7 +207,27 @@ export class IdentityLockService {
   static async evaluateIdentityGate(input: QaInput): Promise<IdentityGateResult> {
     let report: FirstFrameQaReport;
 
-    if (input.ai && input.masterImageBuffer && input.masterImageBuffer.length > 0) {
+    const isTestMode = process.env.NODE_ENV === 'test';
+    const isDirectUserConfirmed = input.imageIsTargetCharacter === true;
+
+    if (isDirectUserConfirmed) {
+      // Rule A: Direct character image confirmed by user (DIRECT_CHARACTER_IMAGE)
+      report = {
+        pass: true,
+        identityScore: 100,
+        sourcePersonResidualScore: 0,
+        scenePreservationScore: 100,
+        posePreservationScore: 100,
+        outfitPreservationScore: 100,
+        anatomyScore: 100,
+        faceDetails: '用户明确确认目标角色图 (Direct character image user confirmed)',
+        hairDetails: '保持原图',
+        bodyDetails: '保持原图',
+        summary: 'User explicitly confirmed direct target character image',
+        issues: [],
+      };
+    } else if (input.ai && input.masterImageBuffer && input.masterImageBuffer.length > 0) {
+      // Rule C: Real Visual QA when master image and AI client exist
       report = await VisualQaService.qaFirstFrame(
         input.ai,
         input.analysisModel || 'gemini-3.6-flash',
@@ -220,23 +240,42 @@ export class IdentityLockService {
         input.identitySpec,
         input.sceneMode as SceneMode
       );
-    } else {
-      // Fallback or explicit user-confirmed target character
-      const isDirectUserConfirmed = input.imageIsTargetCharacter === true;
-      const defaultScore = isDirectUserConfirmed ? 100 : 98;
+    } else if (isTestMode && !input.ai && input.masterImageBuffer && input.masterImageBuffer.length > 0) {
+      // Rule D: Test environment mock QA allowed ONLY when NODE_ENV === 'test' AND master image provided
       report = {
         pass: true,
-        identityScore: defaultScore,
+        identityScore: 98,
         sourcePersonResidualScore: 0,
         scenePreservationScore: 95,
         posePreservationScore: 95,
         outfitPreservationScore: 95,
         anatomyScore: 95,
-        faceDetails: isDirectUserConfirmed ? '用户明确确认目标角色图 (Direct character image user confirmed)' : 'Default/Mock QA',
+        faceDetails: 'Test Mock QA pass',
         hairDetails: '保持原图',
         bodyDetails: '保持原图',
-        summary: isDirectUserConfirmed ? 'User explicitly confirmed direct target character image' : 'Default QA report',
+        summary: 'Test Mock QA pass',
         issues: [],
+      };
+    } else {
+      // Production fail closed if missing master image reference for rebuild mode
+      report = {
+        pass: false,
+        identityScore: 0,
+        sourcePersonResidualScore: 100,
+        scenePreservationScore: 0,
+        posePreservationScore: 0,
+        outfitPreservationScore: 0,
+        anatomyScore: 0,
+        faceDetails: '缺失目标角色母板图 (identity_reference_missing)',
+        hairDetails: '无法对比',
+        bodyDetails: '无法对比',
+        summary: 'Missing master image reference for identity lock evaluation',
+        issues: [{
+          code: 'IDENTITY_REFERENCE_MISSING',
+          severity: 'critical',
+          description: '缺失目标角色母板图 (identity_reference_missing)',
+          repairInstruction: '请提供目标角色母板图或显式确认当前图为目标角色。',
+        }],
       };
     }
 
