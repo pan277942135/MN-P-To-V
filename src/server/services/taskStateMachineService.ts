@@ -277,6 +277,104 @@ export class TaskStateMachineService {
     });
   }
 
+  public async completeWithPersistedArtifact(params: {
+    taskId: string;
+    outputBucket: string;
+    outputObjectPath: string;
+    videoUri: string;
+    sizeBytes?: number;
+    contentType?: string;
+    artifactPersistedAt?: number;
+    patch?: Partial<ServerVideoTaskRecord>;
+  }): Promise<ServerVideoTaskRecord> {
+    const {
+      taskId,
+      outputBucket,
+      outputObjectPath,
+      videoUri,
+      sizeBytes,
+      contentType = 'video/mp4',
+      artifactPersistedAt = Date.now(),
+      patch = {},
+    } = params;
+
+    const advance = async (toStatus: TaskStatus, transitionPatch: Partial<ServerVideoTaskRecord> = {}) => {
+      return await this.transitionTask({ taskId, toStatus, patch: transitionPatch });
+    };
+
+    let task = await firestoreTaskRepository.getTask(taskId);
+    if (!task) {
+      throw new Error(`[TaskStateMachine] Task ${taskId} not found while finalizing artifact.`);
+    }
+
+    if (task.status === 'completed') {
+      if (
+        task.artifactPersisted !== true ||
+        !task.outputBucket ||
+        !task.outputObjectPath ||
+        !task.videoUri
+      ) {
+        throw new Error(`[TaskStateMachine] Completed task ${taskId} violates artifact invariant.`);
+      }
+      return task;
+    }
+
+    // Normalize every legacy/active provider state into the canonical production chain.
+    if (task.status === 'created') {
+      task = await advance('preparing');
+    }
+    if (task.status === 'preparing' || task.status === 'submitting' || task.status === 'submitted') {
+      task = await advance('generating');
+    }
+    if (task.status === 'polling_timeout') {
+      task = await advance('polling');
+    }
+    if (task.status === 'generating' || task.status === 'polling') {
+      task = await advance('generation_succeeded');
+    }
+    if (task.status === 'generation_succeeded' || task.status === 'artifact_persist_failed') {
+      task = await advance('artifact_persisting');
+    }
+    if (task.status === 'artifact_persisting') {
+      task = await advance('artifact_persisted', {
+        ...patch,
+        outputBucket,
+        outputObjectPath,
+        videoUri,
+        sizeBytes,
+        contentType,
+        artifactPersisted: true,
+        artifactPersistedAt,
+        videoDataUrl: `/api/videos/stream/${taskId}`,
+      });
+    }
+    if (task.status === 'artifact_persisted') {
+      task = await advance('qa_pending');
+    }
+    if (task.status === 'qa_pending') {
+      task = await advance('completed', {
+        ...patch,
+        outputBucket,
+        outputObjectPath,
+        videoUri,
+        sizeBytes,
+        contentType,
+        artifactPersisted: true,
+        artifactPersistedAt,
+        videoDataUrl: `/api/videos/stream/${taskId}`,
+        completedAt: Date.now(),
+      });
+    }
+
+    if (task.status !== 'completed') {
+      throw new Error(
+        `[TaskStateMachine] Task ${taskId} cannot be finalized from state ${task.status}.`
+      );
+    }
+
+    return task;
+  }
+
   private async finalizeExistingArtifact(
     task: ServerVideoTaskRecord,
     bucket: string,
