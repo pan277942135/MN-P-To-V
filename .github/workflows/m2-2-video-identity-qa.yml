@@ -32,7 +32,11 @@ jobs:
 
       - name: Apply M2-2 production QA integration
         run: |
-          python scripts/apply-m2-2-production-qa-integration.py
+          if grep -q "settlePersistedVideoThroughQa" server.ts; then
+            echo 'Primary production integration already applied.'
+          else
+            python scripts/apply-m2-2-production-qa-integration.py
+          fi
           python scripts/apply-m2-2-followup.py
 
       - name: Source contract gate
@@ -56,6 +60,11 @@ jobs:
           grep -q "persistArtifactForQa" server.ts
           grep -q "completeAfterQa" server.ts
           grep -q "DurableVideoIdentityQaService" server.ts
+          grep -q "VIDEO_QA_COMPLETION_INVARIANT" src/server/services/taskStateMachineService.ts
+          if grep -q "artifact_persisted: \['qa_pending', 'completed'" src/server/services/taskStateMachineService.ts; then
+            echo 'artifact_persisted may still jump directly to completed.' >&2
+            exit 1
+          fi
           grep -q "expect(recovered?.status).toBe('qa_pending')" src/__tests__/p0DurableStateMachine.test.ts
 
       - name: Setup Node
