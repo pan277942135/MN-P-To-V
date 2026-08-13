@@ -9,17 +9,48 @@ export function sanitizeForFirestore<T extends Record<string, any>>(obj: T): Rec
     }
     if (typeof val === 'string') {
       if (val.length > 150000 || (val.startsWith('data:') && val.length > 100000)) {
-        console.warn(`[Firestore Sanitizer] Excluding oversized string/Base64 field '${key}' (${val.length} chars) from Firestore document to preserve 1MB limit.`);
+        console.warn(
+          `[Firestore Sanitizer] Excluding oversized string/Base64 field '${key}' (${val.length} chars) from Firestore document to preserve 1MB limit.`
+        );
         continue;
       }
       cleanObj[key] = val;
-    } else if (val !== null && typeof val === 'object' && !Array.isArray(val) && !(val instanceof Date)) {
+    } else if (
+      val !== null &&
+      typeof val === 'object' &&
+      !Array.isArray(val) &&
+      !(val instanceof Date)
+    ) {
       cleanObj[key] = sanitizeForFirestore(val);
     } else {
       cleanObj[key] = val;
     }
   }
   return cleanObj;
+}
+
+function assertCompletedInvariant(task: Partial<ServerVideoTaskRecord>): void {
+  if (task.status !== 'completed') return;
+
+  const missing: string[] = [];
+  if (task.artifactPersisted !== true) missing.push('artifactPersisted');
+  if (!task.outputBucket) missing.push('outputBucket');
+  if (!task.outputObjectPath) missing.push('outputObjectPath');
+  if (!task.videoUri) missing.push('videoUri');
+
+  if (missing.length > 0) {
+    throw new Error(
+      `[FirestoreTaskRepository] completed invariant violated; missing/invalid: ${missing.join(', ')}`
+    );
+  }
+}
+
+function createAlreadyExistsError(taskId: string): Error & { code: string } {
+  const err = new Error(`[FirestoreTaskRepository] Task ${taskId} already exists`) as Error & {
+    code: string;
+  };
+  err.code = 'ALREADY_EXISTS';
+  return err;
 }
 
 export class FirestoreTaskRepository {
@@ -73,7 +104,10 @@ export class FirestoreTaskRepository {
         if (isTransient && attempt <= maxRetries) {
           this.firestoreRetryCount++;
           const backoffMs = attempt * 250;
-          console.warn(`[Firestore ${opName}] Transient error (attempt ${attempt}/${maxRetries}), retrying in ${backoffMs}ms:`, msg);
+          console.warn(
+            `[Firestore ${opName}] Transient error (attempt ${attempt}/${maxRetries}), retrying in ${backoffMs}ms:`,
+            msg
+          );
           await new Promise((r) => setTimeout(r, backoffMs));
           continue;
         }
@@ -119,7 +153,12 @@ export class FirestoreTaskRepository {
       msg.includes('DATABASE_NOT_FOUND') ||
       (msg.includes('NOT_FOUND') && msg.includes('database'));
 
-    if (isPermissionDenied || isUnauthenticated || isQuotaExhausted || isApiDisabledOrConfigError) {
+    if (
+      isPermissionDenied ||
+      isUnauthenticated ||
+      isQuotaExhausted ||
+      isApiDisabledOrConfigError
+    ) {
       markFirestoreUnavailable(err);
     }
   }
@@ -139,6 +178,8 @@ export class FirestoreTaskRepository {
       throw new Error('[FirestoreTaskRepository] Invalid record: missing taskId');
     }
 
+    assertCompletedInvariant(record);
+
     return this.withRetry('createTask', true, async () => {
       const docRef = db.collection(this.collectionName).doc(taskId);
       const payload = sanitizeForFirestore({
@@ -146,11 +187,22 @@ export class FirestoreTaskRepository {
         taskId,
         id: record.id || taskId,
         evidenceSource: 'firestore',
+        stateVersion: record.stateVersion ?? record.statusVersion ?? 1,
+        statusVersion: record.statusVersion ?? record.stateVersion ?? 1,
         updatedAt: record.updatedAt || Date.now(),
         createdAt: record.createdAt || Date.now(),
       });
 
-      await docRef.set(payload);
+      // Atomic create-if-absent implemented with a transaction rather than
+      // DocumentReference.create(). This preserves cross-instance idempotency while
+      // using the same transaction primitive as the rest of the durable state machine.
+      await db.runTransaction(async (transaction) => {
+        const snap = await transaction.get(docRef);
+        if (snap.exists) {
+          throw createAlreadyExistsError(taskId);
+        }
+        transaction.set(docRef, payload);
+      });
     });
   }
 
@@ -189,6 +241,33 @@ export class FirestoreTaskRepository {
 
     if (!taskId) return null;
 
+    // Any update that creates or mutates a completed record is validated against the
+    // fully merged authoritative document inside a Firestore transaction. This makes
+    // the completed=>GCS contract impossible to bypass via a legacy direct updateTask()
+    // call site.
+    if (patch.status === 'completed') {
+      return this.runTaskTransaction<ServerVideoTaskRecord | null>(taskId, (currentTask) => {
+        if (!currentTask) {
+          return { taskPatch: undefined, result: null };
+        }
+
+        const merged: ServerVideoTaskRecord = {
+          ...currentTask,
+          ...patch,
+          updatedAt: patch.updatedAt || Date.now(),
+        };
+        assertCompletedInvariant(merged);
+
+        return {
+          taskPatch: patch,
+          result: {
+            ...merged,
+            evidenceSource: 'firestore',
+          },
+        };
+      });
+    }
+
     return this.withRetry('updateTask', true, async () => {
       const docRef = db.collection(this.collectionName).doc(taskId);
       const cleanPatch = sanitizeForFirestore({
@@ -197,8 +276,24 @@ export class FirestoreTaskRepository {
       });
 
       await docRef.update(cleanPatch);
-
       return await this.getTask(taskId);
+    });
+  }
+
+  public async deleteTask(taskId: string): Promise<boolean> {
+    if (!taskId) return false;
+
+    const db = getFirestoreInstance();
+    if (!db) {
+      throw new Error('[FirestoreTaskRepository] Firestore is unavailable. Cannot delete task.');
+    }
+
+    return this.withRetry('deleteTask', true, async () => {
+      const docRef = db.collection(this.collectionName).doc(taskId);
+      const snap = await docRef.get();
+      if (!snap.exists) return false;
+      await docRef.delete();
+      return true;
     });
   }
 
@@ -244,7 +339,9 @@ export class FirestoreTaskRepository {
 
   public async runTaskTransaction<T>(
     taskId: string,
-    updateFn: (currentTask: ServerVideoTaskRecord | null) => { taskPatch?: Partial<ServerVideoTaskRecord>; result: T }
+    updateFn: (
+      currentTask: ServerVideoTaskRecord | null
+    ) => { taskPatch?: Partial<ServerVideoTaskRecord>; result: T }
   ): Promise<T> {
     const db = getFirestoreInstance();
     if (!db) {
@@ -256,11 +353,21 @@ export class FirestoreTaskRepository {
 
       return await db.runTransaction(async (transaction) => {
         const snap = await transaction.get(docRef);
-        const currentTask = snap.exists ? ({ ...(snap.data() as ServerVideoTaskRecord), evidenceSource: 'firestore' } as ServerVideoTaskRecord) : null;
+        const currentTask = snap.exists
+          ? ({
+              ...(snap.data() as ServerVideoTaskRecord),
+              evidenceSource: 'firestore',
+            } as ServerVideoTaskRecord)
+          : null;
 
         const { taskPatch, result } = updateFn(currentTask);
 
         if (taskPatch) {
+          const merged = currentTask
+            ? ({ ...currentTask, ...taskPatch } as ServerVideoTaskRecord)
+            : (taskPatch as ServerVideoTaskRecord);
+          assertCompletedInvariant(merged);
+
           const cleanPatch = sanitizeForFirestore({
             ...taskPatch,
             updatedAt: Date.now(),
@@ -279,4 +386,3 @@ export class FirestoreTaskRepository {
 }
 
 export const firestoreTaskRepository = new FirestoreTaskRepository();
-

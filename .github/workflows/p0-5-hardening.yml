@@ -1,0 +1,112 @@
+name: P0-5 Hardening
+
+on:
+  push:
+    branches:
+      - p0-5-real-e2e-hardening
+
+permissions:
+  contents: write
+
+env:
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+
+jobs:
+  harden-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Apply deterministic P0-5 hardening
+        shell: bash
+        run: |
+          if grep -q "P0-5: Provider submission is part of the request durability boundary" server.ts; then
+            echo "Base P0-5 server hardening already applied."
+          else
+            python3 scripts/apply-p0-5-server-hardening.py
+          fi
+          if [ -f scripts/apply-p0-5-test-hardening.py ]; then
+            python3 scripts/apply-p0-5-test-hardening.py
+          fi
+          if [ -f scripts/apply-p0-5-contract-fixture-fix.py ]; then
+            python3 scripts/apply-p0-5-contract-fixture-fix.py
+          fi
+          if [ -f scripts/apply-p0-5-production-state-wiring.py ] && ! grep -q "completeWithPersistedArtifact" src/server/services/taskStateMachineService.ts; then
+            python3 scripts/apply-p0-5-production-state-wiring.py
+          fi
+          if [ -f scripts/apply-p0-5-authority-route-hardening.py ] && ! grep -q "Firestore unavailable; task deletion was not performed" server.ts; then
+            python3 scripts/apply-p0-5-authority-route-hardening.py
+          fi
+          if [ -f scripts/apply-p0-5-recovery-stream-hardening.py ] && ! grep -q "task_metadata_authority_unavailable" server.ts; then
+            python3 scripts/apply-p0-5-recovery-stream-hardening.py
+          fi
+          if [ -f scripts/apply-p0-5-cloudrun-runtime-hardening.py ] && ! grep -q "P0_DISABLE_STARTUP_RECOVERY" server.ts; then
+            python3 scripts/apply-p0-5-cloudrun-runtime-hardening.py
+          fi
+          if [ -f scripts/apply-p0-5-early-idempotency.py ]; then
+            python3 scripts/apply-p0-5-early-idempotency.py
+          fi
+
+      - name: Diff check
+        run: git diff --check
+
+      - name: Typecheck
+        run: bun run lint
+
+      - name: Test
+        run: bun run test
+
+      - name: Build
+        run: bun run build
+
+      - name: Build Cloud Run container
+        run: docker build -t zaojing-p0-5:ci .
+
+      - name: Smoke Cloud Run container on PORT 8080
+        shell: bash
+        run: |
+          set -euo pipefail
+          cid="$(docker run -d -e PORT=8080 -e P0_DISABLE_STARTUP_RECOVERY=1 -p 18080:8080 zaojing-p0-5:ci)"
+          cleanup() { docker rm -f "$cid" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/api/health >/tmp/p0-5-health.json; then
+              cat /tmp/p0-5-health.json
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$cid" || true
+          exit 1
+
+      - name: Commit verified hardening
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.ts \
+            src/server/repositories/firestoreTaskRepository.ts \
+            src/server/services/taskStateMachineService.ts \
+            src/__tests__/firestoreTaskRepository.test.ts \
+            src/__tests__/apiVideoStartRouteIntegration.test.ts \
+            src/__tests__/p0DurableStateMachine.test.ts \
+            src/__tests__/p0StorageAuthorityRegression.test.ts
+          git commit -m "ci(p0-5): apply verified cold-instance idempotency hardening"
+          git push origin HEAD:p0-5-real-e2e-hardening

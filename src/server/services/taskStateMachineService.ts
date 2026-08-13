@@ -30,7 +30,9 @@ export class StateVersionMismatchError extends Error {
 
 export class LateWorkerError extends Error {
   constructor(public taskId: string, public workerExecutionId: string, public currentExecutionId: string) {
-    super(`[State Machine] Late worker rejected for task ${taskId}: worker executionId ${workerExecutionId} vs current ${currentExecutionId}`);
+    super(
+      `[State Machine] Late worker rejected for task ${taskId}: worker executionId ${workerExecutionId} vs current ${currentExecutionId}`
+    );
     this.name = 'LateWorkerError';
   }
 }
@@ -90,10 +92,11 @@ export interface AcquireLeaseResult {
   task?: ServerVideoTaskRecord;
 }
 
+function currentVersion(task: ServerVideoTaskRecord): number {
+  return task.stateVersion ?? task.statusVersion ?? 1;
+}
+
 export class TaskStateMachineService {
-  /**
-   * Atomic state transition with CAN check, version match check (CAS), and executionId verify
-   */
   public async transitionTask(params: {
     taskId: string;
     toStatus: TaskStatus;
@@ -109,25 +112,25 @@ export class TaskStateMachineService {
         throw new Error(`[TaskStateMachine] Task ${taskId} not found in Firestore.`);
       }
 
-      // Check transition legality
       if (!force && !canTransition(currentTask.status, toStatus)) {
         throw new InvalidStateTransitionError(currentTask.status, toStatus, taskId);
       }
 
-      // Check state version (CAS)
-      const currentVersion = currentTask.stateVersion ?? currentTask.statusVersion ?? 1;
-      if (expectedStateVersion !== undefined && currentVersion !== expectedStateVersion) {
-        throw new StateVersionMismatchError(taskId, expectedStateVersion, currentVersion);
+      const version = currentVersion(currentTask);
+      if (expectedStateVersion !== undefined && version !== expectedStateVersion) {
+        throw new StateVersionMismatchError(taskId, expectedStateVersion, version);
       }
 
-      // Check late worker execution ID
-      if (executionId !== undefined && currentTask.executionId && currentTask.executionId !== executionId) {
+      if (
+        executionId !== undefined &&
+        currentTask.executionId &&
+        currentTask.executionId !== executionId
+      ) {
         throw new LateWorkerError(taskId, executionId, currentTask.executionId);
       }
 
-      const nextVersion = currentVersion + 1;
+      const nextVersion = version + 1;
       const now = Date.now();
-
       const updatedRecord: ServerVideoTaskRecord = {
         ...currentTask,
         ...patch,
@@ -145,9 +148,6 @@ export class TaskStateMachineService {
     });
   }
 
-  /**
-   * Atomically acquires an execution lease on a task for a given worker.
-   */
   public async acquireLease(params: {
     taskId: string;
     leaseOwner: string;
@@ -162,8 +162,6 @@ export class TaskStateMachineService {
       }
 
       const now = Date.now();
-
-      // Check terminal state
       if (['completed', 'failed', 'cancelled', 'canceled'].includes(currentTask.status)) {
         return {
           taskPatch: undefined,
@@ -171,8 +169,7 @@ export class TaskStateMachineService {
         };
       }
 
-      // Check active unexpired lease by another owner
-      const isLeaseActive = currentTask.leaseExpiresAt && currentTask.leaseExpiresAt > now;
+      const isLeaseActive = Boolean(currentTask.leaseExpiresAt && currentTask.leaseExpiresAt > now);
       if (isLeaseActive && currentTask.leaseOwner && currentTask.leaseOwner !== leaseOwner) {
         return {
           taskPatch: undefined,
@@ -180,22 +177,25 @@ export class TaskStateMachineService {
         };
       }
 
-      // Check attempts limit
-      const currentAttempt = (currentTask.attempt || 0) + 1;
+      const nextAttempt = (currentTask.attempt || 0) + 1;
       const effectiveMax = currentTask.maxAttempts || maxAttempts;
+      const nextVersion = currentVersion(currentTask) + 1;
 
-      if (currentAttempt > effectiveMax) {
+      if (nextAttempt > effectiveMax) {
         const errorMsg = `Exceeded max execution attempts (${effectiveMax}).`;
         const updatedTask: ServerVideoTaskRecord = {
           ...currentTask,
           status: 'failed',
+          stateVersion: nextVersion,
+          statusVersion: nextVersion,
+          attempt: nextAttempt,
           error: errorMsg,
           structuredError: buildStructuredError({
             code: 'MAX_ATTEMPTS_EXCEEDED',
             message: errorMsg,
             stage: 'execution_lease',
             retryable: false,
-            attempt: currentAttempt,
+            attempt: nextAttempt,
           }),
           updatedAt: now,
         };
@@ -205,16 +205,13 @@ export class TaskStateMachineService {
         };
       }
 
-      // Acquire lease
-      const executionId = `exec_${now}_${Math.random().toString(36).substring(2, 9)}`;
-      const nextVersion = (currentTask.stateVersion ?? currentTask.statusVersion ?? 1) + 1;
-
+      const executionId = `exec_${crypto.randomUUID()}`;
       const taskPatch: Partial<ServerVideoTaskRecord> = {
         executionId,
         leaseOwner,
         leaseExpiresAt: now + leaseDurationMs,
         heartbeatAt: now,
-        attempt: currentAttempt,
+        attempt: nextAttempt,
         maxAttempts: effectiveMax,
         stateVersion: nextVersion,
         statusVersion: nextVersion,
@@ -238,32 +235,30 @@ export class TaskStateMachineService {
     });
   }
 
-  /**
-   * Renew lease heartbeat for an ongoing execution
-   */
-  public async renewLease(taskId: string, executionId: string, leaseDurationMs = 60000): Promise<boolean> {
+  public async renewLease(
+    taskId: string,
+    executionId: string,
+    leaseDurationMs = 60000
+  ): Promise<boolean> {
     return await firestoreTaskRepository.runTaskTransaction(taskId, (currentTask) => {
       if (!currentTask || currentTask.executionId !== executionId) {
         return { taskPatch: undefined, result: false };
       }
 
       const now = Date.now();
+      const nextVersion = currentVersion(currentTask) + 1;
       const taskPatch: Partial<ServerVideoTaskRecord> = {
         heartbeatAt: now,
         leaseExpiresAt: now + leaseDurationMs,
+        stateVersion: nextVersion,
+        statusVersion: nextVersion,
         updatedAt: now,
       };
 
-      return {
-        taskPatch,
-        result: true,
-      };
+      return { taskPatch, result: true };
     });
   }
 
-  /**
-   * Release lease upon task completion, failure, or cancellation
-   */
   public async releaseLease(taskId: string, executionId?: string): Promise<boolean> {
     return await firestoreTaskRepository.runTaskTransaction(taskId, (currentTask) => {
       if (!currentTask) return { taskPatch: undefined, result: false };
@@ -271,19 +266,179 @@ export class TaskStateMachineService {
         return { taskPatch: undefined, result: false };
       }
 
+      const nextVersion = currentVersion(currentTask) + 1;
       const taskPatch: Partial<ServerVideoTaskRecord> = {
         leaseExpiresAt: 0,
+        stateVersion: nextVersion,
+        statusVersion: nextVersion,
         updatedAt: Date.now(),
       };
-
       return { taskPatch, result: true };
     });
   }
 
-  /**
-   * Run background crash recovery scan for abandoned or stalled tasks
-   */
-  public async recoverAbandonedTasks(): Promise<{ recoveredCount: number; evaluatedCount: number }> {
+  public async completeWithPersistedArtifact(params: {
+    taskId: string;
+    outputBucket: string;
+    outputObjectPath: string;
+    videoUri: string;
+    sizeBytes?: number;
+    contentType?: string;
+    artifactPersistedAt?: number;
+    patch?: Partial<ServerVideoTaskRecord>;
+  }): Promise<ServerVideoTaskRecord> {
+    const {
+      taskId,
+      outputBucket,
+      outputObjectPath,
+      videoUri,
+      sizeBytes,
+      contentType = 'video/mp4',
+      artifactPersistedAt = Date.now(),
+      patch = {},
+    } = params;
+
+    const advance = async (toStatus: TaskStatus, transitionPatch: Partial<ServerVideoTaskRecord> = {}) => {
+      return await this.transitionTask({ taskId, toStatus, patch: transitionPatch });
+    };
+
+    let task = await firestoreTaskRepository.getTask(taskId);
+    if (!task) {
+      throw new Error(`[TaskStateMachine] Task ${taskId} not found while finalizing artifact.`);
+    }
+
+    if (task.status === 'completed') {
+      if (
+        task.artifactPersisted !== true ||
+        !task.outputBucket ||
+        !task.outputObjectPath ||
+        !task.videoUri
+      ) {
+        throw new Error(`[TaskStateMachine] Completed task ${taskId} violates artifact invariant.`);
+      }
+      return task;
+    }
+
+    // Normalize every legacy/active provider state into the canonical production chain.
+    if (task.status === 'created') {
+      task = await advance('preparing');
+    }
+    if (task.status === 'preparing' || task.status === 'submitting' || task.status === 'submitted') {
+      task = await advance('generating');
+    }
+    if (task.status === 'polling_timeout') {
+      task = await advance('polling');
+    }
+    if (task.status === 'generating' || task.status === 'polling') {
+      task = await advance('generation_succeeded');
+    }
+    if (task.status === 'generation_succeeded' || task.status === 'artifact_persist_failed') {
+      task = await advance('artifact_persisting');
+    }
+    if (task.status === 'artifact_persisting') {
+      task = await advance('artifact_persisted', {
+        ...patch,
+        outputBucket,
+        outputObjectPath,
+        videoUri,
+        sizeBytes,
+        contentType,
+        artifactPersisted: true,
+        artifactPersistedAt,
+        videoDataUrl: `/api/videos/stream/${taskId}`,
+      });
+    }
+    if (task.status === 'artifact_persisted') {
+      task = await advance('qa_pending');
+    }
+    if (task.status === 'qa_pending') {
+      task = await advance('completed', {
+        ...patch,
+        outputBucket,
+        outputObjectPath,
+        videoUri,
+        sizeBytes,
+        contentType,
+        artifactPersisted: true,
+        artifactPersistedAt,
+        videoDataUrl: `/api/videos/stream/${taskId}`,
+        completedAt: Date.now(),
+      });
+    }
+
+    if (task.status !== 'completed') {
+      throw new Error(
+        `[TaskStateMachine] Task ${taskId} cannot be finalized from state ${task.status}.`
+      );
+    }
+
+    return task;
+  }
+
+  private async finalizeExistingArtifact(
+    task: ServerVideoTaskRecord,
+    bucket: string,
+    objectPath: string,
+    sizeBytes?: number
+  ): Promise<void> {
+    let status = task.status;
+
+    if (status === 'generation_succeeded') {
+      await this.transitionTask({
+        taskId: task.taskId,
+        toStatus: 'artifact_persisting',
+      });
+      status = 'artifact_persisting';
+    }
+
+    if (status === 'artifact_persist_failed') {
+      await this.transitionTask({
+        taskId: task.taskId,
+        toStatus: 'artifact_persisting',
+      });
+      status = 'artifact_persisting';
+    }
+
+    if (status === 'artifact_persisting') {
+      await this.transitionTask({
+        taskId: task.taskId,
+        toStatus: 'artifact_persisted',
+        patch: {
+          outputBucket: bucket,
+          outputObjectPath: objectPath,
+          videoUri: `gs://${bucket}/${objectPath}`,
+          sizeBytes: sizeBytes || task.sizeBytes,
+          artifactPersisted: true,
+          artifactPersistedAt: task.artifactPersistedAt || Date.now(),
+          videoDataUrl: `/api/videos/stream/${task.taskId}`,
+        },
+      });
+      status = 'artifact_persisted';
+    }
+
+    if (status === 'artifact_persisted') {
+      await this.transitionTask({ taskId: task.taskId, toStatus: 'qa_pending' });
+      status = 'qa_pending';
+    }
+
+    if (status === 'qa_pending') {
+      await this.transitionTask({
+        taskId: task.taskId,
+        toStatus: 'completed',
+        patch: {
+          completedAt: Date.now(),
+          videoDataUrl: `/api/videos/stream/${task.taskId}`,
+        },
+      });
+    }
+
+    await this.releaseLease(task.taskId);
+  }
+
+  public async recoverAbandonedTasks(): Promise<{
+    recoveredCount: number;
+    evaluatedCount: number;
+  }> {
     if (!firestoreTaskRepository.isAvailable()) {
       return { recoveredCount: 0, evaluatedCount: 0 };
     }
@@ -293,90 +448,53 @@ export class TaskStateMachineService {
     let recoveredCount = 0;
 
     for (const task of tasks) {
-      // Ignore terminal tasks
       if (['completed', 'failed', 'cancelled', 'canceled'].includes(task.status)) {
         continue;
       }
 
       const isExpired = !task.leaseExpiresAt || task.leaseExpiresAt <= now;
-      if (!isExpired) {
-        continue;
-      }
+      if (!isExpired) continue;
 
-      // Task lease expired or abandoned. Attempt recovery based on current state.
       try {
-        if (task.status === 'artifact_persisting' || task.status === 'artifact_persist_failed') {
+        if (
+          task.status === 'generation_succeeded' ||
+          task.status === 'artifact_persisting' ||
+          task.status === 'artifact_persist_failed' ||
+          task.status === 'artifact_persisted' ||
+          task.status === 'qa_pending'
+        ) {
           const bucket = task.outputBucket || getVeoBucketName();
           const objectPath = task.outputObjectPath || getVeoObjectPath(task.taskId);
-          // Check if GCS artifact was already persisted
           const checkRes = await gcsArtifactStore.checkArtifactExists(bucket, objectPath);
-          if (checkRes.exists) {
-            console.log(`[TaskRecovery] Recovering task ${task.taskId}: GCS artifact verified. Transitioning to completed.`);
-            await this.transitionTask({
-              taskId: task.taskId,
-              toStatus: 'artifact_persisted',
-              patch: {
-                outputBucket: bucket,
-                outputObjectPath: objectPath,
-                videoUri: `gs://${bucket}/${objectPath}`,
-                sizeBytes: checkRes.sizeBytes || task.sizeBytes,
-                artifactPersisted: true,
-                artifactPersistedAt: Date.now(),
-              },
-            });
-            await this.transitionTask({
-              taskId: task.taskId,
-              toStatus: 'qa_pending',
-            });
-            await this.transitionTask({
-              taskId: task.taskId,
-              toStatus: 'completed',
-              patch: {
-                completedAt: Date.now(),
-                videoDataUrl: `/api/videos/stream/${task.taskId}`,
-              },
-            });
-            await this.releaseLease(task.taskId);
+
+          // Critical P0-5 rule: metadata/path presence is never evidence that the video
+          // exists. Recovery may finalize only after GCS authority confirms a non-zero object.
+          if (checkRes.exists && (checkRes.sizeBytes ?? task.sizeBytes ?? 0) > 0) {
+            console.log(
+              `[TaskRecovery] Recovering task ${task.taskId}: authoritative GCS artifact verified.`
+            );
+            await this.finalizeExistingArtifact(
+              task,
+              bucket,
+              objectPath,
+              checkRes.sizeBytes || task.sizeBytes
+            );
             recoveredCount++;
             continue;
           }
+
+          console.warn(
+            `[TaskRecovery] Task ${task.taskId} has recovery metadata but no verified GCS artifact; leaving state ${task.status} unchanged.`
+          );
         }
 
-        if (task.status === 'generation_succeeded') {
-          // If video output bucket and path exist or videoUri exists
-          if (task.outputBucket && task.outputObjectPath) {
-            await this.transitionTask({
-              taskId: task.taskId,
-              toStatus: 'artifact_persisting',
-            });
-            await this.transitionTask({
-              taskId: task.taskId,
-              toStatus: 'artifact_persisted',
-              patch: { artifactPersisted: true, artifactPersistedAt: Date.now() },
-            });
-            await this.transitionTask({
-              taskId: task.taskId,
-              toStatus: 'qa_pending',
-            });
-            await this.transitionTask({
-              taskId: task.taskId,
-              toStatus: 'completed',
-              patch: {
-                completedAt: Date.now(),
-                videoDataUrl: `/api/videos/stream/${task.taskId}`,
-              },
-            });
-            await this.releaseLease(task.taskId);
-            recoveredCount++;
-            continue;
-          }
-        }
-
-        // For stuck preparing / submitting / generating without active lease
-        if (['created', 'preparing', 'submitting', 'submitted', 'generating', 'polling'].includes(task.status)) {
-          const attempt = (task.attempt || 0) + 1;
-          if (attempt > (task.maxAttempts || 3)) {
-            console.warn(`[TaskRecovery] Task ${task.taskId} reached max attempts. Marking failed.`);
+        if (
+          ['created', 'preparing', 'submitting', 'submitted', 'generating', 'polling'].includes(
+            task.status
+          )
+        ) {
+          const nextAttempt = (task.attempt || 0) + 1;
+          if (nextAttempt > (task.maxAttempts || 3)) {
             await this.transitionTask({
               taskId: task.taskId,
               toStatus: 'failed',
@@ -387,7 +505,7 @@ export class TaskStateMachineService {
                   message: 'Task abandoned and exceeded max recovery attempts.',
                   stage: 'recovery',
                   retryable: false,
-                  attempt,
+                  attempt: nextAttempt,
                 }),
               },
               force: true,

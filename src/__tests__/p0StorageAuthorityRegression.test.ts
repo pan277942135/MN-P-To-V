@@ -3,8 +3,49 @@ import fs from 'fs';
 import path from 'path';
 import { gcsArtifactStore, getVeoBucketName } from '../server/storage/gcsArtifactStore';
 import { firestoreTaskRepository } from '../server/repositories/firestoreTaskRepository';
+import { setFirestoreInstanceForTesting } from '../server/db/firestore';
 import { serverVideoTaskStore, ephemeralVideoStore, ephemeralImageStore } from '../../server';
 import type { ServerVideoTaskRecord } from '../types';
+
+class StorageRegressionMockDoc {
+  constructor(private store: Map<string, any>, private id: string) {}
+  async get() {
+    const data = this.store.get(this.id);
+    return { exists: Boolean(data), data: () => data ? JSON.parse(JSON.stringify(data)) : undefined };
+  }
+  async set(data: any) { this.store.set(this.id, JSON.parse(JSON.stringify(data))); }
+  async update(patch: any) {
+    const existing = this.store.get(this.id) || {};
+    this.store.set(this.id, JSON.parse(JSON.stringify({ ...existing, ...patch })));
+  }
+}
+
+class StorageRegressionMockCollection {
+  constructor(private store: Map<string, any>) {}
+  doc(id: string) { return new StorageRegressionMockDoc(this.store, id); }
+  orderBy() { return this; }
+  limit() { return this; }
+  async get() {
+    const docs = Array.from(this.store.entries()).map(([id, data]) => ({
+      id,
+      data: () => JSON.parse(JSON.stringify(data)),
+    }));
+    return { forEach: (cb: (doc: any) => void) => docs.forEach(cb), docs };
+  }
+}
+
+class StorageRegressionMockFirestore {
+  public store = new Map<string, any>();
+  collection(_name: string) { return new StorageRegressionMockCollection(this.store); }
+  async runTransaction<T>(updateFn: (transaction: any) => Promise<T>): Promise<T> {
+    const transaction = {
+      get: async (docRef: StorageRegressionMockDoc) => docRef.get(),
+      set: async (docRef: StorageRegressionMockDoc, data: any) => docRef.set(data),
+      update: async (docRef: StorageRegressionMockDoc, patch: any) => docRef.update(patch),
+    };
+    return await updateFn(transaction);
+  }
+}
 
 function createTestTask(overrides: Partial<ServerVideoTaskRecord>): ServerVideoTaskRecord {
   const taskId = overrides.taskId || overrides.id || 'task_test_default';
@@ -31,6 +72,8 @@ describe('P0-2R Storage Authority Regression & Contract Tests', () => {
   const sampleMp4Buffer = Buffer.concat([validHeader, Buffer.alloc(2000, 1)]);
 
   beforeEach(() => {
+    setFirestoreInstanceForTesting(new StorageRegressionMockFirestore() as any);
+    firestoreTaskRepository.resetDiagnostics();
     gcsArtifactStore.clearMockStore();
     gcsArtifactStore.setMockMode(true);
     gcsArtifactStore.setMockUploadFailure(false);
@@ -41,6 +84,7 @@ describe('P0-2R Storage Authority Regression & Contract Tests', () => {
 
   afterEach(() => {
     gcsArtifactStore.setMockUploadFailure(false);
+    setFirestoreInstanceForTesting(null);
   });
 
   // ==========================================
@@ -373,7 +417,7 @@ describe('P0-2R Storage Authority Regression & Contract Tests', () => {
       const record = createTestTask({
         id: taskId,
         taskId,
-        status: 'completed',
+        status: 'polling',
         createdAt: Date.now(),
         updatedAt: Date.now(),
       });

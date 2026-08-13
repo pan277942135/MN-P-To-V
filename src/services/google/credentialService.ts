@@ -1,7 +1,5 @@
 import { GoogleAuth } from 'google-auth-library';
 import { GoogleGenAI } from '@google/genai';
-import fs from 'fs';
-import path from 'path';
 import { ServiceAccountJsonSchema, type ComputeConnectionInfo, type CredentialSourceType } from '../../types';
 import { redactSecrets } from '../../utils/redactSecrets';
 import { callWithRetry } from '../../utils/retryHelper';
@@ -27,113 +25,81 @@ export interface ActiveSession {
   expiresAt: number;
 }
 
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours for persistent experience
-const CONNECTIONS_FILE_PATH = path.join(process.cwd(), 'data', 'connections.json');
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const CLOUD_PLATFORM_SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
 const sessionsMap = new Map<string, ActiveSession>();
 
-function saveConnectionsToDisk() {
-  try {
-    const dir = path.dirname(CONNECTIONS_FILE_PATH);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    const list = Array.from(sessionsMap.values()).map((s) => ({
-      connectionId: s.connectionId,
-      type: s.type,
-      credentialSource: s.credentialSource,
-      apiKey: s.apiKey,
-      serviceAccountJsonRaw: s.serviceAccountJsonRaw,
-      projectId: s.projectId,
-      location: s.location,
-      region: s.region,
-      requestedModel: s.requestedModel,
-      actualModel: s.actualModel,
-      analysisModel: s.analysisModel,
-      imageModel: s.imageModel,
-      videoModel: s.videoModel,
-      serviceAccountEmail: s.serviceAccountEmail,
-      createdAt: s.createdAt,
-      expiresAt: s.expiresAt,
-    }));
-    fs.writeFileSync(CONNECTIONS_FILE_PATH, JSON.stringify(list, null, 2), 'utf-8');
-  } catch (err) {
-    console.warn('[Credential Disk Storage] Could not save connections to disk:', err);
-  }
+function isCloudRuntime(): boolean {
+  return Boolean(
+    process.env.K_SERVICE ||
+    process.env.GOOGLE_CLOUD_PROJECT ||
+    process.env.GCLOUD_PROJECT ||
+    process.env.GCP_PROJECT_ID
+  );
 }
 
-function loadConnectionsFromDisk() {
-  try {
-    if (!fs.existsSync(CONNECTIONS_FILE_PATH)) return;
-    const content = fs.readFileSync(CONNECTIONS_FILE_PATH, 'utf-8');
-    const list: any[] = JSON.parse(content);
-    const now = Date.now();
-    for (const item of list) {
-      if (!item || !item.connectionId) continue;
-      // Re-hydrate session if still valid or recently expired
-      if (item.expiresAt > now - 12 * 3600 * 1000) {
-        let jwtClient: any = undefined;
-        if (item.type === 'vertex_ai') {
-          try {
-            if (item.serviceAccountJsonRaw) {
-              const auth = new GoogleAuth();
-              jwtClient = auth.fromJSON(JSON.parse(item.serviceAccountJsonRaw));
-              jwtClient.scopes = ['https://www.googleapis.com/auth/cloud-platform'];
-            } else {
-              const auth = new GoogleAuth({
-                scopes: ['https://www.googleapis.com/auth/cloud-platform'],
-              });
-              jwtClient = auth.getClient();
-            }
-          } catch (e) {
-            console.warn(`[Credential Rehydrate] Warning rehydrating JWT for ${item.connectionId}:`, e);
-          }
-        }
-
-        const restoredSession: ActiveSession = {
-          connectionId: item.connectionId,
-          type: item.type,
-          credentialSource: item.credentialSource,
-          apiKey: item.apiKey,
-          serviceAccountJsonRaw: item.serviceAccountJsonRaw,
-          serviceAccountJwt: jwtClient,
-          projectId: item.projectId || 'xp-vertex-project',
-          location: item.location || 'us-central1',
-          region: item.region || item.location || 'us-central1',
-          requestedModel: item.requestedModel || 'veo-3.1-fast-generate-001',
-          actualModel: item.actualModel || 'veo-3.1-fast-generate-001',
-          analysisModel: item.analysisModel || 'gemini-2.5-flash',
-          imageModel: item.imageModel || 'gemini-2.5-flash',
-          videoModel: item.videoModel || 'veo-3.1-fast-generate-001',
-          serviceAccountEmail: item.serviceAccountEmail,
-          createdAt: item.createdAt || now,
-          expiresAt: Math.max(item.expiresAt || 0, now + SESSION_TTL_MS), // Auto extend on start
-        };
-        sessionsMap.set(item.connectionId, restoredSession);
-      }
-    }
-    console.log(`[Credential Disk Storage] Successfully rehydrated ${sessionsMap.size} active connections from disk.`);
-  } catch (err) {
-    console.warn('[Credential Disk Storage] Could not load connections from disk:', err);
-  }
+function getRuntimeProjectId(): string {
+  return (
+    process.env.GOOGLE_CLOUD_PROJECT ||
+    process.env.GCLOUD_PROJECT ||
+    process.env.GCP_PROJECT_ID ||
+    'xp-vertex-project'
+  );
 }
 
-// Initial load on module initialization
-loadConnectionsFromDisk();
+function getRuntimeLocation(): string {
+  return (
+    process.env.VERTEX_LOCATION ||
+    process.env.GOOGLE_CLOUD_LOCATION ||
+    process.env.GCP_REGION ||
+    'us-central1'
+  );
+}
 
-// Periodically clean up expired sessions
+function getRuntimeVideoModel(): string {
+  return process.env.VEO_MODEL_ID || 'veo-3.1-fast-generate-001';
+}
+
+function buildRuntimeAdcSession(connectionId?: string): ActiveSession | undefined {
+  if (!isCloudRuntime()) return undefined;
+
+  const now = Date.now();
+  const projectId = getRuntimeProjectId();
+  const location = getRuntimeLocation();
+  const videoModel = getRuntimeVideoModel();
+  const auth = new GoogleAuth({ scopes: [CLOUD_PLATFORM_SCOPE] });
+
+  // Keep ADC client creation lazy. VertexClient already resolves promise-backed clients.
+  const adcClientPromise = auth.getClient();
+
+  return {
+    connectionId: connectionId || 'runtime_adc',
+    type: 'vertex_ai',
+    credentialSource: 'ADC',
+    serviceAccountJwt: adcClientPromise,
+    projectId,
+    location,
+    region: location,
+    requestedModel: videoModel,
+    actualModel: videoModel,
+    analysisModel: process.env.GEMINI_ANALYSIS_MODEL || 'gemini-2.5-flash',
+    imageModel: process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash',
+    videoModel,
+    serviceAccountEmail: process.env.RUNTIME_SERVICE_ACCOUNT_EMAIL || 'adc-runtime-account@cloud.google',
+    createdAt: now,
+    expiresAt: now + SESSION_TTL_MS,
+  };
+}
+
+// Periodically clean up only ephemeral in-memory sessions.
 setInterval(() => {
   const now = Date.now();
-  let changed = false;
   for (const [id, session] of sessionsMap.entries()) {
     if (session.expiresAt <= now) {
       sessionsMap.delete(id);
-      changed = true;
     }
   }
-  if (changed) {
-    saveConnectionsToDisk();
-  }
-}, 5 * 60 * 1000);
+}, 5 * 60 * 1000).unref?.();
 
 export class CredentialService {
   static setSession(session: ActiveSession): void {
@@ -142,40 +108,77 @@ export class CredentialService {
 
   static getSession(connectionId?: string): ActiveSession | undefined {
     const now = Date.now();
+
     if (connectionId) {
       const session = sessionsMap.get(connectionId);
       if (session && session.expiresAt > now) {
         return session;
       }
     }
-    // Fallback: If requested connection ID is not found or empty, search for any valid active session
+
+    // Preserve existing interactive behavior when another valid ephemeral session exists.
     for (const session of sessionsMap.values()) {
-      if (session && session.expiresAt > now) {
+      if (session.expiresAt > now) {
         return session;
       }
     }
+
+    // Production recovery path: Cloud Run must not depend on a process-local credential
+    // session or local disk. Rebuild a Vertex session from Application Default
+    // Credentials so a durable Firestore operationName can still be polled after restart.
+    const runtimeSession = buildRuntimeAdcSession(connectionId);
+    if (runtimeSession) {
+      sessionsMap.set(runtimeSession.connectionId, runtimeSession);
+      return runtimeSession;
+    }
+
+    // Developer API server secret can also be reconstructed without disk persistence.
+    const apiKey = process.env.GEMINI_API_KEY?.trim();
+    if (apiKey) {
+      const createdAt = Date.now();
+      const requestedVideo = process.env.GEMINI_VIDEO_MODEL || 'gemini-2.5-flash';
+      const session: ActiveSession = {
+        connectionId: connectionId || 'runtime_server_secret',
+        type: 'server_env_secret',
+        credentialSource: 'SERVER_ENV_SECRET',
+        apiKey,
+        projectId: 'server-env-project',
+        location: 'global',
+        region: 'global',
+        requestedModel: requestedVideo,
+        actualModel: requestedVideo,
+        analysisModel: process.env.GEMINI_ANALYSIS_MODEL || 'gemini-2.5-flash',
+        imageModel: process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash',
+        videoModel: requestedVideo,
+        createdAt,
+        expiresAt: createdAt + SESSION_TTL_MS,
+      };
+      sessionsMap.set(session.connectionId, session);
+      return session;
+    }
+
     return undefined;
   }
 
   static deleteSession(connectionId: string): boolean {
-    const deleted = sessionsMap.delete(connectionId);
-    if (deleted) {
-      saveConnectionsToDisk();
-    }
-    return deleted;
+    return sessionsMap.delete(connectionId);
   }
 
   static listSessions(): ActiveSession[] {
     const now = Date.now();
     const result: ActiveSession[] = [];
-    for (const [id, s] of sessionsMap.entries()) {
-      if (s.expiresAt > now) {
-        result.push(s);
+    for (const [id, session] of sessionsMap.entries()) {
+      if (session.expiresAt > now) {
+        result.push(session);
       } else {
         sessionsMap.delete(id);
       }
     }
     return result;
+  }
+
+  static clearEphemeralSessionsForTest(): void {
+    sessionsMap.clear();
   }
 
   static hasServerEnvironmentSecret(): boolean {
@@ -195,7 +198,6 @@ export class CredentialService {
 
     const requestedVideo = options.videoModel || 'gemini-2.5-flash';
 
-    // Verify key with minimal call
     try {
       const ai = new GoogleGenAI({
         apiKey,
@@ -209,7 +211,10 @@ export class CredentialService {
       await callWithRetry(
         () =>
           ai.models.generateContent({
-            model: (typeof options.analysisModel === 'string' && !options.analysisModel.includes('3.6')) ? options.analysisModel : 'gemini-2.5-flash',
+            model:
+              typeof options.analysisModel === 'string' && !options.analysisModel.includes('3.6')
+                ? options.analysisModel
+                : 'gemini-2.5-flash',
             contents: 'ping',
           }),
         { actionName: '算力密钥连通性测试' }
@@ -233,15 +238,20 @@ export class CredentialService {
       region: 'global',
       requestedModel: requestedVideo,
       actualModel: requestedVideo,
-      analysisModel: (typeof options.analysisModel === 'string' && !options.analysisModel.includes('3.6')) ? options.analysisModel : 'gemini-2.5-flash',
-      imageModel: (typeof options.imageModel === 'string' && !options.imageModel.includes('3.1')) ? options.imageModel : 'gemini-2.5-flash',
+      analysisModel:
+        typeof options.analysisModel === 'string' && !options.analysisModel.includes('3.6')
+          ? options.analysisModel
+          : 'gemini-2.5-flash',
+      imageModel:
+        typeof options.imageModel === 'string' && !options.imageModel.includes('3.1')
+          ? options.imageModel
+          : 'gemini-2.5-flash',
       videoModel: requestedVideo,
       createdAt: now,
       expiresAt,
     };
 
     sessionsMap.set(connectionId, session);
-    saveConnectionsToDisk();
 
     const maskedKey = `${apiKey.substring(0, 6)}...${apiKey.substring(apiKey.length - 4)}`;
 
@@ -273,10 +283,10 @@ export class CredentialService {
     serviceAccountJson?: string;
   }): Promise<ComputeConnectionInfo> {
     const jsonStr = (options.serviceAccountJson || '').trim();
-    const projectId = (options.projectId || 'xp-vertex-project').trim();
-    const location = (options.location || 'us-central1').trim();
-    const requestedVideoModel = options.videoModel || 'veo-3.1-fast-generate-001';
-    const actualVideoModel = 'veo-3.1-fast-generate-001';
+    const projectId = (options.projectId || getRuntimeProjectId()).trim();
+    const location = (options.location || getRuntimeLocation()).trim();
+    const requestedVideoModel = options.videoModel || getRuntimeVideoModel();
+    const actualVideoModel = getRuntimeVideoModel();
 
     let jwtClient: any;
     let credentialSource: CredentialSourceType = 'SERVICE_ACCOUNT';
@@ -302,17 +312,14 @@ export class CredentialService {
       }
 
       const saData = parseResult.data;
-
       if (saData.type !== 'service_account') {
         throw new Error('凭据类型必须为 service_account');
       }
-
       if (saData.project_id !== projectId) {
         throw new Error(
           `表单 Project ID (${projectId}) 与 Service Account JSON 内 project_id (${saData.project_id}) 不一致`
         );
       }
-
       if (
         !saData.token_uri.startsWith('https://oauth2.googleapis.com/') &&
         !saData.token_uri.startsWith('https://www.googleapis.com/')
@@ -320,11 +327,10 @@ export class CredentialService {
         throw new Error('token_uri 必须为 Google 官方 OAuth Token 地址');
       }
 
-      // Verify Service Account JWT & Fetch short-lived token
       try {
         const auth = new GoogleAuth();
         jwtClient = auth.fromJSON(parsedJson as any);
-        jwtClient.scopes = ['https://www.googleapis.com/auth/cloud-platform'];
+        jwtClient.scopes = [CLOUD_PLATFORM_SCOPE];
         await jwtClient.authorize();
         serviceAccountEmail = saData.client_email;
         credentialSource = 'SERVICE_ACCOUNT';
@@ -333,24 +339,20 @@ export class CredentialService {
         throw new Error(`服务账号凭据授权验证失败: ${redactSecrets(msg)}`);
       }
     } else {
-      // Attempt ADC Authentication
       try {
-        const auth = new GoogleAuth({
-          scopes: ['https://www.googleapis.com/auth/cloud-platform'],
-        });
+        const auth = new GoogleAuth({ scopes: [CLOUD_PLATFORM_SCOPE] });
         jwtClient = await auth.getClient();
         await jwtClient.getAccessToken();
-        serviceAccountEmail = 'adc-runtime-account@cloud.google';
+        serviceAccountEmail = process.env.RUNTIME_SERVICE_ACCOUNT_EMAIL || 'adc-runtime-account@cloud.google';
         credentialSource = 'ADC';
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(
-          `未检测到 Application Default Credentials (ADC) 访问令牌，请在下方粘贴具有 Vertex AI 权限的服务账号 JSON 凭据。详情: ${redactSecrets(msg)}`
+          `未检测到 Application Default Credentials (ADC) 访问令牌，请在 Cloud Run 配置具有 Vertex AI 权限的运行时服务账号。详情: ${redactSecrets(msg)}`
         );
       }
     }
 
-    // Fetch OAuth2 Access Token for xp-vertex-project
     let accessToken: string;
     try {
       const tokenRes = await jwtClient.getAccessToken();
@@ -363,7 +365,6 @@ export class CredentialService {
       throw new Error(`无法为 ${projectId} 获取 OAuth2 Access Token: ${redactSecrets(msg)}`);
     }
 
-    // Perform Zero-Cost Pre-Flight Routing Test using predictLongRunning with { "instances": [] }
     const routingTest = await VertexClient.testRouting(
       accessToken,
       projectId,
@@ -373,13 +374,23 @@ export class CredentialService {
     );
 
     if (routingTest.httpStatus === 403) {
-      const summaryStr = typeof routingTest.rawErrorSummary === 'string' ? routingTest.rawErrorSummary : String(routingTest.rawErrorSummary || '');
+      const summaryStr =
+        typeof routingTest.rawErrorSummary === 'string'
+          ? routingTest.rawErrorSummary
+          : String(routingTest.rawErrorSummary || '');
       if (summaryStr.includes('has not been used') || summaryStr.includes('disabled')) {
-        throw new Error(`Agent Platform / Vertex AI API (aiplatform.googleapis.com) 未在项目 ${projectId} 中启用，请在 GCP 控制台开启服务。`);
+        throw new Error(
+          `Agent Platform / Vertex AI API (aiplatform.googleapis.com) 未在项目 ${projectId} 中启用，请在 GCP 控制台开启服务。`
+        );
       }
-      throw new Error(`服务账号缺乏调用 ${projectId} 模型的 IAM 权限: ${redactSecrets(routingTest.rawErrorSummary)}`);
-    } else if (routingTest.httpStatus === 404) {
-      throw new Error(`GCP 终端节点返回 404 NOT_FOUND (${projectId} / ${location}): ${redactSecrets(routingTest.rawErrorSummary)}`);
+      throw new Error(
+        `服务账号缺乏调用 ${projectId} 模型的 IAM 权限: ${redactSecrets(routingTest.rawErrorSummary)}`
+      );
+    }
+    if (routingTest.httpStatus === 404) {
+      throw new Error(
+        `GCP 终端节点返回 404 NOT_FOUND (${projectId} / ${location}): ${redactSecrets(routingTest.rawErrorSummary)}`
+      );
     }
 
     const connectionId = `conn_${crypto.randomUUID()}`;
@@ -390,7 +401,8 @@ export class CredentialService {
       connectionId,
       type: 'vertex_ai',
       credentialSource,
-      serviceAccountJsonRaw: jsonStr,
+      // User-provided JSON remains process-memory only. It is deliberately never persisted.
+      serviceAccountJsonRaw: jsonStr || undefined,
       serviceAccountJwt: jwtClient,
       projectId,
       location,
@@ -406,7 +418,6 @@ export class CredentialService {
     };
 
     sessionsMap.set(connectionId, session);
-    saveConnectionsToDisk();
 
     return {
       connectionId,
@@ -437,8 +448,7 @@ export class CredentialService {
       throw new Error('服务端环境变量 GEMINI_API_KEY 未设置');
     }
 
-    const requestedVideo = options.videoModel || 'gemini-2.5-flash';
-
+    const requestedVideo = options.videoModel || process.env.GEMINI_VIDEO_MODEL || 'gemini-2.5-flash';
     const connectionId = `conn_${crypto.randomUUID()}`;
     const now = Date.now();
     const expiresAt = now + SESSION_TTL_MS;
@@ -453,15 +463,20 @@ export class CredentialService {
       region: 'global',
       requestedModel: requestedVideo,
       actualModel: requestedVideo,
-      analysisModel: (typeof options.analysisModel === 'string' && !options.analysisModel.includes('3.6')) ? options.analysisModel : 'gemini-2.5-flash',
-      imageModel: (typeof options.imageModel === 'string' && !options.imageModel.includes('3.1')) ? options.imageModel : 'gemini-2.5-flash',
+      analysisModel:
+        typeof options.analysisModel === 'string' && !options.analysisModel.includes('3.6')
+          ? options.analysisModel
+          : 'gemini-2.5-flash',
+      imageModel:
+        typeof options.imageModel === 'string' && !options.imageModel.includes('3.1')
+          ? options.imageModel
+          : 'gemini-2.5-flash',
       videoModel: requestedVideo,
       createdAt: now,
       expiresAt,
     };
 
     sessionsMap.set(connectionId, session);
-    saveConnectionsToDisk();
 
     return {
       connectionId,
@@ -482,4 +497,3 @@ export class CredentialService {
     };
   }
 }
-

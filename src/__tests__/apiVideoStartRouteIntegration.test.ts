@@ -7,6 +7,7 @@ import { VisualQaService } from '../services/qa/visualQaService';
 import { FirstFrameGenerator } from '../services/image/firstFrameGenerator';
 import { EXPECTED_PRODUCTION_VEO_BUCKET, gcsArtifactStore } from '../server/storage/gcsArtifactStore';
 import { firestoreTaskRepository } from '../server/repositories/firestoreTaskRepository';
+import { taskStateMachineService } from '../server/services/taskStateMachineService';
 import type { Express } from 'express';
 
 const createValidPngBuffer = (width = 1080, height = 1920) => {
@@ -21,6 +22,7 @@ const createValidPngBuffer = (width = 1080, height = 1920) => {
 describe('M2-1.2 Express Route Integration Test: /api/videos/start', () => {
   let app: Express;
   let originalEnvBucket: string | undefined;
+  let mockDurableTask: any = null;
 
   beforeEach(async () => {
     vi.restoreAllMocks();
@@ -31,8 +33,46 @@ describe('M2-1.2 Express Route Integration Test: /api/videos/start', () => {
     gcsArtifactStore.setMockMode(true);
 
     // Mock Firestore repository for integration tests
+    mockDurableTask = null;
     vi.spyOn(firestoreTaskRepository, 'isAvailable').mockReturnValue(true);
-    vi.spyOn(firestoreTaskRepository, 'createTask').mockImplementation(async (task: any) => task);
+    vi.spyOn(firestoreTaskRepository, 'createTask').mockImplementation(async (task: any) => {
+      mockDurableTask = { ...task };
+    });
+    vi.spyOn(firestoreTaskRepository, 'getTask').mockImplementation(async () => mockDurableTask);
+    vi.spyOn(firestoreTaskRepository, 'updateTask').mockImplementation(async (taskId: string, patch: any) => {
+      mockDurableTask = { ...(mockDurableTask || { id: taskId, taskId }), ...patch, id: taskId, taskId };
+      return mockDurableTask;
+    });
+
+    // Mock the durable execution boundary used by the production route.
+    vi.spyOn(taskStateMachineService, 'acquireLease').mockImplementation(async ({ taskId, leaseOwner }: any) => {
+      const now = Date.now();
+      mockDurableTask = {
+        ...(mockDurableTask || { id: taskId, taskId, status: 'submitting' }),
+        executionId: 'exec_route_test',
+        leaseOwner,
+        leaseExpiresAt: now + 180000,
+        stateVersion: 2,
+        statusVersion: 2,
+      };
+      return { acquired: true, reason: 'acquired', executionId: 'exec_route_test', task: mockDurableTask };
+    });
+    vi.spyOn(taskStateMachineService, 'transitionTask').mockImplementation(async ({ taskId, toStatus, patch }: any) => {
+      mockDurableTask = {
+        ...(mockDurableTask || { id: taskId, taskId }),
+        ...(patch || {}),
+        id: taskId,
+        taskId,
+        status: toStatus,
+        stateVersion: (mockDurableTask?.stateVersion || 1) + 1,
+      };
+      mockDurableTask.statusVersion = mockDurableTask.stateVersion;
+      return mockDurableTask;
+    });
+    vi.spyOn(taskStateMachineService, 'releaseLease').mockImplementation(async () => {
+      if (mockDurableTask) mockDurableTask.leaseExpiresAt = 0;
+      return true;
+    });
 
     // Mock candidate generator to avoid calling external Gemini models during tests
     vi.spyOn(FirstFrameGenerator, 'generateFirstFrameCandidates').mockResolvedValue([

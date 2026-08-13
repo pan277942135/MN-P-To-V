@@ -87,11 +87,9 @@ async function safeUpdateTaskRecord(taskId: string, updates: Partial<ServerVideo
       return updated;
     } catch (err: any) {
       if (err instanceof InvalidStateTransitionError) {
-        console.warn(`[Task State Machine] Blocked illegal status transition for Task ${taskId}: ${err.message}`);
-        delete updates.status;
-      } else {
-        throw err;
+        console.error(`[Task State Machine] Illegal production transition for Task ${taskId}: ${err.message}`);
       }
+      throw err;
     }
   }
 
@@ -936,6 +934,51 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         });
       }
 
+      const requestedTaskId = req.body.taskId;
+
+      // P0-5: Firestore is the idempotency authority across Cloud Run instances.
+      // Always check the durable task before consulting the process-local cache.
+      if (requestedTaskId && firestoreTaskRepository.isAvailable()) {
+        const durableExisting = await firestoreTaskRepository.getTask(requestedTaskId);
+        if (durableExisting) {
+          serverVideoTaskStore.set(requestedTaskId, durableExisting);
+          if (['submitting', 'submitted', 'polling', 'polling_timeout', 'generation_succeeded', 'artifact_persisting', 'artifact_persisted', 'qa_pending'].includes(durableExisting.status as string)) {
+            return res.json({
+              accepted: true,
+              serverPersisted: true,
+              taskId: durableExisting.taskId,
+              status: durableExisting.status,
+              submissionState: 'submitted',
+              operationNamePresent: Boolean(durableExisting.operationName),
+              isIdempotentReuse: true,
+              createdAt: durableExisting.createdAt,
+              updatedAt: durableExisting.updatedAt,
+              engine: durableExisting.modelId,
+              operationName: durableExisting.operationName,
+            });
+          }
+          if (durableExisting.status === 'completed' && durableExisting.artifactPersisted) {
+            return res.json({
+              accepted: true,
+              serverPersisted: true,
+              taskId: durableExisting.taskId,
+              status: 'completed',
+              submissionState: 'submitted',
+              operationNamePresent: Boolean(durableExisting.operationName),
+              isIdempotentReuse: true,
+              createdAt: durableExisting.createdAt,
+              updatedAt: durableExisting.updatedAt,
+              engine: durableExisting.modelId,
+              videoDataUrl: durableExisting.videoDataUrl || `/api/videos/stream/${durableExisting.taskId}`,
+              sizeBytes: durableExisting.sizeBytes,
+              durationSeconds: durableExisting.durationSeconds,
+              qaReport: durableExisting.qaReport,
+              diagnostics: durableExisting.diagnostics,
+            });
+          }
+        }
+      }
+
       const files = req.files as { [fieldname: string]: Express.Multer.File[] };
       const ffFile = files['firstFrame']?.[0];
       const sceneFile = files['sceneImage']?.[0];
@@ -1120,72 +1163,10 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         resolution,
       ].join('_')).digest('hex');
 
-      const requestedTaskId = req.body.taskId;
-      if (requestedTaskId && serverVideoTaskStore.has(requestedTaskId)) {
-        const existingRecord = serverVideoTaskStore.get(requestedTaskId)!;
-        if (['submitting', 'submitted', 'polling', 'processing', 'draft'].includes(existingRecord.status as string)) {
-          console.log(`[Task Reuse] 复用已有请求 Task ${requestedTaskId} (status: ${existingRecord.status})`);
-          return res.json({
-            accepted: true,
-            serverPersisted: true,
-            taskId: existingRecord.taskId,
-            status: (existingRecord.status as string) === 'processing' ? 'polling' : existingRecord.status,
-            submissionState: 'submitted',
-            operationNamePresent: Boolean(existingRecord.operationName),
-            isIdempotentReuse: true,
-            createdAt: existingRecord.createdAt,
-            updatedAt: existingRecord.updatedAt,
-            engine: existingRecord.modelId,
-            operationName: existingRecord.operationName,
-          });
-        }
-        if (existingRecord.status === 'completed' && existingRecord.videoDataUrl) {
-          console.log(`[Task Reuse] 任务已完成，返回结果 ${requestedTaskId}`);
-          return res.json({
-            accepted: true,
-            serverPersisted: true,
-            taskId: existingRecord.taskId,
-            status: 'completed',
-            submissionState: 'submitted',
-            operationNamePresent: Boolean(existingRecord.operationName),
-            isIdempotentReuse: true,
-            createdAt: existingRecord.createdAt,
-            updatedAt: existingRecord.updatedAt,
-            engine: existingRecord.modelId,
-            videoDataUrl: existingRecord.videoDataUrl,
-            sizeBytes: existingRecord.sizeBytes,
-            durationSeconds: existingRecord.durationSeconds,
-            qaReport: existingRecord.qaReport,
-            diagnostics: existingRecord.diagnostics,
-          });
-        }
-      }
+
 
       const taskId = req.body.taskId || `vtask_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const now = Date.now();
-
-      // Safeguard: Check if identical request was submitted within the last 60 seconds
-      const recentDuplicate = Array.from(serverVideoTaskStore.values()).find(
-        (rec) => rec && rec.idempotencyKey === idempotencyKey && (now - rec.createdAt) < 60000 && ['submitting', 'submitted', 'polling', 'processing', 'completed'].includes(rec.status as string)
-      );
-
-      if (recentDuplicate) {
-        console.log(`[Idempotency Safeguard] 拦截60s内并发重复提交请求，复用任务: ${recentDuplicate.taskId} (status: ${recentDuplicate.status})`);
-        return res.json({
-          accepted: true,
-          serverPersisted: true,
-          taskId: recentDuplicate.taskId,
-          status: (recentDuplicate.status as string) === 'processing' ? 'polling' : recentDuplicate.status,
-          submissionState: 'submitted',
-          operationNamePresent: Boolean(recentDuplicate.operationName),
-          isIdempotentReuse: true,
-          createdAt: recentDuplicate.createdAt,
-          updatedAt: recentDuplicate.updatedAt,
-          engine: recentDuplicate.modelId,
-          operationName: recentDuplicate.operationName,
-          videoDataUrl: recentDuplicate.videoDataUrl,
-        });
-      }
 
       const sceneImgBuf = sceneFile ? sceneFile.buffer : approvedFirstFrameBuf;
       const sceneImgMime = sceneFile ? (sceneFile.mimetype || 'image/jpeg') : approvedFirstFrameMime;
@@ -1248,9 +1229,50 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       try {
         taskRecord.evidenceSource = 'firestore';
         await firestoreTaskRepository.createTask(taskRecord);
+
+        // P0-5: acquire a durable Firestore execution lease before invoking the provider.
+        const leaseOwner = process.env.K_REVISION || process.env.K_SERVICE || `pid_${process.pid}`;
+        const leaseResult = await taskStateMachineService.acquireLease({
+          taskId,
+          leaseOwner,
+          leaseDurationMs: 180000,
+          maxAttempts: 3,
+        });
+        if (!leaseResult.acquired || !leaseResult.executionId) {
+          throw new Error(`Unable to acquire durable execution lease for task ${taskId}: ${leaseResult.reason || 'unknown'}`);
+        }
+        taskRecord.executionId = leaseResult.executionId;
+        taskRecord.leaseOwner = leaseOwner;
+        taskRecord.leaseExpiresAt = leaseResult.task?.leaseExpiresAt;
+        taskRecord.stateVersion = leaseResult.task?.stateVersion;
+        taskRecord.statusVersion = leaseResult.task?.statusVersion;
       } catch (fsErr: any) {
         console.error('[Firestore Task Creation Error]:', fsErr);
         const errStr = String(fsErr?.message || fsErr);
+
+        // createTask uses Firestore create() semantics. If another instance won the
+        // same taskId race, return the authoritative existing task instead of invoking Veo twice.
+        const alreadyExists = fsErr?.code === 6 || fsErr?.code === 'ALREADY_EXISTS' || /already exists/i.test(errStr);
+        if (alreadyExists) {
+          const existing = await firestoreTaskRepository.getTask(taskId).catch(() => null);
+          if (existing) {
+            serverVideoTaskStore.set(taskId, existing);
+            return res.json({
+              accepted: true,
+              serverPersisted: true,
+              taskId: existing.taskId,
+              status: existing.status,
+              submissionState: 'submitted',
+              operationNamePresent: Boolean(existing.operationName),
+              isIdempotentReuse: true,
+              createdAt: existing.createdAt,
+              updatedAt: existing.updatedAt,
+              engine: existing.modelId,
+              operationName: existing.operationName,
+              videoDataUrl: existing.videoDataUrl,
+            });
+          }
+        }
         const isQuotaOrTransient =
           fsErr?.code === 8 ||
           fsErr?.code === 14 ||
@@ -1284,8 +1306,11 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       serverVideoTaskStore.set(taskId, taskRecord);
       saveTasksToDisk(serverVideoTaskStore);
 
-      // 异步后台发起 Google Veo 提单与提示词处理，不阻塞 HTTP 响应
-      (async () => {
+      // P0-5: Provider submission is part of the request durability boundary.
+      // Do not rely on fire-and-forget work after a Cloud Run HTTP response. The request
+      // waits only until the provider operation/result is durably persisted; long-running
+      // generation remains asynchronous and is resumed through polling/recovery.
+      await (async () => {
         let finalVeoPrompt = submissionPrep.compiledMotionPrompt || PromptCompiler.compileI2VMotionPrompt({
           userMotionPrompt: normalizedPrompt,
           durationSeconds,
@@ -1369,33 +1394,29 @@ ${cleanPrompt}`
                 contentType: 'video/mp4',
               });
               ephemeralVideoStore.set(taskId, startResult.videoBuffer);
-              const updates: Partial<ServerVideoTaskRecord> = {
-                status: 'completed',
+              const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+                taskId,
                 outputBucket: artifactMeta.outputBucket,
                 outputObjectPath: artifactMeta.outputObjectPath,
                 videoUri: artifactMeta.videoUri,
-                artifactPersisted: true,
                 sizeBytes: artifactMeta.sizeBytes,
                 contentType: artifactMeta.contentType,
-                videoDataUrl: `/api/videos/stream/${taskId}`,
-                completedAt: Date.now(),
-                qaReport: {
-                  pass: true,
-                  firstFrameMode: '首帧模式：原图直通',
-                  identityQaStatus: '身份自动质检：未执行',
-                  masterImagesSentCount: 0,
-                  summary: '首帧原图直通模式已生效，角色母板未发送至Veo',
-                  criticalIssues: [],
+                artifactPersistedAt: artifactMeta.artifactPersistedAt,
+                patch: {
+                  qaReport: {
+                    pass: true,
+                    firstFrameMode: '首帧模式：原图直通',
+                    identityQaStatus: '身份自动质检：未执行',
+                    masterImagesSentCount: 0,
+                    summary: '首帧原图直通模式已生效，角色母板未发送至Veo',
+                    criticalIssues: [],
+                  },
+                  diagnostics: startResult.diagnostics,
+                  submitHttpStatus: 200,
                 },
-                diagnostics: startResult.diagnostics,
-                submitHttpStatus: 200,
-              };
-              if (firestoreTaskRepository.isAvailable()) {
-                await safeUpdateTaskRecord(taskId, updates);
-              } else {
-                Object.assign(rec, updates);
-                serverVideoTaskStore.set(taskId, rec);
-              }
+              });
+              serverVideoTaskStore.set(taskId, completedTask);
+              await taskStateMachineService.releaseLease(taskId, taskRecord.executionId);
               console.log(`[Video Start Sync Complete] 任务 ${taskId} 直接渲染完成并上传至 GCS (${artifactMeta.sizeBytes} bytes)`);
               return;
             } catch (persistErr: any) {
@@ -1425,19 +1446,20 @@ ${cleanPrompt}`
           }
 
           if (startResult.operationName) {
-            const updates: Partial<ServerVideoTaskRecord> = {
+            const submitted = await safeUpdateTaskRecord(taskId, {
+              status: 'submitted',
+              operationName: startResult.operationName,
+              diagnostics: startResult.diagnostics,
+              submitHttpStatus: 200,
+            });
+            await safeUpdateTaskRecord(taskId, {
               status: 'polling',
               operationName: startResult.operationName,
               diagnostics: startResult.diagnostics,
               submitHttpStatus: 200,
-            };
-            if (firestoreTaskRepository.isAvailable()) {
-              await safeUpdateTaskRecord(taskId, updates);
-            } else {
-              Object.assign(rec, updates);
-              serverVideoTaskStore.set(taskId, rec);
-              saveTasksToDisk(serverVideoTaskStore);
-            }
+              stateVersion: submitted.stateVersion,
+            });
+            await taskStateMachineService.releaseLease(taskId, taskRecord.executionId);
             console.log(`[Video Start Success] 任务 ${taskId} 成功获取 OperationName: ${startResult.operationName}`);
             return;
           }
@@ -1481,20 +1503,24 @@ ${cleanPrompt}`
             }
           }
         }
-      })().catch((bgErr) => console.error('[Video Start BG Error]:', bgErr));
+      })();
 
-      // 立即返回 HTTP 200 确认，避免长连接超时与端口 3000 断连
+      // Return only after the provider submission outcome has been durably recorded.
+      const durableTask = await firestoreTaskRepository.getTask(taskId);
       return res.json({
         accepted: true,
         serverPersisted: true,
         taskId,
-        status: 'submitting',
-        submissionState: 'submitting',
-        operationNamePresent: false,
+        status: durableTask?.status || 'submitting',
+        submissionState: durableTask?.operationName ? 'submitted' : 'submitting',
+        operationNamePresent: Boolean(durableTask?.operationName),
+        operationName: durableTask?.operationName,
         isIdempotentReuse: false,
-        createdAt: taskRecord.createdAt,
-        updatedAt: taskRecord.updatedAt,
-        engine: models.videoModel,
+        createdAt: durableTask?.createdAt || taskRecord.createdAt,
+        updatedAt: durableTask?.updatedAt || taskRecord.updatedAt,
+        engine: durableTask?.modelId || models.videoModel,
+        videoDataUrl: durableTask?.videoDataUrl,
+        artifactPersisted: durableTask?.artifactPersisted,
       });
     } catch (err: unknown) {
       const httpStatus = (err as any)?.httpStatus || 500;
@@ -1508,18 +1534,9 @@ ${cleanPrompt}`
         endpointPathRedacted: '/api/videos/start',
       });
 
-      let serverPersisted = false;
-      if (req.body?.taskId) {
-        const rec = serverVideoTaskStore.get(req.body.taskId);
-        if (rec) {
-          rec.status = 'failed';
-          rec.error = errObj.userMessage || '启动视频生成任务失败';
-          rec.structuredError = errObj;
-          serverVideoTaskStore.set(req.body.taskId, rec);
-          saveTasksToDisk(serverVideoTaskStore);
-          serverPersisted = true;
-        }
-      }
+      // A process-memory record is never durable evidence. If Firestore persistence failed,
+      // report serverPersisted=false rather than manufacturing a local authoritative task.
+      const serverPersisted = false;
 
       return res.status(httpStatus).json({
         accepted: false,
@@ -1714,143 +1731,184 @@ ${cleanPrompt}`
   });
 
   // Delete Single Video Task Endpoint
-  app.delete('/api/videos/:taskId', (req, res) => {
+  app.delete('/api/videos/:taskId', async (req, res) => {
     try {
       const { taskId } = req.params;
       if (!taskId) {
         return res.status(400).json({ error: 'taskId 为必填项' });
       }
-
-      let deleted = false;
-      for (const [id, rec] of Array.from(serverVideoTaskStore.entries())) {
-        if (id === taskId || rec.id === taskId || rec.taskId === taskId) {
-          serverVideoTaskStore.delete(id);
-          deleted = true;
-        }
+      if (!firestoreTaskRepository.isAvailable()) {
+        return res.status(503).json({
+          success: false,
+          storageAuthority: 'unavailable',
+          error: 'Firestore unavailable; task deletion was not performed.',
+        });
       }
 
+      const deleted = await firestoreTaskRepository.deleteTask(taskId);
       if (deleted) {
-        saveTasksToDisk(serverVideoTaskStore);
+        serverVideoTaskStore.delete(taskId);
+        ephemeralVideoStore.delete(taskId);
+        ephemeralImageStore.delete(taskId);
       }
-
-      res.json({ success: true, deletedTaskId: taskId });
+      return res.json({ success: true, deleted, deletedTaskId: taskId, storageAuthority: 'firestore' });
     } catch (err) {
       console.error('Failed to delete video task:', err);
-      res.status(500).json({ error: '删除视频任务失败' });
+      return res.status(500).json({ error: '删除视频任务失败', storageAuthority: 'firestore' });
     }
   });
 
   // Clear All Failed Tasks Endpoint
-  app.post('/api/videos/clear-failed', (req, res) => {
+  app.post('/api/videos/clear-failed', async (req, res) => {
     try {
+      if (!firestoreTaskRepository.isAvailable()) {
+        return res.status(503).json({
+          success: false,
+          storageAuthority: 'unavailable',
+          error: 'Firestore unavailable; no tasks were deleted.',
+        });
+      }
+
       const connectionId = req.headers['x-connection-id'] as string;
+      const tasks = await firestoreTaskRepository.listTasks(100);
       let deletedCount = 0;
-
-      for (const [id, rec] of Array.from(serverVideoTaskStore.entries())) {
-        if (!rec) continue;
+      for (const rec of tasks) {
         const matchesConnection = !connectionId || !rec.connectionId || rec.connectionId === connectionId;
-
         const isFailedOrStuck = rec.status === 'failed' ||
           (rec.status as string) === 'submit_failed_safe_to_retry' ||
           (rec.status as string) === 'orphaned_local_task' ||
           (!rec.operationName && (rec.status === 'polling' || rec.status === 'submitting')) ||
           ((rec.status === 'polling' || rec.status === 'submitting') && (Date.now() - rec.createdAt) > 300000);
+        if (!matchesConnection || !isFailedOrStuck) continue;
 
-        if (matchesConnection && isFailedOrStuck) {
-          serverVideoTaskStore.delete(id);
+        if (await firestoreTaskRepository.deleteTask(rec.taskId || rec.id)) {
+          serverVideoTaskStore.delete(rec.taskId || rec.id);
+          ephemeralVideoStore.delete(rec.taskId || rec.id);
+          ephemeralImageStore.delete(rec.taskId || rec.id);
           deletedCount++;
         }
       }
 
-      if (deletedCount > 0) {
-        saveTasksToDisk(serverVideoTaskStore);
-      }
-
-      res.json({ success: true, deletedCount });
+      return res.json({ success: true, deletedCount, storageAuthority: 'firestore' });
     } catch (err) {
       console.error('Failed to clear failed video tasks:', err);
-      res.status(500).json({ error: '清空失败任务失败' });
+      return res.status(500).json({ error: '清空失败任务失败', storageAuthority: 'firestore' });
     }
   });
 
   // Task Recovery Endpoint
-  app.post('/api/videos/recover-task', (req, res) => {
-    const { taskId, operationName, modelId, durationSeconds } = req.body;
-    if (!taskId || !operationName) {
-      return res.status(400).json({ error: 'taskId 与 operationName 为必填项' });
-    }
+  app.post('/api/videos/recover-task', async (req, res) => {
+    try {
+      const { taskId, operationName, modelId, durationSeconds } = req.body;
+      if (!taskId || !operationName) {
+        return res.status(400).json({ error: 'taskId 与 operationName 为必填项' });
+      }
+      if (!firestoreTaskRepository.isAvailable()) {
+        return res.status(503).json({
+          success: false,
+          storageAuthority: 'unavailable',
+          error: 'Firestore unavailable; recovery record was not created.',
+        });
+      }
 
-    const existing = serverVideoTaskStore.get(taskId);
-    if (existing) {
-      return res.json({ success: true, message: '任务已在持久化存储中', task: existing });
-    }
+      const existing = await firestoreTaskRepository.getTask(taskId);
+      if (existing) {
+        serverVideoTaskStore.set(taskId, existing);
+        return res.json({
+          success: true,
+          message: '任务已在 Firestore 持久化存储中',
+          task: existing,
+          storageAuthority: 'firestore',
+        });
+      }
 
-    const now = Date.now();
-    const recoveredRecord: ServerVideoTaskRecord = {
-      id: taskId,
-      taskId,
-      operationName,
-      status: 'polling',
-      modelId: modelId || 'veo-3.1-fast-generate-001',
-      projectId: 'xp-vertex-project',
-      region: 'us-central1',
-      durationSeconds: Number(durationSeconds) || 4,
-      aspectRatio: '9:16',
-      resolution: '720p',
-      generateAudio: false,
-      submitHttpStatus: 200,
-      pollHttpStatus: null,
-      pollAttempt: 0,
-      createdAt: now - 10000,
-      updatedAt: now,
-    };
+      const now = Date.now();
+      const recoveredRecord: ServerVideoTaskRecord = {
+        id: taskId,
+        taskId,
+        operationName,
+        status: 'polling',
+        modelId: modelId || 'veo-3.1-fast-generate-001',
+        projectId: 'xp-vertex-project',
+        region: 'us-central1',
+        durationSeconds: Number(durationSeconds) || 4,
+        aspectRatio: '9:16',
+        resolution: '720p',
+        generateAudio: false,
+        submitHttpStatus: 200,
+        pollHttpStatus: null,
+        pollAttempt: 0,
+        createdAt: now - 10000,
+        updatedAt: now,
+        evidenceSource: 'firestore',
+      };
 
-    serverVideoTaskStore.set(taskId, recoveredRecord);
-    saveTasksToDisk(serverVideoTaskStore);
-
-    if (firestoreTaskRepository.isAvailable()) {
-      recoveredRecord.evidenceSource = 'firestore';
-      firestoreTaskRepository.createTask(recoveredRecord).catch((err) => {
-        console.warn(`[Firestore recover-task Error] Task ${taskId}:`, err);
+      await firestoreTaskRepository.createTask(recoveredRecord);
+      serverVideoTaskStore.set(taskId, recoveredRecord);
+      return res.json({
+        success: true,
+        message: '成功恢复并初始化 Firestore 任务存储',
+        task: recoveredRecord,
+        storageAuthority: 'firestore',
+      });
+    } catch (err: any) {
+      console.error('Failed to recover video task:', err);
+      return res.status(500).json({
+        success: false,
+        storageAuthority: 'firestore',
+        error: err?.message || '恢复视频任务失败',
       });
     }
-
-    return res.json({ success: true, message: '成功恢复并初始化任务存储', task: recoveredRecord });
   });
 
   // Debug endpoint for task store inspection
   app.get('/api/videos/debug-store', async (_req, res) => {
-    let tasksFromStore: ServerVideoTaskRecord[] = [];
-    if (firestoreTaskRepository.isAvailable()) {
-      try {
-        tasksFromStore = await firestoreTaskRepository.listTasks(100);
-      } catch {
-        tasksFromStore = Array.from(serverVideoTaskStore.values());
-      }
-    } else {
-      tasksFromStore = Array.from(serverVideoTaskStore.values());
+    if (!firestoreTaskRepository.isAvailable()) {
+      return res.status(503).json({
+        storageAuthority: 'unavailable',
+        evidenceSource: 'unavailable',
+        memoryCacheEnabled: true,
+        memoryCacheCount: serverVideoTaskStore.size,
+        count: 0,
+        tasks: [],
+        error: 'Firestore unavailable; memory cache is intentionally not returned as authoritative evidence.',
+      });
     }
 
-    const tasks = tasksFromStore.map((rec) => ({
-      id: rec.id || rec.taskId,
-      connectionId: rec.connectionId,
-      status: rec.status,
-      operationName: rec.operationName || null,
-      modelId: rec.modelId,
-      durationSeconds: rec.durationSeconds,
-      createdAt: rec.createdAt,
-      updatedAt: rec.updatedAt,
-      idempotencyKey: rec.idempotencyKey || null,
-      error: rec.error || null,
-      evidenceSource: rec.evidenceSource || 'server_memory',
-    }));
-    res.json({
-      storageAuthority: getStorageAuthority(),
-      memoryCacheEnabled: true,
-      memoryCacheCount: serverVideoTaskStore.size,
-      count: tasks.length,
-      tasks
-    });
+    try {
+      const tasksFromStore = await firestoreTaskRepository.listTasks(100);
+      for (const task of tasksFromStore) {
+        serverVideoTaskStore.set(task.taskId || task.id, task);
+      }
+      const tasks = tasksFromStore.map((rec) => ({
+        id: rec.id || rec.taskId,
+        connectionId: rec.connectionId,
+        status: rec.status,
+        operationName: rec.operationName || null,
+        modelId: rec.modelId,
+        durationSeconds: rec.durationSeconds,
+        createdAt: rec.createdAt,
+        updatedAt: rec.updatedAt,
+        idempotencyKey: rec.idempotencyKey || null,
+        error: rec.error || null,
+        evidenceSource: 'firestore',
+      }));
+      return res.json({
+        storageAuthority: 'firestore',
+        memoryCacheEnabled: true,
+        memoryCacheCount: serverVideoTaskStore.size,
+        count: tasks.length,
+        tasks,
+      });
+    } catch (err: any) {
+      return res.status(503).json({
+        storageAuthority: 'firestore',
+        evidenceSource: 'firestore',
+        count: 0,
+        tasks: [],
+        error: err?.message || 'Firestore diagnostic read failed.',
+      });
+    }
   });
 
   // Task Audit Endpoint (Read-only System & Task Audit)
@@ -2178,45 +2236,21 @@ ${cleanPrompt}`
               criticalIssues: [],
             };
 
-            const updates: Partial<ServerVideoTaskRecord> = {
-              status: 'completed',
-              completedAt: Date.now(),
-              videoDataUrl: `/api/videos/stream/${taskId}`,
+            const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+              taskId,
               outputBucket: artifactMeta.outputBucket,
               outputObjectPath: artifactMeta.outputObjectPath,
               videoUri: artifactMeta.videoUri,
               sizeBytes: artifactMeta.sizeBytes,
               contentType: artifactMeta.contentType,
-              artifactPersisted: true,
               artifactPersistedAt: artifactMeta.artifactPersistedAt,
-              qaReport: defaultQaReport,
-              pollHttpStatus: 200,
-              pollAttempt: record.pollAttempt,
-              updatedAt: Date.now(),
-            };
-
-            try {
-              await firestoreTaskRepository.updateTask(taskId, updates);
-            } catch (updateErr) {
-              console.error(`[Firestore Status Completion Update Error] Task ${taskId}:`, updateErr);
-              const saveErrObj = createStructuredError({
-                source: 'internal_api',
-                failureStage: 'internal_api',
-                httpStatus: 500,
-                customUserMessage: '无法在 Firestore 持久化任务完成状态',
-                endpointPathRedacted: `/api/videos/status/${taskId}`,
-              });
-              return res.status(500).json({
-                storageAuthority: 'firestore',
-                status: 'failed',
-                error: '存储服务更新失败',
-                structuredError: saveErrObj,
-              });
-            }
-
-            Object.assign(record, updates);
-            serverVideoTaskStore.set(taskId, record);
-            saveTasksToDisk(serverVideoTaskStore);
+              patch: {
+                qaReport: defaultQaReport,
+                pollHttpStatus: 200,
+                pollAttempt: record.pollAttempt,
+              },
+            });
+            serverVideoTaskStore.set(taskId, completedTask);
 
             return res.json({
               status: 'completed',
@@ -2255,7 +2289,7 @@ ${cleanPrompt}`
           };
 
           try {
-            await firestoreTaskRepository.updateTask(taskId, updates);
+            await safeUpdateTaskRecord(taskId, updates);
           } catch (updateErr) {
             console.error(`[Firestore Status Timeout Update Error] Task ${taskId}:`, updateErr);
             const saveErrObj = createStructuredError({
@@ -2301,25 +2335,23 @@ ${cleanPrompt}`
           ...(newVideoUri ? { videoUri: newVideoUri } : {}),
         };
 
-        if (statusChanged || videoUriChanged) {
-          try {
-            await firestoreTaskRepository.updateTask(taskId, updates);
-          } catch (updateErr) {
-            console.error(`[Firestore Status Polling Update Error] Task ${taskId}:`, updateErr);
-            const saveErrObj = createStructuredError({
-              source: 'internal_api',
-              failureStage: 'internal_api',
-              httpStatus: 500,
-              customUserMessage: '无法在 Firestore 持久化任务轮询状态',
-              endpointPathRedacted: `/api/videos/status/${taskId}`,
-            });
-            return res.status(500).json({
-              storageAuthority: 'firestore',
-              status: 'failed',
-              error: '存储服务更新失败',
-              structuredError: saveErrObj,
-            });
-          }
+        try {
+          await safeUpdateTaskRecord(taskId, updates);
+        } catch (updateErr) {
+          console.error(`[Firestore Status Polling Update Error] Task ${taskId}:`, updateErr);
+          const saveErrObj = createStructuredError({
+            source: 'internal_api',
+            failureStage: 'internal_api',
+            httpStatus: 500,
+            customUserMessage: '无法在 Firestore 持久化任务轮询状态',
+            endpointPathRedacted: `/api/videos/status/${taskId}`,
+          });
+          return res.status(500).json({
+            storageAuthority: 'firestore',
+            status: 'failed',
+            error: '存储服务更新失败',
+            structuredError: saveErrObj,
+          });
         }
 
         Object.assign(record, updates);
@@ -2363,7 +2395,7 @@ ${cleanPrompt}`
         };
 
         try {
-          await firestoreTaskRepository.updateTask(taskId, updates);
+          await safeUpdateTaskRecord(taskId, updates);
         } catch (updateErr) {
           console.error(`[Firestore Status Failed Update Error] Task ${taskId}:`, updateErr);
           const saveErrObj = createStructuredError({
@@ -2397,7 +2429,7 @@ ${cleanPrompt}`
         });
       }
 
-      if (!pollRes.videoBuffer) {
+      if (!pollRes.videoBuffer && !pollRes.videoUri && !record.videoUri) {
         const failureReason = pollRes.failureReason || (pollRes.isSafetyBlock ? 'output_rai_filtered' : 'upstream_empty_response');
         const retryMode = pollRes.retryMode || (failureReason === 'output_rai_filtered' ? 'REWRITE_INPUT_THEN_REGENERATE' : 'SAFE_TO_REGENERATE');
         const userErrMsg = pollRes.error || (failureReason === 'output_rai_filtered'
@@ -2430,7 +2462,7 @@ ${cleanPrompt}`
         };
 
         try {
-          await firestoreTaskRepository.updateTask(taskId, updates);
+          await safeUpdateTaskRecord(taskId, updates);
         } catch (updateErr) {
           console.error(`[Firestore Status Failed Update Error] Task ${taskId}:`, updateErr);
           const saveErrObj = createStructuredError({
@@ -2488,12 +2520,12 @@ ${cleanPrompt}`
           endpointPathRedacted: `/api/videos/status/${taskId}`,
         });
         const failUpdates: Partial<ServerVideoTaskRecord> = {
-          status: 'artifact_persist_failed',
+          status: 'failed',
           error: 'Veo 渲染完成，但未能获取视频产物 Buffer 存储至 Cloud Storage。',
           structuredError: errObj,
           updatedAt: Date.now(),
         };
-        await firestoreTaskRepository.updateTask(taskId, failUpdates).catch(() => {});
+        await safeUpdateTaskRecord(taskId, failUpdates);
         Object.assign(record, failUpdates);
         serverVideoTaskStore.set(taskId, record);
         return res.status(500).json({
@@ -2503,6 +2535,16 @@ ${cleanPrompt}`
           structuredError: errObj,
         });
       }
+
+      // P0-5 canonical artifact persistence state: the provider has completed,
+      // but the task cannot become completed until the owned GCS object is persisted.
+      await safeUpdateTaskRecord(taskId, {
+        status: 'generation_succeeded',
+        pollHttpStatus: 200,
+        pollAttempt: record.pollAttempt,
+        ...(pollRes.videoUri ? { videoUri: pollRes.videoUri } : {}),
+      });
+      await safeUpdateTaskRecord(taskId, { status: 'artifact_persisting' });
 
       // Persist to GCS and verify existence & non-zero size
       let artifactMeta;
@@ -2527,7 +2569,7 @@ ${cleanPrompt}`
           structuredError: errObj,
           updatedAt: Date.now(),
         };
-        await firestoreTaskRepository.updateTask(taskId, failUpdates).catch(() => {});
+        await safeUpdateTaskRecord(taskId, failUpdates);
         Object.assign(record, failUpdates);
         serverVideoTaskStore.set(taskId, record);
         return res.status(500).json({
@@ -2549,54 +2591,22 @@ ${cleanPrompt}`
         criticalIssues: [],
       };
 
-      const updates: Partial<ServerVideoTaskRecord> = {
-        status: 'completed',
-        completedAt: Date.now(),
-        videoDataUrl: `/api/videos/stream/${taskId}`,
+      const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+        taskId,
         outputBucket: artifactMeta.outputBucket,
         outputObjectPath: artifactMeta.outputObjectPath,
         videoUri: artifactMeta.videoUri,
         sizeBytes: artifactMeta.sizeBytes,
         contentType: artifactMeta.contentType,
-        artifactPersisted: true,
         artifactPersistedAt: artifactMeta.artifactPersistedAt,
-        qaReport: defaultQaReport,
-        pollHttpStatus: 200,
-        pollAttempt: record.pollAttempt,
-        updatedAt: Date.now(),
-      };
-
-      try {
-        await firestoreTaskRepository.updateTask(taskId, updates);
-      } catch (updateErr) {
-        console.error(`[Firestore Status Completed Update Error] Task ${taskId}:`, updateErr);
-        const saveErrObj = createStructuredError({
-          source: 'internal_api',
-          failureStage: 'internal_api',
-          httpStatus: 500,
-          customUserMessage: '无法在 Firestore 持久化任务完成状态',
-          endpointPathRedacted: `/api/videos/status/${taskId}`,
-        });
-        // Mark task as artifact_persist_failed if Firestore write failed
-        const rollbackUpdates: Partial<ServerVideoTaskRecord> = {
-          status: 'artifact_persist_failed',
-          error: 'Firestore 持久化任务完成元数据失败',
-          structuredError: saveErrObj,
-          updatedAt: Date.now(),
-        };
-        Object.assign(record, rollbackUpdates);
-        serverVideoTaskStore.set(taskId, record);
-        return res.status(500).json({
-          storageAuthority: 'firestore',
-          status: 'artifact_persist_failed',
-          error: '存储服务更新失败',
-          structuredError: saveErrObj,
-        });
-      }
-
-      Object.assign(record, updates);
-      serverVideoTaskStore.set(taskId, record);
-      saveTasksToDisk(serverVideoTaskStore);
+        patch: {
+          qaReport: defaultQaReport,
+          pollHttpStatus: 200,
+          pollAttempt: record.pollAttempt,
+        },
+      });
+      Object.assign(record, completedTask);
+      serverVideoTaskStore.set(taskId, completedTask);
 
       return res.json({
         status: 'completed',
@@ -2662,41 +2672,77 @@ ${cleanPrompt}`
     const { taskId } = req.params;
     console.log(`[Video Recover] Requesting artifact recovery for task ${taskId}...`);
     try {
-      let rec = firestoreTaskRepository.isAvailable() ? await firestoreTaskRepository.getTask(taskId) : null;
-      if (!rec) {
-        rec = serverVideoTaskStore.get(taskId) || null;
-      }
-      if (!rec) {
-        return res.status(404).json({ error: '任务不存在，无法恢复视频产物' });
+      if (!firestoreTaskRepository.isAvailable()) {
+        return res.status(503).json({
+          success: false,
+          storageAuthority: 'unavailable',
+          error: 'Firestore unavailable; artifact recovery cannot proceed safely.',
+        });
       }
 
-      // 1. If outputBucket and outputObjectPath already exist, check GCS existence
+      const rec = await firestoreTaskRepository.getTask(taskId);
+      if (!rec) {
+        return res.status(404).json({ error: '任务不存在，无法恢复视频产物', storageAuthority: 'firestore' });
+      }
+
+      // A completed task is allowed to stream only its authoritative owned GCS artifact.
+      // If that object vanished, do not silently repair a ghost-completed task from an
+      // external URI or stale process state; surface the integrity failure explicitly.
+      if (rec.status === 'completed') {
+        if (!rec.outputBucket || !rec.outputObjectPath || rec.artifactPersisted !== true) {
+          return res.status(409).json({
+            error: 'completed_invariant_violation',
+            storageAuthority: 'firestore',
+          });
+        }
+        const existing = await gcsArtifactStore.checkArtifactExists(rec.outputBucket, rec.outputObjectPath);
+        if (!existing.exists || (existing.sizeBytes || 0) <= 0) {
+          return res.status(404).json({
+            error: 'artifact_not_found',
+            storageAuthority: 'gcs',
+            outputBucket: rec.outputBucket,
+            outputObjectPath: rec.outputObjectPath,
+          });
+        }
+        return res.json({
+          success: true,
+          status: 'completed',
+          message: '视频产物已在 Cloud Storage 中确认就绪',
+          videoDataUrl: `/api/videos/stream/${taskId}`,
+          storageAuthority: 'gcs',
+        });
+      }
+
+      // 1. Reconcile an already-owned GCS object without resubmitting the provider.
       if (rec.outputBucket && rec.outputObjectPath) {
-        const check = await gcsArtifactStore.checkArtifactExists(rec.outputBucket, rec.outputObjectPath);
-        if (check.exists) {
-          const updates: Partial<ServerVideoTaskRecord> = {
-            status: 'completed',
-            artifactPersisted: true,
+        const existing = await gcsArtifactStore.checkArtifactExists(rec.outputBucket, rec.outputObjectPath);
+        if (existing.exists && (existing.sizeBytes || rec.sizeBytes || 0) > 0) {
+          const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+            taskId,
+            outputBucket: rec.outputBucket,
+            outputObjectPath: rec.outputObjectPath,
+            videoUri: rec.videoUri || `gs://${rec.outputBucket}/${rec.outputObjectPath}`,
+            sizeBytes: existing.sizeBytes || rec.sizeBytes,
+            contentType: rec.contentType || 'video/mp4',
             artifactPersistedAt: rec.artifactPersistedAt || Date.now(),
-            updatedAt: Date.now(),
-          };
-          await firestoreTaskRepository.updateTask(taskId, updates).catch(() => {});
-          Object.assign(rec, updates);
-          serverVideoTaskStore.set(taskId, rec);
+          });
+          serverVideoTaskStore.set(taskId, completedTask);
           return res.json({
             success: true,
             status: 'completed',
-            message: '视频产物已在 Cloud Storage 中确认就绪',
+            message: '已根据现有 Cloud Storage 产物完成任务状态对账',
             videoDataUrl: `/api/videos/stream/${taskId}`,
+            storageAuthority: 'gcs',
           });
         }
       }
 
-      // 2. If videoUri exists, migrate to GCS
-      if (rec.videoUri) {
+      // 2. Migrate a provider URI into owned GCS. CredentialService.getSession can
+      // reconstruct an ADC-backed Vertex session after a Cloud Run process restart.
+      if (rec.videoUri && !rec.videoUri.startsWith('gs://')) {
+        const session = CredentialService.getSession(rec.connectionId) || CredentialService.getSession();
         let accessToken: string | undefined;
-        const session = rec.connectionId ? CredentialService.getSession(rec.connectionId) : undefined;
-        if (session && session.type === 'vertex_ai') {
+        if (session?.type === 'vertex_ai') {
           accessToken = await VertexClient.getAccessToken(session);
         }
         const apiKey = session?.apiKey || process.env.GEMINI_API_KEY;
@@ -2706,80 +2752,85 @@ ${cleanPrompt}`
           accessToken,
           apiKey,
         });
-
-        const updates: Partial<ServerVideoTaskRecord> = {
-          status: 'completed',
+        const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+          taskId,
           outputBucket: artifactMeta.outputBucket,
           outputObjectPath: artifactMeta.outputObjectPath,
           videoUri: artifactMeta.videoUri,
           sizeBytes: artifactMeta.sizeBytes,
           contentType: artifactMeta.contentType,
-          artifactPersisted: true,
           artifactPersistedAt: artifactMeta.artifactPersistedAt,
-          updatedAt: Date.now(),
-        };
-        await firestoreTaskRepository.updateTask(taskId, updates).catch(() => {});
-        Object.assign(rec, updates);
-        serverVideoTaskStore.set(taskId, rec);
-
+        });
+        serverVideoTaskStore.set(taskId, completedTask);
         return res.json({
           success: true,
           status: 'completed',
-          message: '已成功从旧版云端 Uri 迁移视频产物至 Cloud Storage',
+          message: '已成功从 Provider Uri 迁移视频产物至 Cloud Storage',
           videoDataUrl: `/api/videos/stream/${taskId}`,
+          storageAuthority: 'gcs',
         });
       }
 
-      // 3. If operationName exists, poll existing operation to recover videoUri -> migrate
+      // 3. Resume a durable provider operation and migrate its result. No new generation
+      // is created here; this only polls the operationName already stored in Firestore.
       if (rec.operationName) {
-        const session = rec.connectionId ? CredentialService.getSession(rec.connectionId) : undefined;
-        if (session) {
-          const pollRes = await VertexClient.pollOperation(session, rec.operationName);
-          if (pollRes.done && pollRes.response) {
-            const extracted = VideoGenerator.extractVideoData(pollRes.response);
-            if (extracted.uri) {
-              const accessToken = await VertexClient.getAccessToken(session);
-              const apiKey = session.apiKey || process.env.GEMINI_API_KEY;
-              const artifactMeta = await gcsArtifactStore.migrateArtifactToGcs({
-                taskId,
-                videoUri: extracted.uri,
-                accessToken,
-                apiKey,
-              });
-
-              const updates: Partial<ServerVideoTaskRecord> = {
-                status: 'completed',
-                outputBucket: artifactMeta.outputBucket,
-                outputObjectPath: artifactMeta.outputObjectPath,
-                videoUri: artifactMeta.videoUri,
-                sizeBytes: artifactMeta.sizeBytes,
-                contentType: artifactMeta.contentType,
-                artifactPersisted: true,
-                artifactPersistedAt: artifactMeta.artifactPersistedAt,
-                updatedAt: Date.now(),
-              };
-              await firestoreTaskRepository.updateTask(taskId, updates).catch(() => {});
-              Object.assign(rec, updates);
-              serverVideoTaskStore.set(taskId, rec);
-
-              return res.json({
-                success: true,
-                status: 'completed',
-                message: '已成功从 Veo Operation 恢复并持久化视频产物至 Cloud Storage',
-                videoDataUrl: `/api/videos/stream/${taskId}`,
-              });
-            }
-          }
+        const session = CredentialService.getSession(rec.connectionId) || CredentialService.getSession();
+        if (!session || session.type !== 'vertex_ai') {
+          return res.status(503).json({
+            error: 'provider_session_unavailable',
+            storageAuthority: 'firestore',
+          });
+        }
+        const pollRes = await VertexClient.pollOperation(session, rec.operationName);
+        if (!pollRes.done) {
+          return res.status(202).json({
+            success: true,
+            status: rec.status,
+            operationName: rec.operationName,
+            message: 'Provider operation is still running; no resubmission was performed.',
+          });
+        }
+        if (pollRes.error) {
+          return res.status(502).json({ error: pollRes.error, status: 'failed' });
+        }
+        const extracted = pollRes.response ? VideoGenerator.extractVideoData(pollRes.response) : {} as any;
+        if (extracted.uri) {
+          const accessToken = await VertexClient.getAccessToken(session);
+          const artifactMeta = await gcsArtifactStore.migrateArtifactToGcs({
+            taskId,
+            videoUri: extracted.uri,
+            accessToken,
+            apiKey: session.apiKey || process.env.GEMINI_API_KEY,
+          });
+          const completedTask = await taskStateMachineService.completeWithPersistedArtifact({
+            taskId,
+            outputBucket: artifactMeta.outputBucket,
+            outputObjectPath: artifactMeta.outputObjectPath,
+            videoUri: artifactMeta.videoUri,
+            sizeBytes: artifactMeta.sizeBytes,
+            contentType: artifactMeta.contentType,
+            artifactPersistedAt: artifactMeta.artifactPersistedAt,
+          });
+          serverVideoTaskStore.set(taskId, completedTask);
+          return res.json({
+            success: true,
+            status: 'completed',
+            message: '已从 durable Veo Operation 恢复并持久化视频产物至 Cloud Storage',
+            videoDataUrl: `/api/videos/stream/${taskId}`,
+            storageAuthority: 'gcs',
+          });
         }
       }
 
       return res.status(400).json({
-        error: '当前任务不存在有效的 Cloud Storage 视频产物、videoUri 或 OperationName，无法直接恢复。请点击【重新生成】。',
+        error: '当前任务不存在可恢复的 GCS 产物、Provider URI 或 durable OperationName。',
+        storageAuthority: 'firestore',
       });
     } catch (err: any) {
       console.error(`[Video Recover Error] Task ${taskId}:`, err);
       return res.status(500).json({
         error: `恢复视频产物失败: ${err?.message || err}`,
+        storageAuthority: 'firestore',
       });
     }
   });
@@ -2790,129 +2841,47 @@ ${cleanPrompt}`
       const { taskId } = req.params;
       const isDownload = req.query.download === 'true' || req.query.download === '1';
 
-      let videoBuffer: Buffer | null = ephemeralVideoStore.get(taskId) || null;
-
-      // If buffer missing from ephemeral memory store, fetch directly from Cloud Storage (or migrate)
-      if (!videoBuffer || videoBuffer.length < 1000) {
-        let rec = firestoreTaskRepository.isAvailable() ? await firestoreTaskRepository.getTask(taskId) : null;
-        if (!rec) {
-          rec = serverVideoTaskStore.get(taskId) || null;
-        }
-
-        const queryVideoUri = req.query.videoUri ? String(req.query.videoUri) : undefined;
-        const queryOpName = req.query.operationName ? String(req.query.operationName) : undefined;
-        const candidateVideoUri = queryVideoUri || rec?.videoUri || rec?.outputUri;
-        const candidateOpName = queryOpName || rec?.operationName || (rec as any)?.externalOperationName;
-
-        const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
-        let accessToken: string | undefined;
-        let activeSession: any = undefined;
-        const connId = (req.headers['x-connection-id'] as string) || (req.query.connectionId as string) || rec?.connectionId;
-        if (connId) {
-          activeSession = CredentialService.getSession(connId);
-        }
-        if (!activeSession) {
-          const sessions = CredentialService.listSessions();
-          activeSession = sessions.find((s: any) => s.type === 'vertex_ai') || CredentialService.getSession();
-        }
-        if (activeSession && activeSession.type === 'vertex_ai') {
-          accessToken = await VertexClient.getAccessToken(activeSession).catch(() => undefined);
-        }
-
-        if (!accessToken) {
-          try {
-            const { GoogleAuth } = await import('google-auth-library');
-            const auth = new GoogleAuth({
-              scopes: [
-                'https://www.googleapis.com/auth/cloud-platform',
-                'https://www.googleapis.com/auth/devstorage.read_only',
-              ],
-            });
-            const client = await auth.getClient();
-            const tRes = await client.getAccessToken();
-            accessToken = typeof tRes === 'string' ? tRes : tRes?.token || undefined;
-          } catch {}
-        }
-
-        // A. Primary: Fetch from GCS bucket if outputObjectPath is stored
-        if (rec?.outputBucket && rec?.outputObjectPath) {
-          try {
-            videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(rec.outputBucket, rec.outputObjectPath, { accessToken, apiKey, session: activeSession });
-            console.log(`[Video Stream] Successfully fetched artifact from Cloud Storage gs://${rec.outputBucket}/${rec.outputObjectPath} (${videoBuffer.length} bytes)`);
-          } catch (gcsErr) {
-            console.info(`[Video Stream] Primary GCS fetch skipped for task ${taskId}:`, (gcsErr as any)?.message || gcsErr);
-          }
-        }
-
-        // B. Secondary: Migrate old task with candidateVideoUri
-        if ((!videoBuffer || videoBuffer.length < 1000) && candidateVideoUri) {
-          try {
-            console.log(`[Video Stream] Attempting GCS migration from candidateVideoUri (${candidateVideoUri}) for ${taskId}...`);
-
-            const artifactMeta = await gcsArtifactStore.migrateArtifactToGcs({
-              taskId,
-              videoUri: candidateVideoUri,
-              accessToken,
-              apiKey,
-            });
-
-            videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(artifactMeta.outputBucket, artifactMeta.outputObjectPath, { accessToken, apiKey });
-
-            if (rec) {
-              rec.outputBucket = artifactMeta.outputBucket;
-              rec.outputObjectPath = artifactMeta.outputObjectPath;
-              rec.videoUri = artifactMeta.videoUri;
-              rec.artifactPersisted = true;
-              rec.sizeBytes = artifactMeta.sizeBytes;
-              await firestoreTaskRepository.updateTask(taskId, {
-                outputBucket: artifactMeta.outputBucket,
-                outputObjectPath: artifactMeta.outputObjectPath,
-                videoUri: artifactMeta.videoUri,
-                artifactPersisted: true,
-                sizeBytes: artifactMeta.sizeBytes,
-                status: 'completed',
-              }).catch(() => {});
-            }
-          } catch (migrationErr) {
-            console.info(`[Video Stream] Migration from candidateVideoUri skipped for ${taskId}:`, (migrationErr as any)?.message || migrationErr);
-          }
-        }
-
-        // C. Tertiary: Poll candidateOpName to discover videoUri -> migrate
-        if ((!videoBuffer || videoBuffer.length < 1000) && candidateOpName) {
-          try {
-            console.log(`[Video Stream] Attempting operation poll recovery (${candidateOpName}) for ${taskId}...`);
-            const sessions = CredentialService.listSessions();
-            const vSession = sessions.find((s: any) => s.type === 'vertex_ai');
-            if (vSession) {
-              const pollRes = await VertexClient.pollOperation(vSession, candidateOpName);
-              if (pollRes.done && pollRes.response) {
-                const extracted = VideoGenerator.extractVideoData(pollRes.response);
-                if (extracted.uri) {
-                  const token = await VertexClient.getAccessToken(vSession).catch(() => accessToken);
-                  const artifactMeta = await gcsArtifactStore.migrateArtifactToGcs({
-                    taskId,
-                    videoUri: extracted.uri,
-                    accessToken: token,
-                    apiKey,
-                  });
-                  videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(artifactMeta.outputBucket, artifactMeta.outputObjectPath, { accessToken: token, apiKey });
-                }
-              }
-            }
-          } catch (opErr) {
-            console.info(`[Video Stream] Operation poll recovery skipped for ${taskId}:`, (opErr as any)?.message || opErr);
-          }
-        }
-
-        if (videoBuffer && videoBuffer.length >= 1000) {
-          ephemeralVideoStore.set(taskId, videoBuffer);
-        }
+      if (!firestoreTaskRepository.isAvailable()) {
+        return res.status(503).json({
+          error: 'task_metadata_authority_unavailable',
+          storageAuthority: 'unavailable',
+        });
       }
 
+      // Firestore must validate the task before an ephemeral cache hit can be served.
+      const rec = await firestoreTaskRepository.getTask(taskId);
+      if (!rec) {
+        return res.status(404).json({ error: 'task_not_found', storageAuthority: 'firestore' });
+      }
+      if (!rec.outputBucket || !rec.outputObjectPath || rec.artifactPersisted !== true) {
+        return res.status(404).json({
+          error: 'artifact_not_persisted',
+          storageAuthority: 'firestore',
+        });
+      }
+
+      let videoBuffer: Buffer | null = ephemeralVideoStore.get(taskId) || null;
       if (!videoBuffer || videoBuffer.length < 1000) {
-        res.setHeader('Content-Type', 'application/json');
-        return res.status(404).json({ error: '视频文件在 Cloud Storage 存储上不存在，请点击【重新获取视频】或【重新生成】。' });
+        try {
+          videoBuffer = await gcsArtifactStore.fetchArtifactBuffer(rec.outputBucket, rec.outputObjectPath);
+          console.log(`[Video Stream] GCS authority read gs://${rec.outputBucket}/${rec.outputObjectPath} (${videoBuffer.length} bytes)`);
+        } catch (gcsErr) {
+          console.error(`[Video Stream] Authoritative GCS artifact missing for ${taskId}:`, (gcsErr as any)?.message || gcsErr);
+          return res.status(404).json({
+            error: 'artifact_not_found',
+            storageAuthority: 'gcs',
+            outputBucket: rec.outputBucket,
+            outputObjectPath: rec.outputObjectPath,
+          });
+        }
+
+        if (!videoBuffer || videoBuffer.length < 1000) {
+          return res.status(404).json({
+            error: 'artifact_not_found',
+            storageAuthority: 'gcs',
+          });
+        }
+        ephemeralVideoStore.set(taskId, videoBuffer);
       }
 
       const fileSize = videoBuffer.length;
@@ -2925,28 +2894,32 @@ ${cleanPrompt}`
         const parts = range.replace(/bytes=/, '').split('-');
         const start = parseInt(parts[0], 10);
         const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-        const chunksize = (end - start) + 1;
+        if (!Number.isFinite(start) || start < 0 || end < start || end >= fileSize) {
+          res.setHeader('Content-Range', `bytes */${fileSize}`);
+          return res.status(416).end();
+        }
+        const chunkSize = end - start + 1;
         res.writeHead(206, {
           'Content-Range': `bytes ${start}-${end}/${fileSize}`,
           'Accept-Ranges': 'bytes',
-          'Content-Length': chunksize,
-          'Content-Type': 'video/mp4',
+          'Content-Length': chunkSize,
+          'Content-Type': rec.contentType || 'video/mp4',
           'Access-Control-Allow-Origin': '*',
         });
         return res.end(videoBuffer.subarray(start, end + 1));
-      } else {
-        res.writeHead(200, {
-          'Content-Length': fileSize,
-          'Content-Type': 'video/mp4',
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Expose-Headers': 'Content-Disposition, Content-Length',
-          ...(isDownload ? { 'Content-Disposition': `attachment; filename="zaojing_${taskId}.mp4"` } : {}),
-        });
-        return res.end(videoBuffer);
       }
+
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': rec.contentType || 'video/mp4',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Expose-Headers': 'Content-Disposition, Content-Length',
+        ...(isDownload ? { 'Content-Disposition': `attachment; filename="zaojing_${taskId}.mp4"` } : {}),
+      });
+      return res.end(videoBuffer);
     } catch (err) {
       console.error('Error streaming video:', err);
-      res.status(500).json({ error: '读取视频流或下载失败' });
+      return res.status(500).json({ error: '读取视频流或下载失败' });
     }
   });
 
@@ -3115,92 +3088,36 @@ ${cleanPrompt}`
 
 export async function startServer() {
   const app = await createApp();
-  const PORT = 3000;
+  const configuredPort = Number(process.env.PORT || 3000);
+  const PORT = Number.isFinite(configuredPort) && configuredPort > 0 ? configuredPort : 3000;
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
-    
-    // Trigger task recovery engine after server starts listening
-    (async () => {
-      let recoveredCount = 0;
-      for (const [taskId, record] of serverVideoTaskStore.entries()) {
-        if ((record.status === 'polling' || record.status === 'submitting') && record.operationName) {
-          recoveredCount++;
-          console.log(`[Recovery Engine] Auto-resuming background polling for Task: ${taskId} (Operation: ${record.operationName})`);
 
-          (async () => {
-            try {
-              const connectionId = record.connectionId;
-              let session = connectionId ? CredentialService.getSession(connectionId) : undefined;
-              if (!session) {
-                console.warn(`[Recovery Engine] Task ${taskId} credential session expired, waiting for client reconnect.`);
-                return;
-              }
+    // P0-5 Cloud Run rule: startup recovery must read durable Firestore state,
+    // never enumerate process-local task memory and never write terminal state directly.
+    // Local Docker smoke can explicitly disable cloud recovery because GitHub runners
+    // have no ADC; the real Cloud Run certification must leave this flag unset.
+    if (process.env.P0_DISABLE_STARTUP_RECOVERY === '1') {
+      console.log('[Recovery Engine] Startup recovery disabled for local runtime smoke.');
+      return;
+    }
 
-              const ai = await GeminiClientFactory.getClientForSession(session);
-              const pollRes = await VideoGenerator.pollVeoOperation(ai, session, record.operationName!);
-              if (pollRes.done && pollRes.videoBuffer) {
-                try {
-                  const artifactMeta = await gcsArtifactStore.uploadVideoArtifact({
-                    taskId,
-                    videoBuffer: pollRes.videoBuffer,
-                    contentType: 'video/mp4',
-                  });
-                  ephemeralVideoStore.set(taskId, pollRes.videoBuffer);
-                  const updates: Partial<ServerVideoTaskRecord> = {
-                    status: 'completed',
-                    completedAt: Date.now(),
-                    videoDataUrl: `/api/videos/stream/${taskId}`,
-                    outputBucket: artifactMeta.outputBucket,
-                    outputObjectPath: artifactMeta.outputObjectPath,
-                    videoUri: artifactMeta.videoUri,
-                    sizeBytes: artifactMeta.sizeBytes,
-                    contentType: artifactMeta.contentType,
-                    artifactPersisted: true,
-                    artifactPersistedAt: artifactMeta.artifactPersistedAt,
-                    updatedAt: Date.now(),
-                  };
-                  if (firestoreTaskRepository.isAvailable()) {
-                    await safeUpdateTaskRecord(taskId, updates);
-                  } else {
-                    Object.assign(record, updates);
-                    serverVideoTaskStore.set(taskId, record);
-                  }
-                  console.log(`[Recovery Engine] Task ${taskId} successfully recovered & saved to GCS (${artifactMeta.sizeBytes} bytes)!`);
-                } catch (persistErr: any) {
-                  console.error(`[Recovery Engine GCS Upload Error] Task ${taskId}:`, persistErr);
-                  const errObj = createStructuredError({
-                    source: 'artifact_persist',
-                    failureStage: 'artifact_persist',
-                    httpStatus: 500,
-                    customUserMessage: `恢复渲染完成，但视频产物写入 Cloud Storage 失败: ${persistErr?.message || persistErr}`,
-                    endpointPathRedacted: '/recovery_engine',
-                  });
-                  const failUpdates: Partial<ServerVideoTaskRecord> = {
-                    status: 'artifact_persist_failed',
-                    error: `视频产物写入 Cloud Storage 失败: ${persistErr?.message || persistErr}`,
-                    structuredError: errObj,
-                    updatedAt: Date.now(),
-                  };
-                  if (firestoreTaskRepository.isAvailable()) {
-                    await safeUpdateTaskRecord(taskId, failUpdates);
-                  } else {
-                    Object.assign(record, failUpdates);
-                    serverVideoTaskStore.set(taskId, record);
-                  }
-                }
-              }
-            } catch (err) {
-              console.error(`[Recovery Engine] Error recovering task ${taskId}:`, err);
-            }
-          })().catch((err) => console.error('[Recovery Engine BG Async Error]:', err));
-        }
-      }
-      if (recoveredCount > 0) {
-        console.log(`[Recovery Engine] Successfully initialized auto-recovery for ${recoveredCount} in-flight video tasks.`);
-      }
-    })().catch((err) => console.error('[Recovery Engine Initialization Error]:', err));
+    void taskStateMachineService
+      .recoverAbandonedTasks()
+      .then(({ recoveredCount, evaluatedCount }) => {
+        console.log(
+          `[Recovery Engine] Durable startup scan complete: evaluated=${evaluatedCount}, recovered=${recoveredCount}.`
+        );
+      })
+      .catch((err) => {
+        // Recovery failure must not prevent the HTTP service from becoming healthy.
+        // Firestore/status/recover routes remain fail-closed and can retry explicitly.
+        console.error('[Recovery Engine Initialization Error]:', err);
+      });
   });
+
+  return server;
 }
 
 if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {

@@ -249,6 +249,8 @@ describe('FirestoreTaskRepository Persistence & Cross-Instance Audits', () => {
     await repo.createTask({
       id: 't2', taskId: 't2', status: 'completed', modelId: 'm', projectId: 'p', region: 'r',
       durationSeconds: 8, aspectRatio: '9:16', resolution: '1080p', generateAudio: false, pollAttempt: 2,
+      artifactPersisted: true, outputBucket: 'ai-studio-bucket-89614354864-asia-south1',
+      outputObjectPath: 'veo/t2/video.mp4', videoUri: 'gs://ai-studio-bucket-89614354864-asia-south1/veo/t2/video.mp4',
       createdAt: Date.now() - 1000, updatedAt: Date.now() - 1000
     });
 
@@ -275,7 +277,9 @@ describe('FirestoreTaskRepository Persistence & Cross-Instance Audits', () => {
     await repo.createTask({
       id: 'task_completed', taskId: 'task_completed', operationName: opName, status: 'completed',
       modelId: 'm', projectId: 'p', region: 'r', durationSeconds: 4, aspectRatio: '9:16',
-      resolution: '720p', generateAudio: false, pollAttempt: 3, videoDataUrl: 'data:video/mp4;base64,aaa',
+      resolution: '720p', generateAudio: false, pollAttempt: 3, videoDataUrl: '/api/videos/stream/task_completed',
+      artifactPersisted: true, outputBucket: 'ai-studio-bucket-89614354864-asia-south1',
+      outputObjectPath: 'veo/task_completed/video.mp4', videoUri: 'gs://ai-studio-bucket-89614354864-asia-south1/veo/task_completed/video.mp4',
       createdAt: Date.now() - 5000, updatedAt: Date.now(), completedAt: Date.now()
     });
 

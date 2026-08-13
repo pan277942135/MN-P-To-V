@@ -1,0 +1,508 @@
+name: P0-5 Live Certification
+
+on:
+  push:
+    branches:
+      - p0-5-real-e2e-hardening
+    paths:
+      - .github/workflows/p0-5-live-certification.yml
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  PROJECT_NUMBER: '89614354864'
+  REGION: us-central1
+  GAR_REPO: zaojing
+  SERVICE: zaojing-p0-5-staging
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+  VEO_MODEL_ID: veo-3.1-fast-generate-001
+  FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  TASK_ID: p05live_cert_v1
+
+jobs:
+  live-certification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout certified branch
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via WIF
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Verify federated deployment identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_project_number="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+          test "$actual_project_number" = "$PROJECT_NUMBER"
+          gcloud auth list --filter=status:ACTIVE --format='value(account)'
+          echo "projectNumber=$actual_project_number"
+
+      - name: Build and push immutable staging image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$SERVICE:$GITHUB_SHA"
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy private Cloud Run staging revision
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE='${{ steps.image.outputs.image }}'
+          gcloud run deploy "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --platform=managed \
+            --image="$IMAGE" \
+            --service-account="$RUNTIME_SA" \
+            --no-allow-unauthenticated \
+            --cpu=1 \
+            --memory=2Gi \
+            --timeout=900 \
+            --concurrency=1 \
+            --min-instances=0 \
+            --max-instances=3 \
+            --set-env-vars="NODE_ENV=production,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_MODEL_ID=$VEO_MODEL_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID" \
+            --quiet
+
+          gcloud run services add-iam-policy-binding "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --member="serviceAccount:$DEPLOY_SA" \
+            --role="roles/run.invoker" \
+            --quiet >/dev/null
+
+          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          test -n "$SERVICE_URL"
+          test -n "$REVISION"
+          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$SERVICE_URL" > service-url.txt
+          printf '%s\n' "$REVISION" > revision-before.txt
+
+      - name: Mint Cloud Run invocation ID token
+        id: idtoken1
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.deploy.outputs.service_url }}
+          id_token_include_email: true
+
+      - name: Verify real Cloud Run + Firestore + ADC routing before Veo spend
+        id: preflight
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.idtoken1.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          AUTH="Authorization: Bearer $ID_TOKEN"
+
+          curl -fsS -H "$AUTH" "$SERVICE_URL/api/health" | tee health.json
+          curl -fsS -H "$AUTH" "$SERVICE_URL/api/system/environment" | tee environment.json
+          curl -fsS -H "$AUTH" "$SERVICE_URL/api/videos/audit" | tee audit-before.json
+
+          test "$(jq -r '.environment' environment.json)" = "cloud_run"
+          test "$(jq -r '.VEO_OUTPUT_BUCKET' environment.json)" = "$VEO_OUTPUT_BUCKET"
+          test "$(jq -r '.storageAuthority' audit-before.json)" = "firestore"
+          test "$(jq -r '.artifactAuthority' audit-before.json)" = "cloud_storage"
+          test "$(jq -r '.storageConfigValid' audit-before.json)" = "true"
+
+          ROUTE_CODE="$(curl -sS -o routing.json -w '%{http_code}' \
+            -H "$AUTH" \
+            -H 'Content-Type: application/json' \
+            -X POST "$SERVICE_URL/api/connections/routing-test" \
+            --data "{\"type\":\"vertex_ai\",\"projectId\":\"$PROJECT_ID\",\"location\":\"$REGION\",\"videoModel\":\"$VEO_MODEL_ID\"}")"
+          cat routing.json
+          test "$ROUTE_CODE" = "200"
+          test "$(jq -r '.success' routing.json)" = "true"
+
+      - name: Create deterministic safe 720x1280 certification frame
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import math, struct, zlib
+          from pathlib import Path
+
+          w, h = 720, 1280
+          rows = []
+          for y in range(h):
+              row = bytearray([0])
+              for x in range(w):
+                  if y < 760:
+                      t = y / 760.0
+                      r = int(95 + 85*t)
+                      g = int(155 + 65*t)
+                      b = int(220 + 25*t)
+                  else:
+                      t = (y - 760) / 520.0
+                      r = int(78 - 28*t)
+                      g = int(135 - 42*t)
+                      b = int(78 - 25*t)
+
+                  # warm sun
+                  if (x-540)**2 + (y-250)**2 < 58**2:
+                      r, g, b = 248, 220, 145
+
+                  # distant mountain bands
+                  ridge = 650 + int(55*math.sin(x/75.0))
+                  if ridge < y < 760:
+                      r, g, b = 72, 101, 113
+
+                  # simple tall adult silhouette, centered and non-detailed
+                  head = (x-360)**2 + (y-525)**2 < 34**2
+                  torso = 326 <= x <= 394 and 560 <= y <= 790
+                  left_leg = 330 <= x <= 356 and 790 <= y <= 1020
+                  right_leg = 366 <= x <= 392 and 790 <= y <= 1020
+                  left_arm = 300 <= x <= 326 and 590 <= y <= 790
+                  right_arm = 394 <= x <= 420 and 590 <= y <= 790
+                  if head or torso or left_leg or right_leg or left_arm or right_arm:
+                      r, g, b = 43, 49, 55
+
+                  row.extend((r, g, b))
+              rows.append(bytes(row))
+
+          raw = b''.join(rows)
+          def chunk(kind, data):
+              return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+          png = b'\x89PNG\r\n\x1a\n'
+          png += chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+          png += chunk(b'IDAT', zlib.compress(raw, 9))
+          png += chunk(b'IEND', b'')
+          Path('p0-first-frame.png').write_bytes(png)
+          print('frame_bytes=', len(png))
+          PY
+          file p0-first-frame.png
+          test -s p0-first-frame.png
+
+      - name: Race duplicate starts against real Cloud Run instances
+        id: start
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.idtoken1.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          AUTH="Authorization: Bearer $ID_TOKEN"
+
+          EXISTING_CODE="$(curl -sS -o existing-status.json -w '%{http_code}' -H "$AUTH" "$SERVICE_URL/api/videos/status/$TASK_ID")"
+          echo "existing_status_http=$EXISTING_CODE"
+
+          if [ "$EXISTING_CODE" = "404" ]; then
+            do_start() {
+              local out="$1"
+              local codefile="$2"
+              curl -sS -o "$out" -w '%{http_code}' \
+                -H "$AUTH" \
+                -X POST "$SERVICE_URL/api/videos/start" \
+                -F "taskId=$TASK_ID" \
+                -F 'imageIsTargetCharacter=true' \
+                -F 'sceneMode=animate_existing_character' \
+                -F 'durationSeconds=4' \
+                -F 'aspectRatio=9:16' \
+                -F 'resolution=720p' \
+                -F 'generateAudio=false' \
+                -F 'cameraPreset=locked_camera' \
+                -F 'motionIntensity=minimal' \
+                -F 'visualStyle=natural' \
+                -F 'rawUserPrompt=The standing adult remains nearly still with one gentle natural posture shift while a light breeze moves the surrounding grass. Keep the camera fixed and the motion subtle and realistic.' \
+                -F 'firstFrame=@p0-first-frame.png;type=image/png' > "$codefile"
+            }
+
+            do_start start-a.json start-a.code &
+            PID_A=$!
+            do_start start-b.json start-b.code &
+            PID_B=$!
+            wait "$PID_A"
+            wait "$PID_B"
+
+            echo '--- start A ---'; cat start-a.json; echo
+            echo '--- start B ---'; cat start-b.json; echo
+            test "$(cat start-a.code)" = "200"
+            test "$(cat start-b.code)" = "200"
+            test "$(jq -r '.accepted' start-a.json)" = "true"
+            test "$(jq -r '.accepted' start-b.json)" = "true"
+
+            REUSE_COUNT="$(jq -s '[.[].isIdempotentReuse == true] | map(select(.)) | length' start-a.json start-b.json)"
+            NEW_COUNT="$(jq -s '[.[].isIdempotentReuse == false] | map(select(.)) | length' start-a.json start-b.json)"
+            echo "idempotent_reuse_responses=$REUSE_COUNT new_submission_responses=$NEW_COUNT"
+            test "$REUSE_COUNT" -eq 1
+            test "$NEW_COUNT" -eq 1
+            echo 'fresh_race=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Existing fixed certification task detected; reusing it to avoid a second Veo spend.'
+            cat existing-status.json
+            echo 'fresh_race=false' >> "$GITHUB_OUTPUT"
+          fi
+
+          curl -fsS -H "$AUTH" "$SERVICE_URL/api/videos/audit" | tee audit-after-start.json
+          TASK_STATUS="$(jq -r --arg t "$TASK_ID" '.tasks[]? | select(.taskId==$t) | .status' audit-after-start.json | head -1)"
+          OP_PRESENT="$(jq -r --arg t "$TASK_ID" '.tasks[]? | select(.taskId==$t) | .operationNamePresent' audit-after-start.json | head -1)"
+          echo "durable_status=$TASK_STATUS operation_name_present=$OP_PRESENT"
+          test -n "$TASK_STATUS"
+          if [ "$TASK_STATUS" != "completed" ]; then
+            test "$OP_PRESENT" = "true"
+          fi
+          if [ "$TASK_STATUS" = "failed" ]; then
+            echo 'Provider submission failed before restart certification.' >&2
+            exit 1
+          fi
+          echo "pre_restart_status=$TASK_STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: Force a new Cloud Run revision after durable operation persistence
+        id: restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          OLD_REVISION='${{ steps.deploy.outputs.revision }}'
+          MARKER="cert-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gcloud run services update "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --update-env-vars="P0_CERT_RESTART=$MARKER" \
+            --quiet
+          NEW_REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          test -n "$NEW_REVISION"
+          test "$NEW_REVISION" != "$OLD_REVISION"
+          echo "old_revision=$OLD_REVISION" >> "$GITHUB_OUTPUT"
+          echo "new_revision=$NEW_REVISION" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$NEW_REVISION" > revision-after.txt
+
+      - name: Mint fresh post-restart Cloud Run ID token
+        id: idtoken2
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.deploy.outputs.service_url }}
+          id_token_include_email: true
+
+      - name: Verify new revision and resume persisted Veo operation
+        id: poll
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.idtoken2.outputs.id_token }}
+          NEW_REVISION: ${{ steps.restart.outputs.new_revision }}
+        run: |
+          set -euo pipefail
+          AUTH="Authorization: Bearer $ID_TOKEN"
+          curl -fsS -H "$AUTH" "$SERVICE_URL/api/system/environment" | tee environment-after-restart.json
+          test "$(jq -r '.K_REVISION' environment-after-restart.json)" = "$NEW_REVISION"
+
+          completed=0
+          for i in $(seq 1 48); do
+            HTTP_CODE="$(curl -sS -o status-current.json -w '%{http_code}' -H "$AUTH" "$SERVICE_URL/api/videos/status/$TASK_ID")"
+            echo "poll=$i http=$HTTP_CODE $(jq -c '{status,error,failureReason,retryMode,sizeBytes}' status-current.json 2>/dev/null || cat status-current.json)"
+            if [ "$HTTP_CODE" != "200" ]; then
+              cp status-current.json status-failure.json
+              exit 1
+            fi
+            STATUS="$(jq -r '.status // empty' status-current.json)"
+            if [ "$STATUS" = "completed" ]; then
+              cp status-current.json status-final.json
+              completed=1
+              break
+            fi
+            if [ "$STATUS" = "failed" ] || [ "$STATUS" = "artifact_persist_failed" ]; then
+              cp status-current.json status-failure.json
+              exit 1
+            fi
+            sleep 10
+          done
+          test "$completed" -eq 1
+
+          curl -fsS -H "$AUTH" "$SERVICE_URL/api/videos/audit" | tee audit-final.json
+          OUTPUT_BUCKET="$(jq -r --arg t "$TASK_ID" '.tasks[]? | select(.taskId==$t) | .outputBucket' audit-final.json | head -1)"
+          OUTPUT_OBJECT="$(jq -r --arg t "$TASK_ID" '.tasks[]? | select(.taskId==$t) | .outputObjectPath' audit-final.json | head -1)"
+          ARTIFACT_PERSISTED="$(jq -r --arg t "$TASK_ID" '.tasks[]? | select(.taskId==$t) | .artifactPersisted' audit-final.json | head -1)"
+          test "$ARTIFACT_PERSISTED" = "true"
+          test -n "$OUTPUT_BUCKET"
+          test "$OUTPUT_BUCKET" != "null"
+          test -n "$OUTPUT_OBJECT"
+          test "$OUTPUT_OBJECT" != "null"
+          test "$OUTPUT_BUCKET" = "$VEO_OUTPUT_BUCKET"
+          echo "output_bucket=$OUTPUT_BUCKET" >> "$GITHUB_OUTPUT"
+          echo "output_object=$OUTPUT_OBJECT" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch and validate authoritative GCS MP4
+        shell: bash
+        env:
+          OUTPUT_BUCKET: ${{ steps.poll.outputs.output_bucket }}
+          OUTPUT_OBJECT: ${{ steps.poll.outputs.output_object }}
+        run: |
+          set -euo pipefail
+          gcloud storage cp "gs://$OUTPUT_BUCKET/$OUTPUT_OBJECT" artifact-gcs.mp4
+          test -s artifact-gcs.mp4
+          SIZE="$(stat -c '%s' artifact-gcs.mp4)"
+          echo "gcs_size_bytes=$SIZE"
+          test "$SIZE" -gt 1024
+          if ! command -v ffprobe >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ffmpeg
+          fi
+          ffprobe -v error -show_streams -show_format -of json artifact-gcs.mp4 | tee ffprobe-gcs.json
+          VIDEO_STREAMS="$(jq '[.streams[] | select(.codec_type=="video")] | length' ffprobe-gcs.json)"
+          DURATION="$(jq -r '.format.duration // "0"' ffprobe-gcs.json)"
+          test "$VIDEO_STREAMS" -ge 1
+          python3 - "$DURATION" <<'PY'
+          import sys
+          d=float(sys.argv[1])
+          assert d > 0.1, d
+          PY
+          sha256sum artifact-gcs.mp4 | tee sha256-gcs.txt
+
+      - name: Mint fresh token for stream equality check
+        id: idtoken3
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.deploy.outputs.service_url }}
+          id_token_include_email: true
+
+      - name: Verify Cloud Run stream equals GCS artifact byte-for-byte
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.idtoken3.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/stream/$TASK_ID" -o artifact-stream.mp4
+          test -s artifact-stream.mp4
+          sha256sum artifact-stream.mp4 | tee sha256-stream.txt
+          GCS_SHA="$(awk '{print $1}' sha256-gcs.txt)"
+          STREAM_SHA="$(awk '{print $1}' sha256-stream.txt)"
+          echo "gcs_sha256=$GCS_SHA"
+          echo "stream_sha256=$STREAM_SHA"
+          test "$GCS_SHA" = "$STREAM_SHA"
+          ffprobe -v error -show_entries format=duration,size,format_name -of json artifact-stream.mp4 | tee ffprobe-stream.json
+
+      - name: Build certification evidence report
+        if: always()
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          OLD_REVISION: ${{ steps.restart.outputs.old_revision }}
+          NEW_REVISION: ${{ steps.restart.outputs.new_revision }}
+          PRE_RESTART_STATUS: ${{ steps.start.outputs.pre_restart_status }}
+          FRESH_RACE: ${{ steps.start.outputs.fresh_race }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          def read_json(name):
+              p=Path(name)
+              if not p.exists(): return None
+              try: return json.loads(p.read_text())
+              except Exception: return {'raw': p.read_text(errors='replace')[:8000]}
+
+          def sha(name):
+              p=Path(name)
+              if not p.exists(): return None
+              return p.read_text().split()[0]
+
+          report={
+            'gate':'P0-5 live certification',
+            'githubSha':os.environ.get('GITHUB_SHA'),
+            'githubRunId':os.environ.get('GITHUB_RUN_ID'),
+            'serviceUrl':os.environ.get('SERVICE_URL'),
+            'taskId':os.environ.get('TASK_ID'),
+            'freshDuplicateRace':os.environ.get('FRESH_RACE'),
+            'preRestartStatus':os.environ.get('PRE_RESTART_STATUS'),
+            'oldRevision':os.environ.get('OLD_REVISION'),
+            'newRevision':os.environ.get('NEW_REVISION'),
+            'health':read_json('health.json'),
+            'environmentBefore':read_json('environment.json'),
+            'routing':read_json('routing.json'),
+            'startA':read_json('start-a.json'),
+            'startB':read_json('start-b.json'),
+            'environmentAfterRestart':read_json('environment-after-restart.json'),
+            'statusFinal':read_json('status-final.json'),
+            'auditFinal':read_json('audit-final.json'),
+            'ffprobeGcs':read_json('ffprobe-gcs.json'),
+            'ffprobeStream':read_json('ffprobe-stream.json'),
+            'gcsSha256':sha('sha256-gcs.txt'),
+            'streamSha256':sha('sha256-stream.txt'),
+          }
+          Path('p0-5-certification-report.json').write_text(json.dumps(report, indent=2, ensure_ascii=False))
+          print(json.dumps(report, indent=2, ensure_ascii=False)[:16000])
+          PY
+
+      - name: Upload P0-5 evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p0-5-live-evidence-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            p0-5-certification-report.json
+            service-url.txt
+            revision-before.txt
+            revision-after.txt
+            health.json
+            environment.json
+            environment-after-restart.json
+            routing.json
+            audit-before.json
+            audit-after-start.json
+            audit-final.json
+            existing-status.json
+            start-a.json
+            start-b.json
+            status-final.json
+            status-failure.json
+            p0-first-frame.png
+            artifact-gcs.mp4
+            artifact-stream.mp4
+            ffprobe-gcs.json
+            ffprobe-stream.json
+            sha256-gcs.txt
+            sha256-stream.txt
+
+      - name: Return staging to zero-idle-cost settings
+        if: always()
+        shell: bash
+        run: |
+          gcloud run services update "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --min-instances=0 \
+            --max-instances=1 \
+            --concurrency=10 \
+            --quiet || true
