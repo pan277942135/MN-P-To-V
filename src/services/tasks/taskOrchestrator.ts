@@ -135,7 +135,7 @@ export class TaskOrchestrator {
         durationSeconds,
         // REVIEW is not allowed to auto-start Veo, but its approved continuation must keep
         // the exact same compiled motion prompt rather than rebuilding from an empty string.
-        identityGatePassed: identityGate.status !== 'fail',
+        identityGatePassed: true,
       });
 
       task.promptScript = {

@@ -339,6 +339,11 @@ export interface ServerVideoTaskRecord {
   identityFrameScores?: number[];
   identityDriftDetected?: boolean;
   worstFrameTimestamp?: number | null;
+  qaApprovedFirstFrameObjectPath?: string;
+  qaApprovedFirstFrameMimeType?: string;
+  qaMasterImageObjectPaths?: string[];
+  qaMasterImageMimeTypes?: string[];
+  characterDescription?: string;
 
   upstreamEndpoint?: string | null;
   upstreamHttpStatus?: number | null;

@@ -375,6 +375,145 @@ export class TaskStateMachineService {
     return task;
   }
 
+  public async persistArtifactForQa(params: {
+    taskId: string;
+    outputBucket: string;
+    outputObjectPath: string;
+    videoUri: string;
+    sizeBytes?: number;
+    contentType?: string;
+    artifactPersistedAt?: number;
+    patch?: Partial<ServerVideoTaskRecord>;
+  }): Promise<ServerVideoTaskRecord> {
+    const {
+      taskId,
+      outputBucket,
+      outputObjectPath,
+      videoUri,
+      sizeBytes,
+      contentType = 'video/mp4',
+      artifactPersistedAt = Date.now(),
+      patch = {},
+    } = params;
+
+    const advance = async (toStatus: TaskStatus, transitionPatch: Partial<ServerVideoTaskRecord> = {}) =>
+      await this.transitionTask({ taskId, toStatus, patch: transitionPatch });
+
+    let task = await firestoreTaskRepository.getTask(taskId);
+    if (!task) throw new Error(`[TaskStateMachine] Task ${taskId} not found while persisting artifact for QA.`);
+
+    if (task.status === 'completed') {
+      if (task.artifactPersisted !== true || !task.outputBucket || !task.outputObjectPath || !task.videoUri) {
+        throw new Error(`[TaskStateMachine] Completed task ${taskId} violates artifact invariant.`);
+      }
+      return task;
+    }
+
+    if (task.status === 'created') task = await advance('preparing');
+    if (task.status === 'preparing' || task.status === 'submitting' || task.status === 'submitted') {
+      task = await advance('generating');
+    }
+    if (task.status === 'polling_timeout') task = await advance('polling');
+    if (task.status === 'generating' || task.status === 'polling') {
+      task = await advance('generation_succeeded');
+    }
+    if (task.status === 'generation_succeeded' || task.status === 'artifact_persist_failed') {
+      task = await advance('artifact_persisting');
+    }
+    if (task.status === 'artifact_persisting') {
+      task = await advance('artifact_persisted', {
+        ...patch,
+        outputBucket,
+        outputObjectPath,
+        videoUri,
+        sizeBytes,
+        contentType,
+        artifactPersisted: true,
+        artifactPersistedAt,
+        videoDataUrl: `/api/videos/stream/${taskId}`,
+      });
+    }
+    if (task.status === 'artifact_persisted') {
+      task = await advance('qa_pending', {
+        ...patch,
+        outputBucket,
+        outputObjectPath,
+        videoUri,
+        sizeBytes,
+        contentType,
+        artifactPersisted: true,
+        artifactPersistedAt,
+        identityQaStatus: patch.identityQaStatus || 'not_run',
+      });
+    }
+    if (task.status === 'qa_pending') {
+      task = await this.transitionTask({
+        taskId,
+        toStatus: 'qa_pending',
+        patch: {
+          ...patch,
+          outputBucket,
+          outputObjectPath,
+          videoUri,
+          sizeBytes,
+          contentType,
+          artifactPersisted: true,
+          artifactPersistedAt,
+        },
+      });
+    }
+
+    if (task.status !== 'qa_pending') {
+      throw new Error(`[TaskStateMachine] Task ${taskId} cannot enter QA from state ${task.status}.`);
+    }
+    return task;
+  }
+
+  public async completeAfterQa(params: {
+    taskId: string;
+    qaReport: any;
+    patch?: Partial<ServerVideoTaskRecord>;
+  }): Promise<ServerVideoTaskRecord> {
+    const { taskId, qaReport, patch = {} } = params;
+    const task = await firestoreTaskRepository.getTask(taskId);
+    if (!task) throw new Error(`[TaskStateMachine] Task ${taskId} not found while completing after QA.`);
+
+    if (task.status === 'completed') {
+      if (task.artifactPersisted !== true || !task.outputBucket || !task.outputObjectPath || !task.videoUri) {
+        throw new Error(`[TaskStateMachine] Completed task ${taskId} violates artifact invariant.`);
+      }
+      return task;
+    }
+
+    if (task.status !== 'qa_pending') {
+      throw new Error(`[TaskStateMachine] Task ${taskId} must be qa_pending before QA completion; got ${task.status}.`);
+    }
+    if (task.artifactPersisted !== true || !task.outputBucket || !task.outputObjectPath || !task.videoUri) {
+      throw new Error(`[TaskStateMachine] Task ${taskId} cannot complete QA without persisted artifact authority.`);
+    }
+    if (!qaReport || qaReport.pass !== true || qaReport.gateStatus !== 'pass') {
+      throw new Error(`[TaskStateMachine] Task ${taskId} cannot complete without a PASS video identity QA report.`);
+    }
+
+    return await this.transitionTask({
+      taskId,
+      toStatus: 'completed',
+      patch: {
+        ...patch,
+        qaReport,
+        identityQaReport: qaReport,
+        identityQaStatus: 'pass',
+        identityFrameScores: Array.isArray(qaReport.frameReports)
+          ? qaReport.frameReports.map((frame: any) => frame.identityScore)
+          : [],
+        identityDriftDetected: Boolean(qaReport.identityDriftDetected),
+        worstFrameTimestamp: qaReport.worstFrameTimestamp ?? null,
+        completedAt: Date.now(),
+        videoDataUrl: `/api/videos/stream/${taskId}`,
+      },
+    });
+  }
+
   private async finalizeExistingArtifact(
     task: ServerVideoTaskRecord,
     bucket: string,
@@ -419,17 +558,6 @@ export class TaskStateMachineService {
     if (status === 'artifact_persisted') {
       await this.transitionTask({ taskId: task.taskId, toStatus: 'qa_pending' });
       status = 'qa_pending';
-    }
-
-    if (status === 'qa_pending') {
-      await this.transitionTask({
-        taskId: task.taskId,
-        toStatus: 'completed',
-        patch: {
-          completedAt: Date.now(),
-          videoDataUrl: `/api/videos/stream/${task.taskId}`,
-        },
-      });
     }
 
     await this.releaseLease(task.taskId);

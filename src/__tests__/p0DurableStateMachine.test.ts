@@ -442,7 +442,7 @@ describe('P0-3 + P0-4 Durable State Machine & Idempotency / Crash Recovery Suite
     expect(recoveryRes.recoveredCount).toBe(1);
 
     const recovered = await firestoreTaskRepository.getTask(taskId);
-    expect(recovered?.status).toBe('completed');
+    expect(recovered?.status).toBe('qa_pending');
     expect(recovered?.artifactPersisted).toBe(true);
   });
 
@@ -487,7 +487,7 @@ describe('P0-3 + P0-4 Durable State Machine & Idempotency / Crash Recovery Suite
     expect(recoveryRes.recoveredCount).toBe(1);
 
     const recovered = await firestoreTaskRepository.getTask(taskId);
-    expect(recovered?.status).toBe('completed');
+    expect(recovered?.status).toBe('qa_pending');
   });
 
   it('S11: Max Execution Attempts Guard', async () => {
