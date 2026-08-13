@@ -8,6 +8,7 @@ import { IdentityLockService } from '../character/identityLockService';
 import { VideoGenerator, type VideoStartResult } from '../video/videoGenerator';
 import { VideoInspector } from '../video/videoInspector';
 import { VideoIdentityQaService } from '../qa/videoIdentityQaService';
+import { VideoFailureDiagnosisService } from '../qa/videoFailureDiagnosisService';
 import { CredentialService } from '../google/credentialService';
 import { GeminiClientFactory } from '../google/geminiClient';
 import { ModelRouter } from '../google/modelRouter';
@@ -356,7 +357,12 @@ export class TaskOrchestrator {
         characterDescription: character.description,
       });
 
-      task.qaReport = videoQaReport;
+      const failureDiagnosis = VideoFailureDiagnosisService.diagnose(videoQaReport);
+      const diagnosedQaReport = failureDiagnosis
+        ? { ...videoQaReport, failureDiagnosis }
+        : videoQaReport;
+
+      task.qaReport = diagnosedQaReport;
       task.identityQaStatus = videoQaReport.gateStatus;
       task.identityFrameScores = videoQaReport.frameReports.map((frame) => frame.identityScore);
       task.identityDriftDetected = videoQaReport.identityDriftDetected;
@@ -384,7 +390,7 @@ export class TaskOrchestrator {
         success: videoQaReport.pass,
         qaScore: videoQaReport.averageIdentityScore,
         triggeredRetry: !videoQaReport.pass && videoAttempts < maxVideoAttempts,
-        notes: `[${videoQaReport.gateStatus}] ${videoQaReport.summary}`,
+        notes: `[${videoQaReport.gateStatus}][${failureDiagnosis?.primaryCode || 'NO_FAILURE_DIAGNOSIS'}] ${videoQaReport.summary}`,
       };
       task.attempts.push(attemptRecord);
 
@@ -398,6 +404,7 @@ export class TaskOrchestrator {
       }
 
       directionalRepair =
+        failureDiagnosis?.repairPromptAppend ||
         videoQaReport.repairInstruction ||
         '恢复所有视频帧与 Approved First Frame 和角色母板的一致身份特征';
 
@@ -423,8 +430,8 @@ export class TaskOrchestrator {
       task.error = {
         code: 'VIDEO_IDENTITY_QA_FAILED',
         stage: 'qa_video',
-        messageChinese: `视频身份一致性未通过：${videoQaReport.summary}`,
-        technicalMessageRedacted: 'Video identity QA gate failed after maximum attempts',
+        messageChinese: `视频身份一致性未通过 [${failureDiagnosis?.primaryCode || 'UNKNOWN_VIDEO_QA_FAILURE'}]：${videoQaReport.summary}`,
+        technicalMessageRedacted: `Video identity QA failed: ${failureDiagnosis?.primaryCode || 'UNKNOWN_VIDEO_QA_FAILURE'}`,
         httpStatus: 422,
         retryable: true,
         recommendedAction: directionalRepair,
