@@ -1,0 +1,78 @@
+name: M2-5 Human Review
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - m2-5-human-review-workbench
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  human-review:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Apply M2-5 review integration
+        run: python scripts/apply-m2-5-human-review.py
+
+      - name: Human-review contract gate
+        run: |
+          grep -q "app.post('/api/videos/review/:taskId'" server.ts
+          grep -q "resolveHumanReview" src/server/services/taskStateMachineService.ts
+          grep -q "humanReviewValid" src/server/services/taskStateMachineService.ts
+          grep -q "HUMAN_REVIEW_NOT_ELIGIBLE" src/server/services/taskStateMachineService.ts
+          grep -q "statusData.status === 'qa_pending' && statusData.requiresManualApproval" src/pages/StudioPage.tsx
+          grep -q "handleVideoHumanReview('accepted')" src/pages/StudioPage.tsx
+          grep -q "handleVideoHumanReview('rejected')" src/pages/StudioPage.tsx
+          grep -q "submission_outcome_unknown" src/pages/StudioPage.tsx
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
+
+      - name: Commit human review integration
+        if: github.event_name == 'push'
+        run: |
+          if git diff --quiet; then
+            echo 'Human review integration already applied.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add server.ts src/types/index.ts src/server/services/taskStateMachineService.ts src/pages/StudioPage.tsx
+          git commit -m 'feat(m2-5): wire durable human review workbench'
+          git push origin HEAD:${GITHUB_REF_NAME}
