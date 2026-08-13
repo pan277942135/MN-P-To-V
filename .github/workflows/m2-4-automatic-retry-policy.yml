@@ -32,8 +32,13 @@ jobs:
 
       - name: Apply M2-4 retry integration
         run: |
-          python scripts/apply-m2-4-retry-integration.py
+          if grep -q "reserveAutomaticProviderRetry" server.ts; then
+            echo 'Primary durable retry integration already applied.'
+          else
+            python scripts/apply-m2-4-retry-integration.py
+          fi
           python scripts/apply-m2-4-followup.py
+          python scripts/apply-m2-4-postaudit.py
 
       - name: Retry contract gate
         run: |
@@ -44,6 +49,10 @@ jobs:
           grep -q "retrySubmissionState: 'reserved'" src/server/services/taskStateMachineService.ts
           grep -q "artifactHistory" src/server/services/taskStateMachineService.ts
           grep -q "task_a/attempts/2" src/__tests__/m24DurableRetryReservation.test.ts
+          grep -q "submission_outcome_unknown'" server.ts
+          grep -q "requiresManualReview: true" server.ts
+          grep -q "retryHistoryForOutcome" server.ts
+          grep -q "retryHistoryForQaError" server.ts
           if grep -q "videoAttempts < maxVideoAttempts" src/services/tasks/taskOrchestrator.ts; then
             echo 'Blind provider retry loop remains in TaskOrchestrator.' >&2
             exit 1
