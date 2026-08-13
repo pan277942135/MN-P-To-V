@@ -280,6 +280,23 @@ export class FirestoreTaskRepository {
     });
   }
 
+  public async deleteTask(taskId: string): Promise<boolean> {
+    if (!taskId) return false;
+
+    const db = getFirestoreInstance();
+    if (!db) {
+      throw new Error('[FirestoreTaskRepository] Firestore is unavailable. Cannot delete task.');
+    }
+
+    return this.withRetry('deleteTask', true, async () => {
+      const docRef = db.collection(this.collectionName).doc(taskId);
+      const snap = await docRef.get();
+      if (!snap.exists) return false;
+      await docRef.delete();
+      return true;
+    });
+  }
+
   public async taskExists(taskId: string): Promise<boolean> {
     if (!taskId) return false;
 
