@@ -1,0 +1,66 @@
+name: Durable Character Disk Cleanup
+
+on:
+  push:
+    branches:
+      - core-durable-character-library
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup-and-verify:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: core-durable-character-library
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Remove local disk startup authority
+        run: node scripts/remove_character_disk_authority.mjs
+
+      - name: Authority contract gate
+        run: |
+          grep -q "const serverCharacterStore = new Map<string, ServerCharacter>();" server.ts
+          if grep -q "const serverCharacterStore = loadCharactersFromDisk();" server.ts; then
+            echo "local character disk store is still authoritative" >&2
+            exit 1
+          fi
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
+
+      - name: Persist verified authority cleanup
+        run: |
+          if git diff --quiet -- server.ts; then
+            echo "Character disk authority cleanup already persisted."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.ts
+          git commit -m "fix: remove local character disk as startup authority"
+          git push origin HEAD:core-durable-character-library
