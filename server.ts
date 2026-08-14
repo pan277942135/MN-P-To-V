@@ -28,6 +28,7 @@ import { firestoreTaskRepository } from './src/server/repositories/firestoreTask
 import { durableCharacterService } from './src/server/services/durableCharacterService';
 import { taskStateMachineService, InvalidStateTransitionError } from './src/server/services/taskStateMachineService';
 import { isProviderTaskDeletionSafe } from './src/server/services/providerAdmissionPolicy';
+import { evaluateProviderOperationLinkage } from './src/server/services/providerOperationRecoveryPolicy';
 import { getStorageAuthority } from './src/server/db/firestore';
 import { gcsArtifactStore, resolveVeoOutputBucket, resolveVeoStorageUri, getVeoBucketName, getVeoStorageUri, assertProductionStorageConfig, EXPECTED_PRODUCTION_VEO_BUCKET } from './src/server/storage/gcsArtifactStore';
 
@@ -2333,6 +2334,38 @@ ${cleanPrompt}`
         });
       }
 
+      const expectedStoragePrefix = resolveVeoStorageUri(taskId);
+      const linkage = evaluateProviderOperationLinkage({
+        taskId,
+        operationDone: Boolean(verification.done),
+        videoUri: verification.videoUri,
+        expectedStoragePrefix,
+      });
+      if (!linkage.proven) {
+        const isStillRunning = linkage.reason === 'operation_still_running';
+        const errObj = createStructuredError({
+          source: 'vertex_polling',
+          failureStage: 'polling',
+          httpStatus: isStillRunning ? 409 : 422,
+          customUserMessage: isStillRunning
+            ? 'Provider Operation 已核实存在，但尚未完成，当前无法证明它属于该 unknown task。任务继续保持锁定；待 Operation 完成后再次恢复。'
+            : 'Provider Operation 存在，但其输出无法证明属于该 taskId。任务继续保持 submission_outcome_unknown，未释放算力槽。',
+          endpointPathRedacted: '/api/videos/recover-task',
+        });
+        return res.status(isStillRunning ? 409 : 422).json({
+          success: false,
+          providerVerified: true,
+          providerTaskLinked: false,
+          failureReason: 'provider_operation_linkage_not_proven',
+          linkageReason: linkage.reason,
+          expectedStoragePrefix,
+          status: existing?.status || 'not_found',
+          storageAuthority: 'firestore',
+          error: errObj.userMessage,
+          structuredError: errObj,
+        });
+      }
+
       if (existing && existing.status === 'submission_outcome_unknown') {
         const reconciled = await taskStateMachineService.transitionTask({
           taskId,
@@ -2357,8 +2390,9 @@ ${cleanPrompt}`
         return res.json({
           success: true,
           providerVerified: true,
+          providerTaskLinked: true,
           providerDone: Boolean(verification.done),
-          message: '已绑定核实后的 Provider Operation，并恢复现有任务轮询；未发起新的 Veo 生成。',
+          message: '已绑定经 GCS task 专属输出证明的 Provider Operation，并恢复现有任务轮询；未发起新的 Veo 生成。',
           task: reconciled,
           storageAuthority: 'firestore',
         });
@@ -2391,8 +2425,9 @@ ${cleanPrompt}`
       return res.json({
         success: true,
         providerVerified: true,
+        providerTaskLinked: true,
         providerDone: Boolean(verification.done),
-        message: '已核实 Provider Operation，并安全初始化 Firestore 恢复任务；未发起新的 Veo 生成。',
+        message: '已通过 GCS task 专属输出核实 Provider Operation，并安全初始化 Firestore 恢复任务；未发起新的 Veo 生成。',
         task: recoveredRecord,
         storageAuthority: 'firestore',
       });
