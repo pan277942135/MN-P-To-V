@@ -1639,6 +1639,34 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
             });
           }
         }
+        const admissionBusy = fsErr?.code === 'PROVIDER_ADMISSION_BUSY';
+        if (admissionBusy) {
+          const artifactBucket = getVeoBucketName();
+          const orphanQaPaths = [qaApprovedFirstFrameObjectPath, ...qaMasterImageObjectPaths];
+          await Promise.all(orphanQaPaths.map((objectPath) =>
+            gcsArtifactStore.deleteVideoArtifact(artifactBucket, objectPath).catch(() => false)
+          ));
+          const errObj = createStructuredError({
+            source: 'internal_api',
+            failureStage: 'submit',
+            httpStatus: 409,
+            customUserMessage: '当前已有视频任务占用 Veo 生成槽位。为避免重复提交或重复扣费，请先等待该任务进入完成、失败或人工审核状态。',
+            endpointPathRedacted: '/api/videos/start',
+          });
+          return res.status(409).json({
+            accepted: false,
+            serverPersisted: false,
+            status: 'failed',
+            submissionState: 'not_submitted',
+            failureReason: 'provider_admission_busy',
+            blockingTaskId: fsErr?.blockingTaskId,
+            blockingStatus: fsErr?.blockingStatus,
+            predictLongRunningCalls: 0,
+            error: errObj.userMessage,
+            structuredError: errObj,
+          });
+        }
+
         const isQuotaOrTransient =
           fsErr?.code === 8 ||
           fsErr?.code === 14 ||
@@ -1833,25 +1861,46 @@ ${cleanPrompt}`
           const rec = serverVideoTaskStore.get(taskId);
           if (rec) {
             const httpStatus = invokeErr?.httpStatus || 500;
+            const rawSubmitError = String(invokeErr?.message || invokeErr || '');
+            const definitiveHttpStatuses = new Set([400, 401, 403, 404, 409, 422, 429]);
+            const isAmbiguousSubmitFailure =
+              !definitiveHttpStatuses.has(Number(invokeErr?.httpStatus)) &&
+              /(响应超时|timeout|timed out|ECONNRESET|socket hang up|fetch failed|network error|connection reset|aborted)/i.test(rawSubmitError);
+
             const errObj = createStructuredError({
               source: 'vertex_submit',
               failureStage: 'submit',
-              httpStatus,
+              httpStatus: isAmbiguousSubmitFailure ? 504 : httpStatus,
               rawError: invokeErr,
+              customUserMessage: isAmbiguousSubmitFailure
+                ? 'Veo 提交请求的结果无法确认。为避免重复扣费，系统已阻止新的 Veo 提交；请先核实或清理该未知任务。'
+                : undefined,
               endpointPathRedacted: '/api/videos/start',
             });
-            const updates: Partial<ServerVideoTaskRecord> = {
-              status: 'failed',
-              error: invokeErr?.message || errObj.userMessage || '提单被云端拒绝或失败，可安全重试。',
-              structuredError: errObj,
-              submitHttpStatus: httpStatus,
-            };
+            const updates: Partial<ServerVideoTaskRecord> = isAmbiguousSubmitFailure
+              ? {
+                  status: 'submission_outcome_unknown',
+                  failureReason: 'submission_outcome_unknown' as any,
+                  retryMode: 'NO_RETRY',
+                  error: 'Veo 提交结果未知，禁止自动或直接重新生成，以避免重复扣费。',
+                  structuredError: errObj,
+                  submitHttpStatus: null,
+                }
+              : {
+                  status: 'failed',
+                  error: invokeErr?.message || errObj.userMessage || '提单被云端明确拒绝或失败，可安全重试。',
+                  structuredError: errObj,
+                  submitHttpStatus: httpStatus,
+                };
             if (firestoreTaskRepository.isAvailable()) {
               await safeUpdateTaskRecord(taskId, updates);
             } else {
               Object.assign(rec, updates);
               serverVideoTaskStore.set(taskId, rec);
               saveTasksToDisk(serverVideoTaskStore);
+            }
+            if (taskRecord.executionId) {
+              await taskStateMachineService.releaseLease(taskId, taskRecord.executionId).catch(() => false);
             }
           }
         }
@@ -1864,7 +1913,7 @@ ${cleanPrompt}`
         serverPersisted: true,
         taskId,
         status: durableTask?.status || 'submitting',
-        submissionState: durableTask?.operationName ? 'submitted' : 'submitting',
+        submissionState: durableTask?.status === 'submission_outcome_unknown' ? 'outcome_unknown' : (durableTask?.operationName ? 'submitted' : 'submitting'),
         operationNamePresent: Boolean(durableTask?.operationName),
         operationName: durableTask?.operationName,
         isIdempotentReuse: false,
@@ -1967,33 +2016,57 @@ ${cleanPrompt}`
           return true;
         })
         .map((rec) => {
-          // Auto-fail tasks stuck without operationName (> 30s) or tasks exceeding max polling threshold (> 30 minutes / 1800s)
-          const isStuckWithoutOpName = (rec.status === 'polling' || rec.status === 'submitting') && !rec.operationName && (now - rec.createdAt) > 30000;
-          // Tasks WITH an operationName are active Veo LROs in Google Cloud; allow up to 30 minutes (1800,000ms) before timing out
-          const isTimedOut = !rec.operationName
-            ? ((rec.status === 'polling' || rec.status === 'submitting') && (now - rec.createdAt) > 30000)
-            : ((rec.status === 'polling' || (rec.status as string) === 'submitted') && (now - rec.createdAt) > 1800000);
+          // A missing operation after the request durability window is ambiguous, not a
+          // proven provider rejection. Keep admission fail-closed to prevent duplicate cost.
+          const isStuckWithoutOpName = rec.status === 'submitting' && !rec.operationName && (now - rec.createdAt) > 30000;
+          const isKnownOperationTimedOut = Boolean(rec.operationName)
+            && (rec.status === 'polling' || (rec.status as string) === 'submitted')
+            && (now - rec.createdAt) > 1800000;
 
-          if (isStuckWithoutOpName || isTimedOut) {
-            rec.status = 'failed';
-            rec.error = '云端生成超时或已被中断，已标为失败。可点击【一键重试】或【删除】。';
+          if (isStuckWithoutOpName) {
+            rec.status = 'submission_outcome_unknown';
+            rec.failureReason = 'submission_outcome_unknown' as any;
+            rec.retryMode = 'NO_RETRY';
+            rec.error = 'Veo 提交结果未知，已阻止新的 Veo 提交，以避免重复扣费。';
             rec.structuredError = createStructuredError({
-              source: 'vertex_polling',
-              failureStage: 'polling',
+              source: 'vertex_submit',
+              failureStage: 'submit',
               httpStatus: 504,
-              customUserMessage: '云端渲染未回应或被异常中断。您可以点击【一键重试】重新触发生成。',
+              customUserMessage: 'Veo 提交结果未知，已阻止新的 Veo 提交；请先核实或清理该任务。',
               endpointPathRedacted: '/api/videos/list',
             });
             rec.updatedAt = now;
             hasUpdates = true;
-            if (firestoreTaskRepository.isAvailable()) {
-              firestoreTaskRepository.updateTask(rec.taskId || rec.id, {
-                status: 'failed',
-                error: rec.error,
-                structuredError: rec.structuredError,
-                updatedAt: now,
-              }).catch(() => {});
-            }
+            firestoreTaskRepository.updateTask(rec.taskId || rec.id, {
+              status: 'submission_outcome_unknown',
+              failureReason: rec.failureReason,
+              retryMode: 'NO_RETRY',
+              error: rec.error,
+              structuredError: rec.structuredError,
+              updatedAt: now,
+            }).catch(() => {});
+          } else if (isKnownOperationTimedOut) {
+            rec.status = 'polling_timeout';
+            rec.failureReason = 'polling_timeout';
+            rec.retryMode = 'RETRY_POLL';
+            rec.error = 'Veo 长任务轮询超时，但已有 Operation Name，保留任务并继续阻止新的 Veo 提交。';
+            rec.structuredError = createStructuredError({
+              source: 'vertex_polling',
+              failureStage: 'polling',
+              httpStatus: 504,
+              customUserMessage: '云端长任务轮询超时，但 Provider Operation 已存在。请继续恢复/轮询该 Operation，禁止直接重新生成。',
+              endpointPathRedacted: '/api/videos/list',
+            });
+            rec.updatedAt = now;
+            hasUpdates = true;
+            firestoreTaskRepository.updateTask(rec.taskId || rec.id, {
+              status: 'polling_timeout',
+              failureReason: 'polling_timeout',
+              retryMode: 'RETRY_POLL',
+              error: rec.error,
+              structuredError: rec.structuredError,
+              updatedAt: now,
+            }).catch(() => {});
           }
 
           const isCompletedWithoutVideo = rec.status === 'completed' && !rec.videoDataUrl;

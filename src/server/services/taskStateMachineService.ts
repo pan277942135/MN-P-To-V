@@ -40,7 +40,7 @@ export class LateWorkerError extends Error {
 const ALLOWED_TRANSITIONS: Record<string, TaskStatus[]> = {
   created: ['preparing', 'submitting', 'failed', 'cancelled', 'canceled'],
   preparing: ['generating', 'submitting', 'failed', 'cancelled', 'canceled'],
-  submitting: ['submitted', 'preparing', 'generating', 'failed', 'cancelled', 'canceled'],
+  submitting: ['submitted', 'preparing', 'generating', 'submission_outcome_unknown', 'failed', 'cancelled', 'canceled'],
   submitted: ['polling', 'generating', 'failed', 'cancelled', 'canceled'],
   generating: ['generation_succeeded', 'polling', 'submission_outcome_unknown', 'failed', 'cancelled', 'canceled'],
   polling: ['generation_succeeded', 'polling_timeout', 'failed', 'cancelled', 'canceled'],
