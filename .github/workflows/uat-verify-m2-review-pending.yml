@@ -10,7 +10,7 @@ permissions:
   id-token: write
 
 env:
-  SOURCE_SHA: 2353afd2fed5e54394310d28148308bde4ff7920
+  SOURCE_SHA: fcf92070dd5c5cdc07fabfc78933eb8bb5c0737c
   PROJECT_ID: xp-vertex-project
   REGION: us-central1
   GAR_REPO: zaojing
@@ -32,6 +32,17 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_SHA }}
+
+      - name: Verify parser fix source contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "isExplicitVideoBytesStr" src/services/video/videoGenerator.ts
+          if grep -A8 "if (typeof node === 'string')" src/services/video/videoGenerator.ts | grep -q "foundBase64"; then
+            echo 'Arbitrary recursive strings may still be guessed as video base64.' >&2
+            exit 1
+          fi
+          npx --yes vitest run src/__tests__/videoGeneratorArtifactParserRegression.test.ts
 
       - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v3
@@ -166,12 +177,13 @@ jobs:
         shell: bash
         run: |
           {
-            echo '## M2 REVIEW UAT deployment verified'
+            echo '## M2 UAT deployment verified'
             echo ''
             echo "- Source commit: \`$SOURCE_SHA\`"
             echo "- Cloud Run service: \`$SERVICE\`"
             echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
             echo "- Service URL: ${{ steps.deploy.outputs.service_url }}"
+            echo '- Veo 48-byte parser regression: PASS'
             echo '- Health: PASS'
             echo '- Live frontend REVIEW UX bundle: PASS'
             echo '- Firestore/list access: PASS'
