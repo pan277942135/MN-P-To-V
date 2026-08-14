@@ -54,8 +54,11 @@ jobs:
           IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$SERVICE:$SOURCE_SHA"
           gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
           docker build -t "$IMAGE" .
-          docker push "$IMAGE"
+          docker push "$IMAGE" | tee push.log
+          DIGEST="$(grep -oE 'digest: sha256:[0-9a-f]+' push.log | tail -n1 | awk '{print $2}')"
+          test -n "$DIGEST"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Deploy private Cloud Run UAT
         id: deploy
@@ -111,11 +114,13 @@ jobs:
           ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
           REVISION: ${{ steps.deploy.outputs.revision }}
           IMAGE_LIVE: ${{ steps.deploy.outputs.image_live }}
+          EXPECTED_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           set -euo pipefail
           echo "revision=$REVISION"
           echo "image=$IMAGE_LIVE"
-          [[ "$IMAGE_LIVE" == *":$SOURCE_SHA" ]]
+          echo "expected_digest=$EXPECTED_DIGEST"
+          [[ "$IMAGE_LIVE" == *"@$EXPECTED_DIGEST" ]]
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/health" | tee health.json
           jq -e . health.json >/dev/null
 
@@ -154,7 +159,7 @@ jobs:
           jq -e '.status == "qa_pending"' status.json >/dev/null
           jq -e '.identityQaStatus == "review"' status.json >/dev/null
           jq -e '.requiresManualApproval == true' status.json >/dev/null
-          jq -e '.reviewActions | index("accepted") and index("rejected")' status.json >/dev/null
+          jq -e '(.reviewActions | index("accepted")) != null and (.reviewActions | index("rejected")) != null' status.json >/dev/null
           echo "Read-only REVIEW state verified for task $QA_TASK_ID"
 
       - name: Publish UAT verification summary
