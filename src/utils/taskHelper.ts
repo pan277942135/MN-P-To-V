@@ -386,6 +386,25 @@ export function getExplicitTaskFailureReason(task: GenerationTask): {
   recommendedAction?: string;
   errorCode?: string;
 } {
+  const failureReason = (task as any).failureReason;
+  const retryMode = (task as any).retryMode;
+  if (failureReason === 'output_rai_filtered' || retryMode === 'REWRITE_INPUT_THEN_REGENERATE') {
+    const reasonValues = Array.isArray((task as any).raiMediaFilteredReasons)
+      ? (task as any).raiMediaFilteredReasons.filter((item: unknown) => typeof item === 'string' && item.trim())
+      : [];
+    const rawCount = Number((task as any).raiMediaFilteredCount);
+    const filteredCount = Number.isFinite(rawCount) && rawCount > 0 ? rawCount : 1;
+    const providerReason = reasonValues.length > 0
+      ? reasonValues.join('；')
+      : 'Google 未返回具体过滤原因';
+    return {
+      primaryReason: '视频生成结果被 Google Veo 安全策略过滤，未生成可下载的视频。',
+      technicalDetails: `RAI filtered count: ${filteredCount}；${providerReason}`,
+      recommendedAction: '请返回创作工作台修改提示词或更换图片后重新生成；不要原样一键重试。',
+      errorCode: 'OUTPUT_RAI_FILTERED',
+    };
+  }
+
   const err = task.error;
   if (!err) {
     const stageStr = typeof task.progressStage === 'string' ? task.progressStage : '';
