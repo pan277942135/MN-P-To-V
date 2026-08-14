@@ -36,6 +36,55 @@ export interface ExecutionTuningPayload {
   };
 }
 
+type IdentityGateKind = 'fail' | 'review' | null;
+
+function detectIdentityGateKind(...parts: unknown[]): IdentityGateKind {
+  const text = parts
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      if (part === null || part === undefined) return '';
+      try {
+        return JSON.stringify(part);
+      } catch {
+        return String(part);
+      }
+    })
+    .join(' ')
+    .toLowerCase();
+
+  if (
+    text.includes('identity_qa_review_required') ||
+    text.includes('角色一致性处于人工复核区间') ||
+    text.includes('identity qa review') ||
+    text.includes('review required due to')
+  ) {
+    return 'review';
+  }
+
+  if (
+    text.includes('identity_qa_failed') ||
+    text.includes('identity qa failed') ||
+    text.includes('角色一致性质检未通过') ||
+    text.includes('identity gate 未通过')
+  ) {
+    return 'fail';
+  }
+
+  return null;
+}
+
+function getIdentityGateUserMessage(kind: Exclude<IdentityGateKind, null>): string {
+  return kind === 'review'
+    ? '角色一致性处于人工复核区间，Veo 尚未启动。请先确认首帧身份后再继续。'
+    : '角色一致性质检未通过，Veo 已在提交前拦截；未产生 Veo 渲染任务。';
+}
+
+function getIdentityGateRecommendedAction(kind: Exclude<IdentityGateKind, null>): string {
+  return kind === 'review'
+    ? '请人工核对当前首帧与角色母板；确认确为目标角色后再批准继续。无需检查算力。'
+    : '请更换为与所选角色母板一致的图片，或选择正确角色后重新生成。无需检查算力，也不要原样一键重试。';
+}
+
 export function buildExecutionTuningPayload(task: GenerationTask): ExecutionTuningPayload {
   const isFinished =
     task.status === 'completed' ||
@@ -68,6 +117,7 @@ export function buildExecutionTuningPayload(task: GenerationTask): ExecutionTuni
   const httpStatus = typeof err === 'object' && err !== null && typeof err.httpStatus === 'number' ? err.httpStatus : null;
   const errorCode = typeof err === 'object' && err !== null && typeof err.code === 'string' ? err.code : (task.status === 'failed' ? 'ERR_FAILED' : 'OK');
   const recommendedAction = typeof err === 'object' && err !== null && typeof err.recommendedAction === 'string' ? err.recommendedAction : undefined;
+  const identityGateKind = detectIdentityGateKind(errorCode, errMessageChinese, technicalMsg, recommendedAction, task.progressStage);
 
   const hasVideoData = Boolean(
     task.resultVideoUrl ||
@@ -90,8 +140,26 @@ export function buildExecutionTuningPayload(task: GenerationTask): ExecutionTuni
     effectiveStatus = 'failed';
   }
 
-  const effectiveHttpStatus = effectiveStatus === 'failed' ? (httpStatus ?? 500) : (httpStatus ?? null);
-  const effectiveErrorCode = effectiveStatus === 'failed' ? (errorCode === 'OK' ? 'SERVER_FAILED' : errorCode) : errorCode;
+  const effectiveHttpStatus = identityGateKind === 'review'
+    ? 422
+    : identityGateKind === 'fail'
+      ? 400
+      : effectiveStatus === 'failed'
+        ? (httpStatus ?? 500)
+        : (httpStatus ?? null);
+  const effectiveErrorCode = identityGateKind === 'review'
+    ? 'IDENTITY_QA_REVIEW_REQUIRED'
+    : identityGateKind === 'fail'
+      ? 'IDENTITY_QA_FAILED'
+      : effectiveStatus === 'failed'
+        ? (errorCode === 'OK' ? 'SERVER_FAILED' : errorCode)
+        : errorCode;
+  const effectiveMessageChinese = identityGateKind
+    ? getIdentityGateUserMessage(identityGateKind)
+    : errMessageChinese;
+  const effectiveRecommendedAction = identityGateKind
+    ? getIdentityGateRecommendedAction(identityGateKind)
+    : recommendedAction;
 
   return {
     taskId: task.id,
@@ -117,9 +185,9 @@ export function buildExecutionTuningPayload(task: GenerationTask): ExecutionTuni
       progressStage: task.progressStage,
       httpStatus: effectiveHttpStatus,
       errorCode: effectiveErrorCode,
-      messageChinese: errMessageChinese,
+      messageChinese: effectiveMessageChinese,
       technicalMessageRedacted: technicalMsg,
-      recommendedAction,
+      recommendedAction: effectiveRecommendedAction,
       operationName: task.externalOperationName || (task as any).operationName || null,
       videoUri: task.videoUri || (task as any).videoUri || null,
       outputUri: task.outputUri || (task as any).outputUri || null,
@@ -147,6 +215,11 @@ export function humanizeErrorMessage(input: unknown): string {
     }
   } else {
     str = String(input);
+  }
+
+  const identityGateKind = detectIdentityGateKind(str);
+  if (identityGateKind) {
+    return getIdentityGateUserMessage(identityGateKind);
   }
 
   // Fast string check for known error patterns
@@ -206,7 +279,7 @@ export function humanizeErrorMessage(input: unknown): string {
     }
   }
 
-  // Check if str is stringified JSON e.g. {"code":3,"message":"..."} or {"messageChinese":"..."}
+  // Check if str is stringified JSON e.g. {"messageChinese":"..."}
   let attempts = 0;
   while (typeof str === 'string' && str.trim().startsWith('{') && attempts < 3) {
     attempts++;
@@ -232,6 +305,11 @@ export function humanizeErrorMessage(input: unknown): string {
     } catch {
       break;
     }
+  }
+
+  const parsedIdentityGateKind = detectIdentityGateKind(str);
+  if (parsedIdentityGateKind) {
+    return getIdentityGateUserMessage(parsedIdentityGateKind);
   }
 
   // Handle known Veo / Vertex AI / API errors
@@ -322,6 +400,15 @@ export function getExplicitTaskFailureReason(task: GenerationTask): {
   }
 
   if (typeof err === 'string') {
+    const identityGateKind = detectIdentityGateKind(err, task.progressStage);
+    if (identityGateKind) {
+      return {
+        primaryReason: getIdentityGateUserMessage(identityGateKind),
+        recommendedAction: getIdentityGateRecommendedAction(identityGateKind),
+        errorCode: identityGateKind === 'review' ? 'IDENTITY_QA_REVIEW_REQUIRED' : 'IDENTITY_QA_FAILED',
+      };
+    }
+
     const friendly = humanizeErrorMessage(err);
     return {
       primaryReason: friendly,
@@ -339,14 +426,23 @@ export function getExplicitTaskFailureReason(task: GenerationTask): {
     ? userMsgRaw 
     : (userMsgRaw ? (typeof userMsgRaw === 'object' ? JSON.stringify(userMsgRaw) : String(userMsgRaw)) : '');
 
-  const friendlyUserMsg = humanizeErrorMessage(rawUserMsg || err);
-  const friendlyTech = humanizeErrorMessage(rawTech || err);
-
   const recAction = typeof err.recommendedAction === 'string' 
     ? err.recommendedAction 
     : (err.recommendedAction ? String(err.recommendedAction) : '');
-
   const code = typeof err.code === 'string' ? err.code : 'ERR_VEO_GEN';
+  const identityGateKind = detectIdentityGateKind(code, rawUserMsg, rawTech, recAction, task.progressStage);
+
+  if (identityGateKind) {
+    return {
+      primaryReason: getIdentityGateUserMessage(identityGateKind),
+      technicalDetails: rawTech && !detectIdentityGateKind(rawTech) ? rawTech : undefined,
+      recommendedAction: getIdentityGateRecommendedAction(identityGateKind),
+      errorCode: identityGateKind === 'review' ? 'IDENTITY_QA_REVIEW_REQUIRED' : 'IDENTITY_QA_FAILED',
+    };
+  }
+
+  const friendlyUserMsg = humanizeErrorMessage(rawUserMsg || err);
+  const friendlyTech = humanizeErrorMessage(rawTech || err);
 
   const isGenericUserMsg = Boolean(friendlyUserMsg) && (
     friendlyUserMsg.includes('请打开技术诊断') ||
