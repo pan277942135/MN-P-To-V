@@ -45,6 +45,19 @@ export function isProviderAdmissionBlockingTask(
   return BLOCKING_STATUSES.has(task.status as TaskStatus);
 }
 
+/**
+ * A task may be deleted only after it can no longer be consuming — or automatically
+ * re-consume — provider capacity. In particular, submission_outcome_unknown must stay
+ * durable until it is reconciled with a proven operationName or otherwise resolved by
+ * explicit provider evidence; deleting it would reopen the duplicate-charge window.
+ */
+export function isProviderTaskDeletionSafe(
+  task: Partial<ServerVideoTaskRecord> | null | undefined
+): boolean {
+  if (!task?.taskId && !task?.id) return true;
+  return !isProviderAdmissionBlockingTask(task);
+}
+
 export interface ProviderAdmissionBusyDetails {
   blockingTaskId: string;
   blockingStatus: string;

@@ -1,0 +1,59 @@
+name: Provider Slot Recovery Safety
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - core-provider-slot-recovery
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  provider-slot-recovery:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Recovery safety contract gate
+        run: |
+          grep -q "isProviderTaskDeletionSafe(existingTask)" server.ts
+          grep -q "provider_task_delete_blocked" server.ts
+          grep -q "isProviderTaskDeletionSafe(rec)" server.ts
+          grep -q "VideoGenerator.pollVeoOperation(ai, session, operationNameString)" server.ts
+          grep -q "evaluateProviderOperationLinkage" server.ts
+          grep -q "provider_operation_linkage_not_proven" server.ts
+          grep -q "providerTaskLinked: true" server.ts
+          grep -q "resolveVeoStorageUri(taskId)" server.ts
+          grep -q "submission_outcome_unknown'" server.ts
+          if grep -Fq "(!rec.operationName && (rec.status === 'polling' || rec.status === 'submitting'))" server.ts; then
+            echo "unsafe clear-failed provider deletion rule reintroduced" >&2
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
