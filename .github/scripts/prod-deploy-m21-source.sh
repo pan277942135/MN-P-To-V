@@ -8,6 +8,8 @@ set -Eeuo pipefail
 : "${CANONICAL_VEO_BUCKET:?}"
 : "${FIRESTORE_DATABASE_ID:?}"
 : "${RUNTIME_SA:?}"
+UPLOAD_REGION="${UPLOAD_REGION:-us-central1}"
+GAR_REPO="${GAR_REPO:-zaojing}"
 
 # Product source on this temp branch must be byte-identical to the merged commit.
 git fetch --no-tags --depth=1 origin "$SOURCE_SHA"
@@ -94,18 +96,85 @@ ARTIFACT_SIZE="$(stat -c '%s' build_artifacts.tar.gz)"
 echo "ARTIFACT_SHA256=$ARTIFACT_SHA256"
 echo "ARTIFACT_SIZE=$ARTIFACT_SIZE"
 
-echo '=== validate existing runtime-SA impersonation permission ==='
-gcloud auth print-access-token --impersonate-service-account="$RUNTIME_SA" >/dev/null
-# Read the existing source through the same principal before attempting the new immutable write.
-gcloud storage objects describe "$PREV_SOURCE" --impersonate-service-account="$RUNTIME_SA" --format='value(size)' >/dev/null
-
-echo '=== upload immutable artifact through runtime SA ==='
 SOURCE_BUCKET="$(printf '%s' "$PREV_SOURCE" | sed -E 's#^(gs://[^/]+).*$#\1#')"
 NEW_SOURCE="$SOURCE_BUCKET/services/$SERVICE/github-$SOURCE_SHA/compiled/build_artifacts.tar.gz"
-gcloud storage cp build_artifacts.tar.gz "$NEW_SOURCE" --impersonate-service-account="$RUNTIME_SA"
-REMOTE_SIZE="$(gcloud storage objects describe "$NEW_SOURCE" --impersonate-service-account="$RUNTIME_SA" --format='value(size)')"
-test "$REMOTE_SIZE" = "$ARTIFACT_SIZE"
 echo "NEW_SOURCE=$NEW_SOURCE"
+
+echo '=== build one-shot source uploader ==='
+mkdir -p .prod-source-uploader
+cp build_artifacts.tar.gz .prod-source-uploader/build_artifacts.tar.gz
+cat > .prod-source-uploader/package.json <<'JSON'
+{
+  "name": "mnptov-source-uploader",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@google-cloud/storage": "7.22.0"
+  }
+}
+JSON
+cat > .prod-source-uploader/upload.mjs <<'JS'
+import { Storage } from '@google-cloud/storage';
+import fs from 'node:fs';
+
+const uri = process.env.DEST_GS_URI || '';
+const m = uri.match(/^gs:\/\/([^/]+)\/(.+)$/);
+if (!m) throw new Error('DEST_GS_URI must be a gs:// URI');
+const [, bucket, destination] = m;
+const file = '/app/build_artifacts.tar.gz';
+const stat = fs.statSync(file);
+if (stat.size <= 0) throw new Error('artifact is empty');
+const storage = new Storage();
+await storage.bucket(bucket).upload(file, {
+  destination,
+  resumable: true,
+  metadata: { contentType: 'application/gzip' },
+});
+const [meta] = await storage.bucket(bucket).file(destination).getMetadata();
+if (Number(meta.size) !== stat.size) {
+  throw new Error(`uploaded size mismatch local=${stat.size} remote=${meta.size}`);
+}
+console.log(`UPLOAD_PASS gs://${bucket}/${destination} bytes=${stat.size}`);
+JS
+cat > .prod-source-uploader/Dockerfile <<'DOCKER'
+FROM node:22-bookworm-slim
+WORKDIR /app
+COPY package.json ./
+RUN npm install --omit=dev
+COPY upload.mjs ./
+COPY build_artifacts.tar.gz ./
+CMD ["node", "upload.mjs"]
+DOCKER
+
+HELPER_IMAGE="$UPLOAD_REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/mnptov-source-uploader:$SOURCE_SHA"
+gcloud auth configure-docker "$UPLOAD_REGION-docker.pkg.dev" --quiet
+docker build -t "$HELPER_IMAGE" .prod-source-uploader
+docker push "$HELPER_IMAGE"
+
+echo '=== upload artifact using existing runtime identity; no IAM mutation ==='
+SHORT_SHA="${SOURCE_SHA:0:8}"
+UPLOAD_JOB="mnptov-source-upload-$SHORT_SHA"
+cleanup_job() {
+  gcloud run jobs delete "$UPLOAD_JOB" --project="$PROJECT_ID" --region="$UPLOAD_REGION" --quiet >/dev/null 2>&1 || true
+}
+trap cleanup_job EXIT
+
+gcloud run jobs deploy "$UPLOAD_JOB" \
+  --project="$PROJECT_ID" \
+  --region="$UPLOAD_REGION" \
+  --image="$HELPER_IMAGE" \
+  --service-account="$RUNTIME_SA" \
+  --set-env-vars="DEST_GS_URI=$NEW_SOURCE" \
+  --tasks=1 \
+  --max-retries=0 \
+  --task-timeout=600s \
+  --quiet
+
+gcloud run jobs execute "$UPLOAD_JOB" --project="$PROJECT_ID" --region="$UPLOAD_REGION" --wait --quiet
+REMOTE_SIZE="$(gcloud storage objects describe "$NEW_SOURCE" --format='value(size)')"
+test "$REMOTE_SIZE" = "$ARTIFACT_SIZE"
+cleanup_job
+trap - EXIT
 
 echo '=== prepare exact two-field service patch ==='
 python3 - "$PREV_SOURCE" "$NEW_SOURCE" "$CURRENT_BUCKET" "$CANONICAL_VEO_BUCKET" <<'PY'
