@@ -10,7 +10,7 @@ permissions:
   id-token: write
 
 env:
-  SOURCE_SHA: d0097e5a306c4fa513aa872e59d3dc17a3e5042d
+  SOURCE_SHA: d5a29a151b8d230e583aeea190b9ebc062968d87
   PROJECT_ID: xp-vertex-project
   REGION: us-central1
   GAR_REPO: zaojing
@@ -33,7 +33,7 @@ jobs:
         with:
           ref: ${{ env.SOURCE_SHA }}
 
-      - name: Verify parser and RAI UX source contracts
+      - name: Verify parser, RAI and direct identity source contracts
         shell: bash
         run: |
           set -euo pipefail
@@ -41,8 +41,17 @@ jobs:
           grep -q "Veo artifact parser regression: 48-byte @type false base64" src/__tests__/videoGeneratorArtifactParserRegression.test.ts
           grep -Fq "failureReason === 'output_rai_filtered'" src/pages/TaskHistoryPage.tsx
           grep -Fq "retryMode === 'REWRITE_INPUT_THEN_REGENERATE'" src/pages/TaskHistoryPage.tsx
-          grep -Fq '返回工作台调整输入' src/pages/TaskHistoryPage.tsx
           grep -Fq 'RAI filtered count:' src/utils/taskHelper.ts
+          grep -Fq 'masterImageBuffers: masterBuffers' server.ts
+          grep -Fq 'scenePreservationScore: 100' src/services/character/identityLockService.ts
+          grep -Fq '...masterParts' src/services/qa/visualQaService.ts
+          grep -Fq '(pipelineError as any).startData = startData' src/pages/StudioPage.tsx
+          grep -Fq "legacyErrorText.includes('角色一致性质检未通过')" src/pages/TaskHistoryPage.tsx
+          grep -Fq '(task as any).firstFrameQaReport' src/utils/taskHelper.ts
+          if grep -Fq 'const masterBufForQa = masterBuffers[0]' server.ts; then
+            echo 'Single-master QA wiring still present.' >&2
+            exit 1
+          fi
           if grep -A8 "if (typeof node === 'string')" src/services/video/videoGenerator.ts | grep -q "foundBase64"; then
             echo 'Arbitrary recursive strings may still be guessed as video base64.' >&2
             exit 1
@@ -143,7 +152,7 @@ jobs:
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/health" | tee health.json
           jq -e . health.json >/dev/null
 
-      - name: Verify live frontend bundle contains REVIEW and RAI UX
+      - name: Verify live frontend bundle contains identity, REVIEW and RAI UX
         shell: bash
         env:
           SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
@@ -156,11 +165,12 @@ jobs:
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL$ASSET_PATH" -o app.js
           grep -Fq '待审核' app.js
           grep -Fq '进入人工审核' app.js
-          grep -Fq '视频身份质检需要人工复核' app.js
           grep -Fq '返回工作台调整输入' app.js
           grep -Fq 'Google 未返回具体过滤原因' app.js
-          grep -Fq '不要原样一键重试' app.js
-          echo "Live frontend REVIEW + RAI UX strings verified in $ASSET_PATH"
+          grep -Fq '该任务在提交 Veo 前被首帧角色质检拦截' app.js
+          grep -Fq '首帧角色/画面质检触发硬拦截' app.js
+          grep -Fq '首帧 QA 详细分数未保留' app.js
+          echo "Live frontend identity + REVIEW + RAI UX verified in $ASSET_PATH"
 
       - name: Verify persisted RAI task read-only
         shell: bash
@@ -207,8 +217,9 @@ jobs:
             echo "- Service URL: ${{ steps.deploy.outputs.service_url }}"
             echo '- Veo 48-byte parser source contract: PASS'
             echo '- RAI failure UX source contract: PASS'
+            echo '- Direct identity false-negative source contract: PASS'
             echo '- Health: PASS'
-            echo '- Live frontend REVIEW + RAI UX bundle: PASS'
+            echo '- Live frontend identity + REVIEW + RAI UX: PASS'
             echo '- Firestore RAI evidence read: PASS'
             echo '- No Veo generation invoked by this workflow'
             echo '- No human review decision mutated by this workflow'
