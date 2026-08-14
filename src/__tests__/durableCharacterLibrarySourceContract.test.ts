@@ -19,6 +19,11 @@ describe('durable character library contract', () => {
     expect(durableServiceSource).toContain('characters/${params.id}/masters/');
   });
 
+  it('keeps the process character store as cache only, never local-disk startup authority', () => {
+    expect(serverSource).toContain('const serverCharacterStore = new Map<string, ServerCharacter>();');
+    expect(serverSource).not.toContain('const serverCharacterStore = loadCharactersFromDisk();');
+  });
+
   it('streams master images from GCS instead of embedding them in Firestore documents', () => {
     expect(serverSource).toContain("'/api/characters/:id/reference/:referenceId'");
     expect(serverSource).toContain('durableCharacterService.getReferenceBuffer');
