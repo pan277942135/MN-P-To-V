@@ -286,17 +286,13 @@ export class VideoGenerator {
       );
     };
 
-    const isBase64Str = (str: string) => {
+    const isExplicitVideoBytesStr = (str: string) => {
       if (typeof str !== 'string') return false;
       const trimmed = str.trim();
-      return (
-        trimmed.length >= 10 &&
-        !trimmed.includes(' ') &&
-        !trimmed.startsWith('http') &&
-        !trimmed.startsWith('gs://') &&
-        !trimmed.startsWith('projects/') &&
-        !trimmed.startsWith('files/')
-      );
+      // Only call this predicate for named video-byte fields. Keep malformed/short
+      // explicit byte payloads visible so pollVeoOperation can classify them as
+      // artifact_invalid rather than upstream_empty_response.
+      return trimmed.length > 0 && !isUriStr(trimmed);
     };
 
     let foundBase64: string | undefined;
@@ -348,7 +344,7 @@ export class VideoGenerator {
         item.video_bytes ||
         item.data ||
         item.b64;
-      if (typeof b64 === 'string' && isBase64Str(b64)) {
+      if (typeof b64 === 'string' && isExplicitVideoBytesStr(b64)) {
         foundBase64 = b64.trim();
         break;
       }
@@ -395,8 +391,6 @@ export class VideoGenerator {
       if (typeof node === 'string') {
         if (!foundUri && isUriStr(node)) {
           foundUri = node.trim();
-        } else if (!foundBase64 && isBase64Str(node)) {
-          foundBase64 = node.trim();
         }
         return;
       }
@@ -417,7 +411,7 @@ export class VideoGenerator {
           node.video_bytes ||
           node.data ||
           node.b64;
-        if (!foundBase64 && typeof b64 === 'string' && isBase64Str(b64)) {
+        if (!foundBase64 && typeof b64 === 'string' && isExplicitVideoBytesStr(b64)) {
           foundBase64 = b64.trim();
         }
 
@@ -531,9 +525,10 @@ export class VideoGenerator {
     const hasRaiCount = raiCount > 0 || rawReasons.length > 0;
 
     const hasSafetyKeyword =
+      // Field names such as raiMediaFilteredCount are present even on successful
+      // responses with value 0. Only positive counts/reasons (handled above) or
+      // explicit safety values should mark the response as filtered.
       str.includes('RAI_MEDIA_FILTERED') ||
-      str.includes('raiMediaFiltered') ||
-      str.includes('rai_media_filtered') ||
       str.includes('violates Vertex AI') ||
       str.includes('usage guidelines') ||
       str.includes('"finishReason":"SAFETY"') ||
