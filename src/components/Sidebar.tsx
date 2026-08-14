@@ -1,7 +1,7 @@
 import React from 'react';
-import { Film, Users, History, Settings, Sparkles } from 'lucide-react';
+import { Film, Users, History, Settings, Sparkles, ClipboardCheck } from 'lucide-react';
 
-export type NavTab = 'studio' | 'characters' | 'history' | 'settings';
+export type NavTab = 'studio' | 'characters' | 'review' | 'history' | 'settings';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -12,6 +12,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange }) => {
   const navItems = [
     { id: 'studio' as NavTab, label: '创作工作台', icon: Film, desc: '场景裁切、首帧原图直通与视频生成' },
     { id: 'characters' as NavTab, label: '角色库', icon: Users, desc: '建立并长期复用角色身份包' },
+    { id: 'review' as NavTab, label: '待我审核', icon: ClipboardCheck, desc: '集中处理 AI REVIEW 视频与边界验收' },
     { id: 'history' as NavTab, label: '任务记录', icon: History, desc: '查看历史任务与质检报告' },
     { id: 'settings' as NavTab, label: '算力设置', icon: Settings, desc: '配置 Google Cloud / Gemini 凭据' },
   ];
