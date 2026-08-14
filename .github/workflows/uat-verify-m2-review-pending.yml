@@ -10,7 +10,7 @@ permissions:
   id-token: write
 
 env:
-  SOURCE_SHA: fcf92070dd5c5cdc07fabfc78933eb8bb5c0737c
+  SOURCE_SHA: d0097e5a306c4fa513aa872e59d3dc17a3e5042d
   PROJECT_ID: xp-vertex-project
   REGION: us-central1
   GAR_REPO: zaojing
@@ -33,14 +33,22 @@ jobs:
         with:
           ref: ${{ env.SOURCE_SHA }}
 
-      - name: Verify parser fix source contract
+      - name: Verify parser and RAI UX source contracts
         shell: bash
         run: |
           set -euo pipefail
           grep -q "isExplicitVideoBytesStr" src/services/video/videoGenerator.ts
           grep -q "Veo artifact parser regression: 48-byte @type false base64" src/__tests__/videoGeneratorArtifactParserRegression.test.ts
+          grep -Fq "failureReason === 'output_rai_filtered'" src/pages/TaskHistoryPage.tsx
+          grep -Fq "retryMode === 'REWRITE_INPUT_THEN_REGENERATE'" src/pages/TaskHistoryPage.tsx
+          grep -Fq '返回工作台调整输入' src/pages/TaskHistoryPage.tsx
+          grep -Fq 'RAI filtered count:' src/utils/taskHelper.ts
           if grep -A8 "if (typeof node === 'string')" src/services/video/videoGenerator.ts | grep -q "foundBase64"; then
             echo 'Arbitrary recursive strings may still be guessed as video base64.' >&2
+            exit 1
+          fi
+          if grep -Fq "task.retryMode !== 'SAFE_TO_REGENERATE' && task.retryMode !== 'REWRITE_INPUT_THEN_REGENERATE'" src/pages/TaskHistoryPage.tsx; then
+            echo 'RAI rewrite mode is still eligible for one-click resubmission.' >&2
             exit 1
           fi
 
@@ -135,7 +143,7 @@ jobs:
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/health" | tee health.json
           jq -e . health.json >/dev/null
 
-      - name: Verify live frontend bundle contains REVIEW UX
+      - name: Verify live frontend bundle contains REVIEW and RAI UX
         shell: bash
         env:
           SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
@@ -149,7 +157,22 @@ jobs:
           grep -Fq '待审核' app.js
           grep -Fq '进入人工审核' app.js
           grep -Fq '视频身份质检需要人工复核' app.js
-          echo "Live frontend REVIEW UX strings verified in $ASSET_PATH"
+          grep -Fq '返回工作台调整输入' app.js
+          grep -Fq 'Google 未返回具体过滤原因' app.js
+          grep -Fq '不要原样一键重试' app.js
+          echo "Live frontend REVIEW + RAI UX strings verified in $ASSET_PATH"
+
+      - name: Verify persisted RAI task read-only
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/audit" -o audit.json
+          jq -e '.storageAuthority == "firestore"' audit.json >/dev/null
+          jq -e '[.tasks[] | select(.raiMediaFilteredCount != null and .raiMediaFilteredCount > 0 and .raiStatus == "filtered")] | length >= 1' audit.json >/dev/null
+          echo 'Read-only persisted RAI evidence verified.'
 
       - name: Verify existing qa_pending REVIEW task read-only
         shell: bash
@@ -166,7 +189,6 @@ jobs:
             exit 0
           fi
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/status/$QA_TASK_ID" -o status.json
-          cat status.json
           jq -e '.status == "qa_pending"' status.json >/dev/null
           jq -e '.identityQaStatus == "review"' status.json >/dev/null
           jq -e '.requiresManualApproval == true' status.json >/dev/null
@@ -184,9 +206,10 @@ jobs:
             echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
             echo "- Service URL: ${{ steps.deploy.outputs.service_url }}"
             echo '- Veo 48-byte parser source contract: PASS'
+            echo '- RAI failure UX source contract: PASS'
             echo '- Health: PASS'
-            echo '- Live frontend REVIEW UX bundle: PASS'
-            echo '- Firestore/list access: PASS'
+            echo '- Live frontend REVIEW + RAI UX bundle: PASS'
+            echo '- Firestore RAI evidence read: PASS'
             echo '- No Veo generation invoked by this workflow'
             echo '- No human review decision mutated by this workflow'
           } >> "$GITHUB_STEP_SUMMARY"
