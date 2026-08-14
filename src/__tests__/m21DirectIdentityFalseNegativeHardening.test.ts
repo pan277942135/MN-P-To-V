@@ -111,7 +111,7 @@ describe('M2-1 DIRECT_CHARACTER_IMAGE false-negative hardening', () => {
     const call = generateContent.mock.calls[0][0];
     const parts = call.contents[0].parts as any[];
     const inlineImages = parts.filter((part) => part.inlineData);
-    const masterLabels = parts.filter((part) => typeof part.text === 'string' && part.text.includes('MASTER_REFERENCE_'));
+    const masterLabels = parts.filter((part) => typeof part.text === 'string' && part.text.startsWith('[MASTER_REFERENCE_'));
 
     expect(inlineImages).toHaveLength(masters.length + 2); // masters + scene + candidate
     expect(masterLabels).toHaveLength(masters.length);
