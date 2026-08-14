@@ -1,0 +1,118 @@
+name: Diagnose task_71f Identity Gate
+
+on:
+  push:
+    branches:
+      - diag-task-71f-identity-v2
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  SERVICE: zaojing-m2-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Resolve private UAT service
+        id: service
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Mint Cloud Run ID token
+        uses: google-github-actions/auth@v3
+        id: invoke_auth
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.service.outputs.url }}
+          id_token_include_email: true
+
+      - name: Read task_71f identity evidence only
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.service.outputs.url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/audit" -o audit.json
+          TASK_ID="$(jq -r '[.tasks[] | select((.taskId // "") | startswith("task_71f"))] | sort_by(.createdAt // 0) | reverse | .[0].taskId // empty' audit.json)"
+          if [ -z "$TASK_ID" ]; then
+            echo 'No task matching task_71f* found.' >&2
+            jq -r '.tasks[]?.taskId // empty' audit.json | tail -n 30
+            exit 2
+          fi
+          echo "Found task: $TASK_ID"
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/status/$TASK_ID" -o status.json
+          jq '{
+            taskId,
+            status,
+            createdAt,
+            updatedAt,
+            characterId,
+            characterName,
+            sceneMode,
+            imageIsTargetCharacter,
+            submissionState,
+            predictLongRunningCalls,
+            failureReason,
+            retryMode,
+            firstFrameIdentityQaStatus,
+            identityQaScore,
+            identityCriticalIssues,
+            requiresManualApproval,
+            qaReport,
+            firstFrameQaReport,
+            error,
+            structuredError
+          }' status.json
+
+          echo '--- audit projection ---'
+          jq --arg id "$TASK_ID" '.tasks[] | select(.taskId == $id) | {
+            taskId,
+            status,
+            characterId,
+            characterName,
+            sceneMode,
+            imageIsTargetCharacter,
+            submissionState,
+            predictLongRunningCalls,
+            failureReason,
+            retryMode,
+            firstFrameIdentityQaStatus,
+            identityQaScore,
+            identityCriticalIssues,
+            requiresManualApproval,
+            qaReport,
+            firstFrameQaReport,
+            error,
+            structuredError
+          }' audit.json
+
+      - name: Assert diagnostic is read-only
+        run: |
+          echo 'PASS: workflow performs only Cloud Run describe + GET /audit + GET /status. No Veo submission and no task mutation.'
