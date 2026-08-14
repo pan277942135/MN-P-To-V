@@ -24,9 +24,12 @@ jobs:
 
       - name: Source contract gate
         run: |
-          grep -q "trimmed.length < 1024" src/services/video/videoGenerator.ts
-          grep -q "VideoGenerator.isMp4Valid(decoded)" src/services/video/videoGenerator.ts
-          grep -q "48 bytes" src/services/video/videoGenerator.ts
+          grep -q "isExplicitVideoBytesStr" src/services/video/videoGenerator.ts
+          grep -q "Only call this predicate for named video-byte fields" src/services/video/videoGenerator.ts
+          if grep -A8 "if (typeof node === 'string')" src/services/video/videoGenerator.ts | grep -q "foundBase64"; then
+            echo 'Arbitrary recursive strings may still be guessed as video base64.' >&2
+            exit 1
+          fi
           if grep -A14 "const hasSafetyKeyword" src/services/video/videoGenerator.ts | grep -q "str.includes('raiMediaFiltered')"; then
             echo 'Zero-valued raiMediaFiltered field name still causes a false safety block.' >&2
             exit 1
@@ -41,7 +44,7 @@ jobs:
         run: npm install
 
       - name: Exact 48-byte regression
-        run: npx vitest run src/__tests__/videoGeneratorArtifactParserRegression.test.ts
+        run: npx vitest run src/__tests__/videoGeneratorArtifactParserRegression.test.ts src/__tests__/videoGeneratorDataExtraction.test.ts src/__tests__/veoFailureReasonAndSafety.test.ts
 
       - name: TypeScript gate
         run: npm run lint
