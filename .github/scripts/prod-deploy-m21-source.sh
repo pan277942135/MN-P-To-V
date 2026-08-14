@@ -7,6 +7,7 @@ set -Eeuo pipefail
 : "${SOURCE_SHA:?}"
 : "${CANONICAL_VEO_BUCKET:?}"
 : "${FIRESTORE_DATABASE_ID:?}"
+: "${RUNTIME_SA:?}"
 
 # Product source on this temp branch must be byte-identical to the merged commit.
 git fetch --no-tags --depth=1 origin "$SOURCE_SHA"
@@ -63,7 +64,6 @@ echo '=== snapshot production ==='
 gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format=export > service-before.yaml
 gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format=json > service-before.json
 PREV_REVISION="$(jq -r '.status.latestReadyRevisionName' service-before.json)"
-SERVICE_URL_BEFORE="$(jq -r '.status.url' service-before.json)"
 SOURCE_JSON="$(jq -r '.spec.template.metadata.annotations["run.googleapis.com/sources"]' service-before.json)"
 BASE_JSON="$(jq -r '.spec.template.metadata.annotations["run.googleapis.com/base-images"]' service-before.json)"
 PREV_SOURCE="$(printf '%s' "$SOURCE_JSON" | jq -r '.["app-container"]')"
@@ -94,11 +94,16 @@ ARTIFACT_SIZE="$(stat -c '%s' build_artifacts.tar.gz)"
 echo "ARTIFACT_SHA256=$ARTIFACT_SHA256"
 echo "ARTIFACT_SIZE=$ARTIFACT_SIZE"
 
-echo '=== upload immutable artifact ==='
+echo '=== validate existing runtime-SA impersonation permission ==='
+gcloud auth print-access-token --impersonate-service-account="$RUNTIME_SA" >/dev/null
+# Read the existing source through the same principal before attempting the new immutable write.
+gcloud storage objects describe "$PREV_SOURCE" --impersonate-service-account="$RUNTIME_SA" --format='value(size)' >/dev/null
+
+echo '=== upload immutable artifact through runtime SA ==='
 SOURCE_BUCKET="$(printf '%s' "$PREV_SOURCE" | sed -E 's#^(gs://[^/]+).*$#\1#')"
 NEW_SOURCE="$SOURCE_BUCKET/services/$SERVICE/github-$SOURCE_SHA/compiled/build_artifacts.tar.gz"
-gcloud storage cp build_artifacts.tar.gz "$NEW_SOURCE"
-REMOTE_SIZE="$(gcloud storage objects describe "$NEW_SOURCE" --format='value(size)')"
+gcloud storage cp build_artifacts.tar.gz "$NEW_SOURCE" --impersonate-service-account="$RUNTIME_SA"
+REMOTE_SIZE="$(gcloud storage objects describe "$NEW_SOURCE" --impersonate-service-account="$RUNTIME_SA" --format='value(size)')"
 test "$REMOTE_SIZE" = "$ARTIFACT_SIZE"
 echo "NEW_SOURCE=$NEW_SOURCE"
 
@@ -133,7 +138,6 @@ newline = '\n' if old_value_line.endswith('\n') else ''
 lines[value_index] = f'{indent}value: {new_bucket}{newline}'
 patched = ''.join(lines)
 Path('service-patched.yaml').write_text(patched)
-# Proof that only the source URI and VEO_OUTPUT_BUCKET value changed.
 normalized = patched.replace(new_source, old_source, 1)
 norm_lines = normalized.splitlines(keepends=True)
 for i, line in enumerate(norm_lines):
@@ -181,7 +185,6 @@ test "$LIVE_BASE" = "$BASE_IMAGE"
 test "$LIVE_BUCKET" = "$CANONICAL_VEO_BUCKET"
 test "$(jq -r '.spec.template.spec.containers[0].image' service-after.json)" = 'scratch'
 
-# Critical configuration other than the explicitly corrected bucket must remain unchanged.
 jq -S '{sqlDb:[.spec.template.spec.containers[0].env[]|select(.name=="SQL_DB_NAME")],appUrl:[.spec.template.spec.containers[0].env[]|select(.name=="APP_URL")],args:.spec.template.spec.containers[0].args,command:.spec.template.spec.containers[0].command,resources:.spec.template.spec.containers[0].resources,ports:.spec.template.spec.containers[0].ports,startupProbe:.spec.template.spec.containers[0].startupProbe,minScale:.spec.template.metadata.annotations["autoscaling.knative.dev/minScale"],maxScale:.spec.template.metadata.annotations["autoscaling.knative.dev/maxScale"],sessionAffinity:.spec.template.metadata.annotations["run.googleapis.com/sessionAffinity"],baseImages:.spec.template.metadata.annotations["run.googleapis.com/base-images"]}' service-before.json > critical-before.json
 jq -S '{sqlDb:[.spec.template.spec.containers[0].env[]|select(.name=="SQL_DB_NAME")],appUrl:[.spec.template.spec.containers[0].env[]|select(.name=="APP_URL")],args:.spec.template.spec.containers[0].args,command:.spec.template.spec.containers[0].command,resources:.spec.template.spec.containers[0].resources,ports:.spec.template.spec.containers[0].ports,startupProbe:.spec.template.spec.containers[0].startupProbe,minScale:.spec.template.metadata.annotations["autoscaling.knative.dev/minScale"],maxScale:.spec.template.metadata.annotations["autoscaling.knative.dev/maxScale"],sessionAffinity:.spec.template.metadata.annotations["run.googleapis.com/sessionAffinity"],baseImages:.spec.template.metadata.annotations["run.googleapis.com/base-images"]}' service-after.json > critical-after.json
 diff -u critical-before.json critical-after.json
