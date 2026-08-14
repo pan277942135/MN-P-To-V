@@ -3,6 +3,7 @@ import type { ServerVideoTaskRecord } from '../types';
 import {
   buildProviderAdmissionScopeKey,
   isProviderAdmissionBlockingTask,
+  isProviderTaskDeletionSafe,
 } from '../server/services/providerAdmissionPolicy';
 
 const task = (status: any, overrides: Partial<ServerVideoTaskRecord> = {}) => ({
@@ -43,5 +44,18 @@ describe('durable provider admission policy', () => {
 
   it.each(['completed', 'failed', 'cancelled', 'canceled', 'artifact_persist_failed'])('releases admission when status=%s', (status) => {
     expect(isProviderAdmissionBlockingTask(task(status))).toBe(false);
+  });
+
+  it('forbids deletion while a task may still consume or automatically re-consume provider capacity', () => {
+    expect(isProviderTaskDeletionSafe(task('submission_outcome_unknown'))).toBe(false);
+    expect(isProviderTaskDeletionSafe(task('submitting'))).toBe(false);
+    expect(isProviderTaskDeletionSafe(task('polling_timeout', { operationName: 'operations/123' }))).toBe(false);
+    expect(isProviderTaskDeletionSafe(task('qa_pending', { identityQaStatus: 'fail' }))).toBe(false);
+  });
+
+  it('allows deletion only after provider admission is durably released', () => {
+    expect(isProviderTaskDeletionSafe(task('failed'))).toBe(true);
+    expect(isProviderTaskDeletionSafe(task('completed'))).toBe(true);
+    expect(isProviderTaskDeletionSafe(task('qa_pending', { identityQaStatus: 'review' }))).toBe(true);
   });
 });
