@@ -1,5 +1,6 @@
 import type { ServerVideoTaskRecord } from '../../types';
 import { getFirestoreInstance, isFirestoreAvailable, markFirestoreUnavailable } from '../db/firestore';
+import { buildProviderAdmissionScopeKey, isProviderAdmissionBlockingTask, ProviderAdmissionBusyError } from '../services/providerAdmissionPolicy';
 
 export function sanitizeForFirestore<T extends Record<string, any>>(obj: T): Record<string, any> {
   const cleanObj: Record<string, any> = {};
@@ -55,6 +56,7 @@ function createAlreadyExistsError(taskId: string): Error & { code: string } {
 
 export class FirestoreTaskRepository {
   private collectionName = 'video_tasks';
+  private providerAdmissionCollectionName = 'video_provider_admission';
 
   public firestoreReadCount = 0;
   public firestoreWriteCount = 0;
@@ -182,6 +184,9 @@ export class FirestoreTaskRepository {
 
     return this.withRetry('createTask', true, async () => {
       const docRef = db.collection(this.collectionName).doc(taskId);
+      const scopeKey = buildProviderAdmissionScopeKey(record.projectId);
+      const admissionRef = db.collection(this.providerAdmissionCollectionName).doc(scopeKey);
+      const now = Date.now();
       const payload = sanitizeForFirestore({
         ...record,
         taskId,
@@ -189,19 +194,55 @@ export class FirestoreTaskRepository {
         evidenceSource: 'firestore',
         stateVersion: record.stateVersion ?? record.statusVersion ?? 1,
         statusVersion: record.statusVersion ?? record.stateVersion ?? 1,
-        updatedAt: record.updatedAt || Date.now(),
-        createdAt: record.createdAt || Date.now(),
+        updatedAt: record.updatedAt || now,
+        createdAt: record.createdAt || now,
       });
 
-      // Atomic create-if-absent implemented with a transaction rather than
-      // DocumentReference.create(). This preserves cross-instance idempotency while
-      // using the same transaction primitive as the rest of the durable state machine.
+      // Atomic cross-instance admission boundary: task creation and provider-slot
+      // reservation commit together. No process-local lock participates in correctness.
       await db.runTransaction(async (transaction) => {
         const snap = await transaction.get(docRef);
         if (snap.exists) {
           throw createAlreadyExistsError(taskId);
         }
+
+        const incomingNeedsProviderAdmission = isProviderAdmissionBlockingTask(record);
+        if (incomingNeedsProviderAdmission) {
+          const admissionSnap = await transaction.get(admissionRef);
+          const admissionData = admissionSnap.exists ? (admissionSnap.data() as any) : null;
+          const incumbentTaskId = String(admissionData?.taskId || '');
+
+          if (incumbentTaskId && incumbentTaskId !== taskId) {
+            const incumbentRef = db.collection(this.collectionName).doc(incumbentTaskId);
+            const incumbentSnap = await transaction.get(incumbentRef);
+            if (incumbentSnap.exists) {
+              const incumbentTask = {
+                ...(incumbentSnap.data() as ServerVideoTaskRecord),
+                taskId: (incumbentSnap.data() as ServerVideoTaskRecord).taskId || incumbentTaskId,
+                evidenceSource: 'firestore' as const,
+              } as ServerVideoTaskRecord;
+              if (isProviderAdmissionBlockingTask(incumbentTask)) {
+                throw new ProviderAdmissionBusyError({
+                  blockingTaskId: incumbentTask.taskId || incumbentTaskId,
+                  blockingStatus: incumbentTask.status,
+                  scopeKey,
+                });
+              }
+            }
+          }
+        }
+
         transaction.set(docRef, payload);
+        if (incomingNeedsProviderAdmission) {
+          transaction.set(admissionRef, sanitizeForFirestore({
+            scopeKey,
+            taskId,
+            projectId: record.projectId || '',
+            acquiredAt: now,
+            updatedAt: now,
+            authority: 'firestore',
+          }));
+        }
       });
     });
   }
