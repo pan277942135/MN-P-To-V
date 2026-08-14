@@ -151,6 +151,8 @@ export interface StructuredPromptScript {
 
 export type FailureReason =
   | 'input_safety_blocked'
+  | 'identity_qa_failed'
+  | 'identity_qa_review_required'
   | 'output_rai_filtered'
   | 'upstream_empty_response'
   | 'artifact_missing'

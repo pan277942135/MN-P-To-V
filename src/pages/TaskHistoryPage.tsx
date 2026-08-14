@@ -212,7 +212,12 @@ const isTaskInputRewriteRequired = (task?: GenerationTask | null): boolean => {
   if (!task) return false;
   const failureReason = (task as any).failureReason;
   const retryMode = (task as any).retryMode;
-  return failureReason === 'output_rai_filtered' || retryMode === 'REWRITE_INPUT_THEN_REGENERATE';
+  return (
+    failureReason === 'output_rai_filtered' ||
+    failureReason === 'identity_qa_failed' ||
+    failureReason === 'identity_qa_review_required' ||
+    retryMode === 'REWRITE_INPUT_THEN_REGENERATE'
+  );
 };
 
 const getVideoUrl = (task?: GenerationTask | null): string | null => {
@@ -529,7 +534,12 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
       return;
     }
     if (isTaskInputRewriteRequired(task)) {
-      alert('该任务已被 Google Veo 安全过滤。原样一键重试已禁用，请返回创作工作台修改提示词或更换图片后重新生成。');
+      const reason = (task as any).failureReason;
+      if (reason === 'identity_qa_failed' || reason === 'identity_qa_review_required') {
+        alert('该任务在提交 Veo 前被首帧角色质检拦截。原样一键重试已禁用，请返回创作工作台核对角色、母板与输入图。');
+      } else {
+        alert('该任务已被 Google Veo 安全过滤。原样一键重试已禁用，请返回创作工作台修改提示词或更换图片后重新生成。');
+      }
       return;
     }
     setIsRetryingTaskId(task.id);
