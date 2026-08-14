@@ -31,7 +31,7 @@ jobs:
         run: npm install
 
       - name: Apply durable character route migration
-        run: node scripts/apply_durable_character_patch.mjs
+        run: node scripts/apply_durable_character_patch_v2.mjs
 
       - name: TypeScript gate
         run: npm run lint
