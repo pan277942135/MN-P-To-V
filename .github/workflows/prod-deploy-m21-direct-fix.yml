@@ -1,4 +1,4 @@
-name: Inspect Production Image Source
+name: Inspect Production Source Artifact
 
 on:
   push:
@@ -36,34 +36,33 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
-      - name: Inspect service and latest ready revision read-only
+      - name: Download and inspect current compiled artifact read-only
         shell: bash
         run: |
           set -euo pipefail
-          echo '--- SERVICE SUMMARY ---'
-          gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" \
-            --format='yaml(metadata.name,metadata.annotations,spec.template.metadata.annotations,spec.template.spec.containers,status.url,status.latestReadyRevisionName,status.latestCreatedRevisionName)'
-
-          REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
-          test -n "$REVISION"
-          echo "LATEST_READY_REVISION=$REVISION"
-          echo '--- REVISION SUMMARY ---'
-          gcloud run revisions describe "$REVISION" --project="$PROJECT_ID" --region="$REGION" \
-            --format='yaml(metadata.name,metadata.annotations,spec.containers,status.conditions,status.imageDigest)'
-
-          echo '--- REVISION IMAGE VALUES ---'
-          gcloud run revisions describe "$REVISION" --project="$PROJECT_ID" --region="$REGION" \
-            --format='value(spec.containers[0].image)'
-          gcloud run revisions describe "$REVISION" --project="$PROJECT_ID" --region="$REGION" \
-            --format='value(status.imageDigest)'
-
-          echo '--- ARTIFACT REGISTRY REPOSITORIES ---'
-          gcloud artifacts repositories list --project="$PROJECT_ID" --format='table(name,format,location)' || true
-
-          echo '--- RECENT DOCKER IMAGES (asia-south1) ---'
-          for repo in $(gcloud artifacts repositories list --project="$PROJECT_ID" --location="$REGION" --filter='format=DOCKER' --format='value(name)' 2>/dev/null); do
-            echo "REPO=$repo"
-            gcloud artifacts docker images list "$REGION-docker.pkg.dev/$PROJECT_ID/$repo" --project="$PROJECT_ID" --limit=10 --sort-by='~UPDATE_TIME' --format='table(package,version,updateTime)' || true
-          done
-
-          echo 'Read-only production inspection complete; no Cloud Run mutation and no Veo call.'
+          gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format=json > service.json
+          SOURCES_JSON="$(jq -r '.spec.template.metadata.annotations["run.googleapis.com/sources"]' service.json)"
+          BASE_IMAGES_JSON="$(jq -r '.spec.template.metadata.annotations["run.googleapis.com/base-images"]' service.json)"
+          SOURCE_URI="$(printf '%s' "$SOURCES_JSON" | jq -r '.["app-container"]')"
+          SOURCE_URI="${SOURCE_URI%%#*}"
+          BASE_IMAGE="$(printf '%s' "$BASE_IMAGES_JSON" | jq -r '.["app-container"]')"
+          echo "SOURCE_URI=$SOURCE_URI"
+          echo "BASE_IMAGE=$BASE_IMAGE"
+          [[ "$SOURCE_URI" == gs://* ]]
+          gcloud storage cp "$SOURCE_URI" current-build-artifacts.tar.gz
+          ls -lh current-build-artifacts.tar.gz
+          echo '--- TOP LEVEL ---'
+          tar -tzf current-build-artifacts.tar.gz | awk -F/ 'NF<=2' | head -100 || true
+          echo '--- KEY FILES ---'
+          tar -tzf current-build-artifacts.tar.gz | grep -E '(^|/)(package.json|server.js|dist/server.cjs|node_modules/|index.html)$' | head -80 || true
+          mkdir current-artifact
+          tar -xzf current-build-artifacts.tar.gz -C current-artifact
+          echo '--- ROOT LIST ---'
+          find current-artifact -maxdepth 2 -type f -printf '%P\t%s bytes\n' | sort | head -120
+          echo '--- PACKAGE.JSON ---'
+          PKG="$(find current-artifact -maxdepth 2 -name package.json -type f | head -1)"
+          test -n "$PKG"
+          cat "$PKG"
+          echo '--- STARTUP TARGETS ---'
+          find current-artifact -maxdepth 3 \( -name server.js -o -path '*/dist/server.cjs' \) -type f -printf '%P\t%s bytes\n' || true
+          echo 'Read-only artifact inspection complete; no service mutation and no Veo call.'
