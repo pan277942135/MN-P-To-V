@@ -1,0 +1,55 @@
+name: M2 UAT Review Pending UX
+
+on:
+  push:
+    branches:
+      - fix-m2-uat-review-pending-ux
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  review-pending-ux:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Review-pending UX contract gate
+        run: |
+          grep -q "const isTaskHumanReviewState" src/pages/TaskHistoryPage.tsx
+          grep -q "'polling_timeout', 'qa_pending'" src/pages/TaskHistoryPage.tsx
+          grep -q "else if (data.status === 'qa_pending')" src/pages/TaskHistoryPage.tsx
+          grep -q "待审核 ({reviewTaskCount})" src/pages/TaskHistoryPage.tsx
+          grep -q "sessionStorage.setItem('zaojing_bring_task_id', task.id)" src/pages/TaskHistoryPage.tsx
+          grep -q "QA REVIEW 是人工决策状态，不属于“生成中”" src/pages/TaskHistoryPage.tsx
+          test ! -e scripts/apply-m2-uat-review-pending-ux.py
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Focused UAT regression
+        run: npx vitest run src/__tests__/m2UatReviewPendingUx.test.ts
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
