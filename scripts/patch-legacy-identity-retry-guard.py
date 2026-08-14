@@ -2,6 +2,10 @@ from pathlib import Path
 
 path = Path('src/pages/TaskHistoryPage.tsx')
 text = path.read_text()
+marker = "const legacyIdentityGate ="
+if marker in text:
+    print('Legacy identity retry guard already applied')
+    raise SystemExit(0)
 old = """const isTaskInputRewriteRequired = (task?: GenerationTask | null): boolean => {
   if (!task) return false;
   const failureReason = (task as any).failureReason;
