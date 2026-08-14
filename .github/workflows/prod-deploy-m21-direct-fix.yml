@@ -1,4 +1,4 @@
-name: Deploy M2-1 Identity Hardening to Production
+name: Inspect Production Image Source
 
 on:
   push:
@@ -10,7 +10,6 @@ permissions:
   id-token: write
 
 env:
-  SOURCE_SHA: d5a29a151b8d230e583aeea190b9ebc062968d87
   PROJECT_ID: xp-vertex-project
   REGION: asia-south1
   SERVICE: service-0804
@@ -18,29 +17,11 @@ env:
   DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
 
 jobs:
-  deploy-and-verify:
+  inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
     steps:
-      - name: Checkout exact merged source
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.SOURCE_SHA }}
-
-      - name: Verify merged identity contracts
-        shell: bash
-        run: |
-          set -euo pipefail
-          grep -Fq 'masterImageBuffers: masterBuffers' server.ts
-          grep -Fq 'scenePreservationScore: 100' src/services/character/identityLockService.ts
-          grep -Fq '...masterParts' src/services/qa/visualQaService.ts
-          grep -Fq '(pipelineError as any).startData = startData' src/pages/StudioPage.tsx
-          grep -Fq "legacyErrorText.includes('角色一致性质检未通过')" src/pages/TaskHistoryPage.tsx
-          grep -Fq '(task as any).firstFrameQaReport' src/utils/taskHelper.ts
-          if grep -Fq 'const masterBufForQa = masterBuffers[0]' server.ts; then
-            echo 'Single-master QA wiring still present.' >&2
-            exit 1
-          fi
+      - uses: actions/checkout@v4
 
       - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v3
@@ -55,130 +36,34 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
-      - name: Inspect current production service and derive image repository
-        id: current
+      - name: Inspect service and latest ready revision read-only
         shell: bash
         run: |
           set -euo pipefail
-          CURRENT_IMAGE="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(spec.template.spec.containers[0].image)')"
-          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
-          test -n "$CURRENT_IMAGE"
-          test -n "$SERVICE_URL"
-          if [[ "$CURRENT_IMAGE" == *@sha256:* ]]; then
-            IMAGE_REPO="${CURRENT_IMAGE%@sha256:*}"
-          else
-            IMAGE_REPO="$(printf '%s' "$CURRENT_IMAGE" | sed -E 's/:[^/:]+$//')"
-          fi
-          REGISTRY="${IMAGE_REPO%%/*}"
-          NEW_IMAGE="$IMAGE_REPO:$SOURCE_SHA"
-          echo "current_image=$CURRENT_IMAGE"
-          echo "image_repo=$IMAGE_REPO"
-          echo "registry=$REGISTRY"
-          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
-          echo "current_image=$CURRENT_IMAGE" >> "$GITHUB_OUTPUT"
-          echo "image_repo=$IMAGE_REPO" >> "$GITHUB_OUTPUT"
-          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
-          echo "new_image=$NEW_IMAGE" >> "$GITHUB_OUTPUT"
+          echo '--- SERVICE SUMMARY ---'
+          gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" \
+            --format='yaml(metadata.name,metadata.annotations,spec.template.metadata.annotations,spec.template.spec.containers,status.url,status.latestReadyRevisionName,status.latestCreatedRevisionName)'
 
-      - name: Build and push immutable production image
-        id: image
-        shell: bash
-        env:
-          REGISTRY: ${{ steps.current.outputs.registry }}
-          NEW_IMAGE: ${{ steps.current.outputs.new_image }}
-        run: |
-          set -euo pipefail
-          gcloud auth configure-docker "$REGISTRY" --quiet
-          docker build -t "$NEW_IMAGE" .
-          docker push "$NEW_IMAGE" | tee push.log
-          DIGEST="$(grep -oE 'digest: sha256:[0-9a-f]+' push.log | tail -n1 | awk '{print $2}')"
-          test -n "$DIGEST"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-
-      - name: Update production image only
-        id: deploy
-        shell: bash
-        env:
-          NEW_IMAGE: ${{ steps.current.outputs.new_image }}
-        run: |
-          set -euo pipefail
-          gcloud run services update "$SERVICE" \
-            --project="$PROJECT_ID" \
-            --region="$REGION" \
-            --image="$NEW_IMAGE" \
-            --quiet
           REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
-          IMAGE_LIVE="$(gcloud run revisions describe "$REVISION" --project="$PROJECT_ID" --region="$REGION" --format='value(spec.containers[0].image)')"
-          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
-          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
-          echo "image_live=$IMAGE_LIVE" >> "$GITHUB_OUTPUT"
-          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+          test -n "$REVISION"
+          echo "LATEST_READY_REVISION=$REVISION"
+          echo '--- REVISION SUMMARY ---'
+          gcloud run revisions describe "$REVISION" --project="$PROJECT_ID" --region="$REGION" \
+            --format='yaml(metadata.name,metadata.annotations,spec.containers,status.conditions,status.imageDigest)'
 
-      - name: Verify immutable image digest
-        shell: bash
-        env:
-          IMAGE_LIVE: ${{ steps.deploy.outputs.image_live }}
-          EXPECTED_DIGEST: ${{ steps.image.outputs.digest }}
-        run: |
-          set -euo pipefail
-          echo "image=$IMAGE_LIVE"
-          echo "expected_digest=$EXPECTED_DIGEST"
-          [[ "$IMAGE_LIVE" == *"@$EXPECTED_DIGEST" ]]
+          echo '--- REVISION IMAGE VALUES ---'
+          gcloud run revisions describe "$REVISION" --project="$PROJECT_ID" --region="$REGION" \
+            --format='value(spec.containers[0].image)'
+          gcloud run revisions describe "$REVISION" --project="$PROJECT_ID" --region="$REGION" \
+            --format='value(status.imageDigest)'
 
-      - name: Mint production ID token
-        id: invoke_auth
-        uses: google-github-actions/auth@v3
-        with:
-          project_id: ${{ env.PROJECT_ID }}
-          workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: ${{ env.DEPLOY_SA }}
-          token_format: id_token
-          id_token_audience: ${{ steps.deploy.outputs.service_url }}
-          id_token_include_email: true
+          echo '--- ARTIFACT REGISTRY REPOSITORIES ---'
+          gcloud artifacts repositories list --project="$PROJECT_ID" --format='table(name,format,location)' || true
 
-      - name: Verify production health and frontend bundle
-        shell: bash
-        env:
-          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
-          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
-        run: |
-          set -euo pipefail
-          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/health" | tee health.json
-          jq -e '.status == "ok"' health.json >/dev/null
-          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/" -o index.html
-          ASSET_PATH="$(grep -oE 'src="/[^"]+\.js"' index.html | head -n1 | cut -d'"' -f2)"
-          test -n "$ASSET_PATH"
-          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL$ASSET_PATH" -o app.js
-          grep -Fq '该任务在提交 Veo 前被首帧角色质检拦截' app.js
-          grep -Fq '首帧角色/画面质检触发硬拦截' app.js
-          grep -Fq '首帧 QA 详细分数未保留' app.js
-          grep -Fq 'Google 未返回具体过滤原因' app.js
-          echo "Production frontend verified in $ASSET_PATH"
+          echo '--- RECENT DOCKER IMAGES (asia-south1) ---'
+          for repo in $(gcloud artifacts repositories list --project="$PROJECT_ID" --location="$REGION" --filter='format=DOCKER' --format='value(name)' 2>/dev/null); do
+            echo "REPO=$repo"
+            gcloud artifacts docker images list "$REGION-docker.pkg.dev/$PROJECT_ID/$repo" --project="$PROJECT_ID" --limit=10 --sort-by='~UPDATE_TIME' --format='table(package,version,updateTime)' || true
+          done
 
-      - name: Verify production Firestore authority read-only
-        shell: bash
-        env:
-          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
-          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
-        run: |
-          set -euo pipefail
-          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/audit" -o audit.json
-          jq -e '.storageAuthority == "firestore"' audit.json >/dev/null
-          echo 'Production Firestore authority verified read-only.'
-
-      - name: Summary
-        shell: bash
-        run: |
-          {
-            echo '## Production M2-1 identity hardening deployed'
-            echo "- Source: \`$SOURCE_SHA\`"
-            echo "- Service: \`$SERVICE\`"
-            echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
-            echo "- Previous image: \`${{ steps.current.outputs.current_image }}\`"
-            echo "- Live image: \`${{ steps.deploy.outputs.image_live }}\`"
-            echo '- Updated Cloud Run image only; existing service configuration preserved.'
-            echo '- Health: PASS'
-            echo '- Frontend identity failure UX: PASS'
-            echo '- Firestore authority read: PASS'
-            echo '- No Veo generation invoked.'
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo 'Read-only production inspection complete; no Cloud Run mutation and no Veo call.'
