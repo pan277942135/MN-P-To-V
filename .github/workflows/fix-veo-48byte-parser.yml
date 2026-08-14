@@ -1,0 +1,69 @@
+name: Fix Veo 48-byte Artifact Parser
+
+on:
+  push:
+    branches:
+      - fix-veo-48byte-artifact-parser
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply exact parser hardening
+        run: python3 scripts/apply-fix-veo-48byte-parser.py
+
+      - name: Source contract gate
+        run: |
+          grep -q "trimmed.length < 1024" src/services/video/videoGenerator.ts
+          grep -q "VideoGenerator.isMp4Valid(decoded)" src/services/video/videoGenerator.ts
+          grep -q "48 bytes" src/services/video/videoGenerator.ts
+          if grep -A14 "const hasSafetyKeyword" src/services/video/videoGenerator.ts | grep -q "str.includes('raiMediaFiltered')"; then
+            echo 'Zero-valued raiMediaFiltered field name still causes a false safety block.' >&2
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Exact 48-byte regression
+        run: npx vitest run src/__tests__/videoGeneratorArtifactParserRegression.test.ts
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
+
+      - name: Commit verified source fix
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/services/video/videoGenerator.ts
+          if git diff --cached --quiet; then
+            echo 'No source patch to commit.'
+            exit 0
+          fi
+          git commit -m 'fix: reject Veo metadata as video base64'
+          git push origin HEAD:fix-veo-48byte-artifact-parser
