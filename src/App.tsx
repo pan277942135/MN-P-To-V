@@ -5,6 +5,7 @@ import { Sidebar, type NavTab } from './components/Sidebar';
 import { StudioPage } from './pages/StudioPage';
 import { CharacterLibraryPage } from './pages/CharacterLibraryPage';
 import { TaskHistoryPage } from './pages/TaskHistoryPage';
+import { HumanReviewQueuePage } from './pages/HumanReviewQueuePage';
 import { ComputeSettingsPage } from './pages/ComputeSettingsPage';
 
 export function AppContent() {
@@ -36,6 +37,10 @@ export function AppContent() {
 
           <div className={activeTab === 'characters' ? 'block' : 'hidden'}>
             <CharacterLibraryPage />
+          </div>
+
+          <div className={activeTab === 'review' ? 'block' : 'hidden'}>
+            <HumanReviewQueuePage onNavigateToStudio={() => setActiveTab('studio')} />
           </div>
 
           <div className={activeTab === 'history' ? 'block' : 'hidden'}>
