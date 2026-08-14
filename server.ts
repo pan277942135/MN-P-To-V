@@ -25,6 +25,7 @@ import { redactSecrets, sanitizeError, createStructuredError } from './src/utils
 import { callWithRetry } from './src/utils/retryHelper';
 import type { IdentitySpec, ServerVideoTaskRecord, TaskStatus, AuditTaskStatus, TaskSubmissionState } from './src/types';
 import { firestoreTaskRepository } from './src/server/repositories/firestoreTaskRepository';
+import { durableCharacterService } from './src/server/services/durableCharacterService';
 import { taskStateMachineService, InvalidStateTransitionError } from './src/server/services/taskStateMachineService';
 import { getStorageAuthority } from './src/server/db/firestore';
 import { gcsArtifactStore, resolveVeoOutputBucket, resolveVeoStorageUri, getVeoBucketName, getVeoStorageUri, assertProductionStorageConfig, EXPECTED_PRODUCTION_VEO_BUCKET } from './src/server/storage/gcsArtifactStore';
@@ -590,95 +591,139 @@ export async function createApp() {
 
   const serverCharacterStore = loadCharactersFromDisk();
 
-  // List all characters endpoint for client hydration
-  app.get('/api/characters/list', (_req, res) => {
-    const list = Array.from(serverCharacterStore.values()).map((char) => ({
-      id: char.id,
-      name: char.name,
-      description: char.description,
-      identitySpec: char.identitySpec,
-      status: 'ready' as const,
-      adultConfirmed: true,
-      referenceImages: char.referenceImages.map((img, i) => ({
-        id: img.id || `ref_${i}`,
-        url: `data:${img.mimeType || 'image/jpeg'};base64,${img.buffer.toString('base64')}`,
-        width: img.width || 1080,
-        height: img.height || 1080,
-        angle: img.angle || 'front',
-      })),
-      createdAt: char.updatedAt,
-      updatedAt: char.updatedAt,
-    }));
-    return res.json({ characters: list });
+  // Durable Character Library: Firestore metadata + GCS master-image authority.
+  app.get('/api/characters/list', async (_req, res) => {
+    try {
+      if (!durableCharacterService.isAvailable()) {
+        return res.status(503).json({ characters: [], storageAuthority: 'unavailable', error: '角色云端存储不可用' });
+      }
+      const records = await durableCharacterService.listMetadata();
+      const characters = records.map((record) => ({
+        id: record.id,
+        name: record.name,
+        description: record.description,
+        identitySpec: record.identitySpec,
+        status: 'ready' as const,
+        adultConfirmed: record.adultConfirmed,
+        rightsConfirmed: record.rightsConfirmed,
+        referenceImages: [...(record.referenceImages || [])]
+          .sort((a, b) => a.sortOrder - b.sortOrder)
+          .map((ref) => ({
+            id: ref.id,
+            url: '/api/characters/' + encodeURIComponent(record.id) + '/reference/' + encodeURIComponent(ref.id),
+            width: ref.width || 1080,
+            height: ref.height || 1080,
+            angle: ref.angle || 'other',
+            mimeType: ref.mimeType || 'image/jpeg',
+          })),
+        createdAt: new Date(record.createdAt).toISOString(),
+        updatedAt: new Date(record.updatedAt).toISOString(),
+        evidenceSource: 'firestore',
+      }));
+      return res.json({ characters, storageAuthority: 'firestore', artifactAuthority: 'gcs' });
+    } catch (err: any) {
+      console.error('[Durable Character List Error]:', err);
+      return res.status(503).json({ characters: [], storageAuthority: 'firestore', error: err?.message || '读取角色库失败' });
+    }
+  });
+
+  app.get('/api/characters/:id/reference/:referenceId', async (req, res) => {
+    try {
+      if (!durableCharacterService.isAvailable()) {
+        return res.status(503).json({ error: '角色云端存储不可用', storageAuthority: 'unavailable' });
+      }
+      const artifact = await durableCharacterService.getReferenceBuffer(req.params.id, req.params.referenceId);
+      if (!artifact) return res.status(404).json({ error: '角色母板不存在', storageAuthority: 'firestore' });
+      res.setHeader('Content-Type', artifact.mimeType);
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      return res.send(artifact.buffer);
+    } catch (err: any) {
+      return res.status(503).json({ error: err?.message || '读取角色母板失败', storageAuthority: 'gcs' });
+    }
   });
 
   // Store character profile endpoint
   app.post('/api/characters/store', upload.array('masterPhotos', 8), async (req, res) => {
     try {
-      const id = req.body.id || `char_${crypto.randomUUID().slice(0, 8)}`;
+      if (!durableCharacterService.isAvailable()) {
+        return res.status(503).json({ success: false, storageAuthority: 'unavailable', error: '角色云端存储不可用' });
+      }
+      const id = req.body.id || ('char_' + crypto.randomUUID().slice(0, 8));
       const name = req.body.name || '未命名角色';
       const description = req.body.description || '';
       const identitySpec = req.body.identitySpec ? JSON.parse(req.body.identitySpec) : { lockedTraits: [] };
       const files = (req.files as Express.Multer.File[]) || [];
-
-      const refImages = files.map((f, i) => ({
-        id: `ref_${i}`,
-        buffer: f.buffer,
-        mimeType: f.mimetype || 'image/jpeg',
+      const images = files.map((file, index) => ({
+        buffer: file.buffer,
+        mimeType: file.mimetype || 'image/jpeg',
         width: 1080,
         height: 1080,
-        angle: i === 0 ? 'front' : 'other',
+        angle: index === 0 ? 'front' : 'other',
       }));
 
-      const existingChar = serverCharacterStore.get(id);
-      const serverChar: ServerCharacter = {
-        id,
-        name,
-        description,
-        identitySpec,
-        referenceImages: refImages.length > 0 ? refImages : (existingChar?.referenceImages || []),
-        updatedAt: new Date().toISOString(),
-      };
-
-      serverCharacterStore.set(id, serverChar);
-      saveCharactersToDisk(serverCharacterStore);
-      return res.json({ success: true, character: { ...serverChar, referenceImages: serverChar.referenceImages.length } });
-    } catch (err: unknown) {
-      const { redactedMessage } = sanitizeError(err);
-      return res.status(500).json({ error: redactedMessage });
+      const record = await durableCharacterService.save({
+        id, name, description, identitySpec,
+        images: images.length ? images : undefined,
+        adultConfirmed: req.body.adultConfirmed !== 'false',
+        rightsConfirmed: req.body.rightsConfirmed !== 'false',
+      });
+      const hydrated = await durableCharacterService.hydrate(record);
+      serverCharacterStore.set(id, hydrated);
+      return res.json({
+        success: true,
+        storageAuthority: 'firestore',
+        artifactAuthority: 'gcs',
+        character: { ...record, referenceImages: record.referenceImages.length },
+      });
+    } catch (err: any) {
+      console.error('[Durable Character Store Error]:', err);
+      return res.status(503).json({ success: false, storageAuthority: 'firestore', error: err?.message || '角色云端持久化失败' });
     }
   });
 
   // Delete character endpoint
-  app.delete('/api/characters/:id', (req, res) => {
-    const deleted = serverCharacterStore.delete(req.params.id);
-    if (deleted) {
-      saveCharactersToDisk(serverCharacterStore);
+  app.delete('/api/characters/:id', async (req, res) => {
+    try {
+      if (!durableCharacterService.isAvailable()) {
+        return res.status(503).json({ success: false, storageAuthority: 'unavailable', error: '角色云端存储不可用' });
+      }
+      const deleted = await durableCharacterService.delete(req.params.id);
+      serverCharacterStore.delete(req.params.id);
+      return res.json({ success: deleted, storageAuthority: 'firestore', artifactAuthority: 'gcs' });
+    } catch (err: any) {
+      return res.status(503).json({ success: false, storageAuthority: 'firestore', error: err?.message || '删除角色失败' });
     }
-    return res.json({ success: deleted });
   });
 
   // Get character profile endpoint
-  app.get('/api/characters/:id', (req, res) => {
-    const char = serverCharacterStore.get(req.params.id);
-    if (!char) {
-      const errObj = createStructuredError({
-        source: 'character_api',
-        failureStage: 'internal_api',
-        httpStatus: 404,
-        customUserMessage: '角色资料不存在或已被删除。',
-        endpointPathRedacted: `/api/characters/${req.params.id}`,
+  app.get('/api/characters/:id', async (req, res) => {
+    try {
+      if (!durableCharacterService.isAvailable()) {
+        return res.status(503).json({ error: '角色云端存储不可用', storageAuthority: 'unavailable' });
+      }
+      const record = await durableCharacterService.getMetadata(req.params.id);
+      if (!record) {
+        const errObj = createStructuredError({
+          source: 'character_api', failureStage: 'internal_api', httpStatus: 404,
+          customUserMessage: '角色资料不存在或已被删除。',
+          endpointPathRedacted: '/api/characters/' + req.params.id,
+        });
+        return res.status(404).json(errObj);
+      }
+      return res.json({
+        id: record.id, name: record.name, description: record.description, identitySpec: record.identitySpec,
+        adultConfirmed: record.adultConfirmed, rightsConfirmed: record.rightsConfirmed, status: record.status,
+        referenceImages: [...(record.referenceImages || [])].sort((a, b) => a.sortOrder - b.sortOrder).map((ref) => ({
+          id: ref.id,
+          url: '/api/characters/' + encodeURIComponent(record.id) + '/reference/' + encodeURIComponent(ref.id),
+          width: ref.width || 1080, height: ref.height || 1080, angle: ref.angle || 'other', mimeType: ref.mimeType || 'image/jpeg',
+        })),
+        createdAt: new Date(record.createdAt).toISOString(), updatedAt: new Date(record.updatedAt).toISOString(),
+        evidenceSource: 'firestore',
       });
-      return res.status(404).json(errObj);
+    } catch (err: any) {
+      return res.status(503).json({ error: err?.message || '读取角色资料失败', storageAuthority: 'firestore' });
     }
-    return res.json({
-      id: char.id,
-      name: char.name,
-      description: char.description,
-      identitySpec: char.identitySpec,
-      updatedAt: char.updatedAt,
-      imageCount: char.referenceImages.length,
-    });
   });
 
   // Update character profile description and re-analyze identitySpec
@@ -691,6 +736,10 @@ export async function createApp() {
       const description = req.body.description;
 
       let char = serverCharacterStore.get(id);
+      if (!char && durableCharacterService.isAvailable()) {
+        const durableChar = await durableCharacterService.getHydrated(id);
+        if (durableChar) { char = durableChar; serverCharacterStore.set(id, durableChar); }
+      }
 
       const files = (req.files as Express.Multer.File[]) || [];
       const imagesInput = files.map((f) => ({
@@ -729,9 +778,13 @@ export async function createApp() {
               })) : (char?.referenceImages || []),
               updatedAt: new Date().toISOString(),
             };
-            serverCharacterStore.set(id, newChar);
-            saveCharactersToDisk(serverCharacterStore);
-            return res.json({ success: true, character: { ...newChar, referenceImages: newChar.referenceImages.length } });
+            const durableRecord = await durableCharacterService.save({
+              id, name: newChar.name, description: newChar.description, identitySpec: newChar.identitySpec,
+              images: imagesInput.length > 0 ? imagesInput : undefined, adultConfirmed: true, rightsConfirmed: true,
+            });
+            const hydrated = await durableCharacterService.hydrate(durableRecord);
+            serverCharacterStore.set(id, hydrated);
+            return res.json({ success: true, storageAuthority: 'firestore', character: { ...durableRecord, referenceImages: durableRecord.referenceImages.length } });
           }
         }
       }
@@ -740,9 +793,12 @@ export async function createApp() {
         if (name) char.name = name;
         if (description) char.description = description;
         char.updatedAt = new Date().toISOString();
-        serverCharacterStore.set(id, char);
-        saveCharactersToDisk(serverCharacterStore);
-        return res.json({ success: true, character: { ...char, referenceImages: char.referenceImages.length } });
+        const durableRecord = await durableCharacterService.save({
+          id, name: char.name, description: char.description, identitySpec: char.identitySpec, adultConfirmed: true, rightsConfirmed: true,
+        });
+        const hydrated = await durableCharacterService.hydrate(durableRecord);
+        serverCharacterStore.set(id, hydrated);
+        return res.json({ success: true, storageAuthority: 'firestore', character: { ...durableRecord, referenceImages: durableRecord.referenceImages.length } });
       }
 
       return res.status(404).json({ error: '角色不存在' });
@@ -808,9 +864,12 @@ export async function createApp() {
           })),
           updatedAt: new Date().toISOString(),
         };
-        serverCharacterStore.set(charId, serverChar);
-        saveCharactersToDisk(serverCharacterStore);
-        return res.json({ ...result, characterId: charId });
+        const durableRecord = await durableCharacterService.save({
+          id: charId, name, description, identitySpec: result.identitySpec, images: imagesInput, adultConfirmed, rightsConfirmed,
+        });
+        const hydrated = await durableCharacterService.hydrate(durableRecord);
+        serverCharacterStore.set(charId, hydrated);
+        return res.json({ ...result, characterId: charId, storageAuthority: 'firestore', artifactAuthority: 'gcs' });
       }
 
       return res.json(result);
@@ -1010,7 +1069,11 @@ export async function createApp() {
       let charMimeType: string = characterImageFile ? (characterImageFile.mimetype || 'image/jpeg') : 'image/jpeg';
 
       if (!charImageBuffer && characterId) {
-        const storedChar = serverCharacterStore.get(characterId);
+        let storedChar = serverCharacterStore.get(characterId);
+      if (!storedChar && characterId && durableCharacterService.isAvailable()) {
+        const durableChar = await durableCharacterService.getHydrated(characterId);
+        if (durableChar) { storedChar = durableChar; serverCharacterStore.set(characterId, durableChar); }
+      }
         if (storedChar && storedChar.referenceImages.length > 0) {
           charImageBuffer = storedChar.referenceImages[0].buffer;
           charMimeType = storedChar.referenceImages[0].mimeType || 'image/jpeg';
@@ -1256,7 +1319,11 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       let characterDescription = req.body.characterDescription || '';
       let identitySpec = req.body.identitySpec ? JSON.parse(req.body.identitySpec || '{}') : { lockedTraits: [] };
 
-      const storedChar = characterId ? serverCharacterStore.get(characterId) : undefined;
+      let storedChar = serverCharacterStore.get(characterId);
+      if (!storedChar && characterId && durableCharacterService.isAvailable()) {
+        const durableChar = await durableCharacterService.getHydrated(characterId);
+        if (durableChar) { storedChar = durableChar; serverCharacterStore.set(characterId, durableChar); }
+      }
       if (storedChar) {
         characterDescription = storedChar.description;
         identitySpec = storedChar.identitySpec;
