@@ -18,6 +18,7 @@ env:
   FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
   WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
   DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
 
 jobs:
   deploy-and-verify:
