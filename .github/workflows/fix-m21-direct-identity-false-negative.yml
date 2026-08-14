@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Apply direct identity hardening
-        run: python3 scripts/apply-m21-direct-identity-false-negative-fix.py
+        run: python3 scripts/run-m21-direct-identity-fix.py
 
       - name: Source contract gate
         shell: bash
