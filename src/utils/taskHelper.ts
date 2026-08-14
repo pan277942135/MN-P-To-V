@@ -405,6 +405,26 @@ export function getExplicitTaskFailureReason(task: GenerationTask): {
     };
   }
 
+  if (failureReason === 'identity_qa_failed' || failureReason === 'identity_qa_review_required') {
+    const report = (task as any).firstFrameQaReport || null;
+    const identityScore = Number((task as any).identityQaScore ?? report?.identityScore);
+    const scoreText = report
+      ? `身份 ${Number.isFinite(identityScore) ? identityScore : report.identityScore}；场景 ${report.scenePreservationScore}；姿态 ${report.posePreservationScore}；服装 ${report.outfitPreservationScore}；解剖 ${report.anatomyScore}`
+      : (Number.isFinite(identityScore) ? `身份 ${identityScore}` : '首帧 QA 详细分数未保留');
+    const issueText = Array.isArray(report?.issues) && report.issues.length > 0
+      ? `；问题：${report.issues.map((issue: any) => `${issue.code}: ${issue.description}`).join('；')}`
+      : '';
+    const isReview = failureReason === 'identity_qa_review_required';
+    return {
+      primaryReason: isReview
+        ? '首帧角色一致性进入 REVIEW 区间，Veo 尚未提交。'
+        : '首帧角色/画面质检触发硬拦截，Veo 尚未提交。',
+      technicalDetails: `${scoreText}${issueText}${report?.summary ? `；${report.summary}` : ''}`,
+      recommendedAction: '请返回创作工作台核对角色、母板与输入图；不要原样一键重试。',
+      errorCode: isReview ? 'IDENTITY_QA_REVIEW_REQUIRED' : 'IDENTITY_QA_FAILED',
+    };
+  }
+
   const err = task.error;
   if (!err) {
     const stageStr = typeof task.progressStage === 'string' ? task.progressStage : '';

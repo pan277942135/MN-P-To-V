@@ -1354,14 +1354,14 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       }
 
       // Identity Lock Step 3: Evaluate First Frame Identity Gate
-      const masterBufForQa = masterBuffers[0];
-      const masterMimeForQa = masterMimeTypes[0];
-
+      // Use the complete uploaded identity pack (up to 4 masters), not only masterBuffers[0].
       const gateResult = await IdentityLockService.evaluateIdentityGate({
         ai,
         analysisModel: session.analysisModel || 'gemini-3.6-flash',
-        masterImageBuffer: masterBufForQa,
-        masterMimeType: masterMimeForQa,
+        masterImageBuffer: masterBuffers[0],
+        masterMimeType: masterMimeTypes[0],
+        masterImageBuffers: masterBuffers,
+        masterMimeTypes,
         sceneImageBuffer: rawSceneBuf,
         sceneMimeType: rawSceneMime,
         candidateBuffer: approvedFirstFrameBuf,
@@ -1395,6 +1395,9 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
           failureReason,
           error: errObj.userMessage,
           qaReport: gateResult.identityQaReport,
+          firstFrameIdentityQaStatus: gateResult.status,
+          identityQaScore: gateResult.identityQaScore,
+          identityCriticalIssues: gateResult.identityCriticalIssues,
           requiresManualApproval: isReview,
           predictLongRunningCalls: 0,
           structuredError: errObj,

@@ -36,6 +36,8 @@ export interface QaInput {
   analysisModel?: string;
   masterImageBuffer?: Buffer;
   masterMimeType?: string;
+  masterImageBuffers?: Buffer[];
+  masterMimeTypes?: string[];
   sceneImageBuffer: Buffer;
   sceneMimeType: string;
   candidateBuffer: Buffer;
@@ -203,12 +205,20 @@ export class IdentityLockService {
 
     const isTestMode = process.env.NODE_ENV === 'test';
 
-    if (input.ai && input.masterImageBuffer && input.masterImageBuffer.length > 0) {
+    const qaMasterBuffers = (input.masterImageBuffers || []).filter((buf) => buf && buf.length > 0);
+    if (qaMasterBuffers.length === 0 && input.masterImageBuffer && input.masterImageBuffer.length > 0) {
+      qaMasterBuffers.push(input.masterImageBuffer);
+    }
+    const qaMasterMimeTypes = qaMasterBuffers.map((_, index) =>
+      input.masterMimeTypes?.[index] || (index === 0 ? input.masterMimeType : undefined) || 'image/jpeg'
+    );
+
+    if (input.ai && qaMasterBuffers.length > 0) {
       report = await VisualQaService.qaFirstFrame(
         input.ai,
         input.analysisModel || 'gemini-3.6-flash',
-        input.masterImageBuffer,
-        input.masterMimeType || 'image/jpeg',
+        qaMasterBuffers,
+        qaMasterMimeTypes,
         input.sceneImageBuffer,
         input.sceneMimeType || 'image/jpeg',
         input.candidateBuffer,
@@ -216,7 +226,7 @@ export class IdentityLockService {
         input.identitySpec,
         input.sceneMode as SceneMode
       );
-    } else if (isTestMode && !input.ai && input.masterImageBuffer && input.masterImageBuffer.length > 0) {
+    } else if (isTestMode && !input.ai && qaMasterBuffers.length > 0) {
       report = {
         pass: true,
         identityScore: 98,
@@ -250,6 +260,17 @@ export class IdentityLockService {
           description: '缺失目标角色母板图 (identity_reference_missing)',
           repairInstruction: '请提供目标角色母板图后重新执行身份质检。',
         }],
+      };
+    }
+
+    // DIRECT_CHARACTER_IMAGE uses the uploaded scene bytes as the candidate first frame.
+    // Scene / pose / outfit preservation are therefore deterministic, not model-estimated.
+    if (input.imageIsTargetCharacter === true) {
+      report = {
+        ...report,
+        scenePreservationScore: 100,
+        posePreservationScore: 100,
+        outfitPreservationScore: 100,
       };
     }
 
@@ -298,6 +319,8 @@ export class IdentityLockService {
 
     const canStartVeo =
       status === 'pass' || (status === 'review' && Boolean(input.manualApproved));
+
+    report = { ...report, pass: strictPass };
 
     return {
       status,

@@ -749,7 +749,10 @@ export const StudioPage: React.FC<{
       }, 0);
 
       if (!startRes.ok || !startData.accepted || !startData.serverPersisted || !startData.taskId) {
-        throw new Error(startData?.error || '启动视频生成任务失败：服务端未接收或未持久化记录');
+        const pipelineError = new Error(startData?.error || '启动视频生成任务失败：服务端未接收或未持久化记录');
+        (pipelineError as any).startData = startData;
+        (pipelineError as any).structuredError = startData?.structuredError;
+        throw pipelineError;
       }
 
       // 服务端确认接收后，局部清空用户动作输入框与场景底图 (保留选中的角色、动作强度、风格、时长、运镜等)
@@ -918,16 +921,37 @@ export const StudioPage: React.FC<{
     } catch (pipelineErr: any) {
       console.error('Video pipeline error:', pipelineErr);
       const errMsg = pipelineErr.message || String(pipelineErr);
+      const rejectionData = pipelineErr?.startData;
+      const rejectionReason = typeof rejectionData?.failureReason === 'string' ? rejectionData.failureReason : '';
+      const isIdentityGateRejection = rejectionReason === 'identity_qa_failed' || rejectionReason === 'identity_qa_review_required';
+      const rejectionQa = rejectionData?.qaReport;
+
       task.status = 'failed';
       task.progressStage = '生成失败';
+      if (isIdentityGateRejection) {
+        task.failureReason = rejectionReason as any;
+        task.retryMode = 'NO_RETRY';
+        (task as any).firstFrameQaReport = rejectionQa;
+        (task as any).firstFrameIdentityQaStatus = rejectionData?.firstFrameIdentityQaStatus || (rejectionReason === 'identity_qa_review_required' ? 'review' : 'fail');
+        (task as any).identityQaScore = rejectionData?.identityQaScore ?? rejectionQa?.identityScore;
+        (task as any).identityCriticalIssues = rejectionData?.identityCriticalIssues || [];
+      }
+      const structured = rejectionData?.structuredError || pipelineErr?.structuredError;
+      const scoreDetails = rejectionQa
+        ? `identity=${rejectionQa.identityScore}; scene=${rejectionQa.scenePreservationScore}; pose=${rejectionQa.posePreservationScore}; outfit=${rejectionQa.outfitPreservationScore}; anatomy=${rejectionQa.anatomyScore}; summary=${rejectionQa.summary || ''}`
+        : errMsg;
       task.error = {
-        code: 'PIPELINE_ERROR',
+        code: isIdentityGateRejection
+          ? (rejectionReason === 'identity_qa_review_required' ? 'IDENTITY_QA_REVIEW_REQUIRED' : 'IDENTITY_QA_FAILED')
+          : 'PIPELINE_ERROR',
         stage: '视频生成阶段',
-        messageChinese: `生成失败: ${errMsg}`,
-        technicalMessageRedacted: errMsg,
-        httpStatus: null,
-        retryable: true,
-        recommendedAction: '请在【任务记录】页面检查算力或重试',
+        messageChinese: isIdentityGateRejection ? (rejectionData?.error || errMsg) : `生成失败: ${errMsg}`,
+        technicalMessageRedacted: isIdentityGateRejection ? scoreDetails : errMsg,
+        httpStatus: structured?.httpStatus ?? (isIdentityGateRejection ? (rejectionReason === 'identity_qa_review_required' ? 422 : 400) : null),
+        retryable: !isIdentityGateRejection,
+        recommendedAction: isIdentityGateRejection
+          ? '请返回创作工作台核对所选角色、母板与输入图；系统将显示本次首帧 QA 分数与原因。不要原样一键重试。'
+          : '请在【任务记录】页面检查算力或重试',
       };
       task.updatedAt = Date.now();
       setCurrentTask({ ...task });

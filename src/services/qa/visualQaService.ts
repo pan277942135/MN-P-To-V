@@ -12,8 +12,8 @@ export class VisualQaService {
   static async qaFirstFrame(
     ai: GoogleGenAI,
     analysisModel: string,
-    masterImageBuffer: Buffer,
-    masterMimeType: string,
+    masterImageBuffer: Buffer | Buffer[],
+    masterMimeType: string | string[],
     sceneImageBuffer: Buffer,
     sceneMimeType: string,
     firstFrameBuffer: Buffer,
@@ -25,7 +25,7 @@ export class VisualQaService {
 你是一名 AI 视觉质检专家与电影剪辑指导。请对生成的首帧候选图进行多维度严格视觉比对测试。
 
 比对图像说明：
-1. [MASTER_REFERENCE]: 目标角色母板照片。
+1. [MASTER_REFERENCE_1..N]: 同一目标角色的多角度母板照片；应综合整组母板判断身份，不得要求候选图机械复制某一张母板的拍摄角度或瞬时表情。
 2. [ORIGINAL_SCENE]: 原始输入场景图。
 3. [CANDIDATE_FIRST_FRAME]: 待质检生成的首帧候选图。
 
@@ -35,7 +35,7 @@ ${JSON.stringify(identitySpec)}
 场景模式: ${sceneMode}
 
 评分标准 (0~100 分):
-- identityScore: 生成首帧与角色母板的脸部五官、眼型瞳色、发型发色一致性。合格线 >= 95。
+- identityScore: 生成首帧与整组角色母板的脸部五官、眼型瞳色及 IdentitySpec 锁定特征的一致性。需要综合多角度证据，避免因单张母板的角度、光照、表情差异误判。合格线 >= 95。
 - sourcePersonResidualScore: 仅用于 replace_primary_person，判断是否残存原场景人物脸部特征，合格线 <= 5。对于 animate_existing_character，原场景人物本身就是目标角色，此项不参与 Gate，请返回 0。
 - scenePreservationScore: 场景背景、光影、色温保留度。合格线 >= 90。
 - posePreservationScore: 原姿态、身体轮廓保留度。合格线 >= 90。
@@ -49,6 +49,19 @@ ${JSON.stringify(identitySpec)}
 输出格式必须为严格 JSON。
 `;
 
+    const masterBuffers = Array.isArray(masterImageBuffer) ? masterImageBuffer : [masterImageBuffer];
+    const masterMimeTypes = Array.isArray(masterMimeType) ? masterMimeType : [masterMimeType];
+    const masterParts: any[] = [];
+    masterBuffers.forEach((buffer, index) => {
+      masterParts.push({
+        inlineData: {
+          mimeType: masterMimeTypes[index] || masterMimeTypes[0] || 'image/jpeg',
+          data: buffer.toString('base64'),
+        },
+      });
+      masterParts.push({ text: `[MASTER_REFERENCE_${index + 1}]: Target character identity reference ${index + 1}` });
+    });
+
     try {
       const response = await callWithRetry(
         () =>
@@ -58,12 +71,7 @@ ${JSON.stringify(identitySpec)}
               {
                 role: 'user',
                 parts: [
-                  {
-                    inlineData: {
-                      mimeType: masterMimeType,
-                      data: masterImageBuffer.toString('base64'),
-                    },
-                  },
+                  ...masterParts,
                   {
                     inlineData: {
                       mimeType: sceneMimeType,
