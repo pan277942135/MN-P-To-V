@@ -31,6 +31,13 @@ describe('M2-1 preflight identity evidence + retry UX contract', () => {
     expect(history).toContain('该任务在提交 Veo 前被首帧角色质检拦截');
   });
 
+  it('also blocks legacy local identity failures whose start payload was previously discarded', () => {
+    expect(history).toContain("legacyErrorCode === 'IDENTITY_QA_FAILED'");
+    expect(history).toContain("legacyErrorCode === 'IDENTITY_QA_REVIEW_REQUIRED'");
+    expect(history).toContain("legacyErrorText.includes('角色一致性质检未通过')");
+    expect(history).toContain("legacyErrorText.includes('角色一致性处于人工复核区间')");
+  });
+
   it('surfaces actual preflight QA metrics in failure details', () => {
     expect(helper).toContain('(task as any).firstFrameQaReport');
     expect(helper).toContain('场景 ${report.scenePreservationScore}');
