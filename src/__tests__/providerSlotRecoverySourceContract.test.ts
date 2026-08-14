@@ -23,22 +23,32 @@ describe('provider slot recovery safety contract', () => {
     expect(serverSource).not.toContain("((rec.status === 'polling' || rec.status === 'submitting') && (Date.now() - rec.createdAt) > 300000)");
   });
 
-  it('reconciles submission_outcome_unknown only after live Provider verification succeeds', () => {
+  it('first proves the operation exists through the production Provider polling path', () => {
     expect(serverSource).toContain("existing.status === 'submission_outcome_unknown'");
     expect(serverSource).toContain('const operationNameLooksValid');
     expect(serverSource).toContain('VideoGenerator.pollVeoOperation(ai, session, operationNameString)');
     expect(serverSource).toContain("failureReason: 'provider_operation_not_verified'");
     expect(serverSource).toContain('任务保持 submission_outcome_unknown，未释放算力槽，也未发起新的 Veo 生成');
+  });
+
+  it('then requires the completed Provider output to prove taskId linkage before releasing the slot', () => {
+    expect(serverSource).toContain('const expectedStoragePrefix = resolveVeoStorageUri(taskId)');
+    expect(serverSource).toContain('evaluateProviderOperationLinkage({');
+    expect(serverSource).toContain('videoUri: verification.videoUri');
+    expect(serverSource).toContain("failureReason: 'provider_operation_linkage_not_proven'");
+    expect(serverSource).toContain("linkage.reason === 'operation_still_running'");
+    expect(serverSource).toContain('任务继续保持 submission_outcome_unknown，未释放算力槽');
+    expect(serverSource).toContain('providerTaskLinked: false');
     expect(serverSource).toContain("toStatus: 'polling'");
     expect(serverSource).toContain('operationName: operationNameString');
     expect(serverSource).toContain("retryMode: 'RETRY_POLL'");
-    expect(serverSource).toContain('providerVerified: true');
-    expect(serverSource).toContain('已绑定核实后的 Provider Operation');
+    expect(serverSource).toContain('providerTaskLinked: true');
+    expect(serverSource).toContain('已绑定经 GCS task 专属输出证明的 Provider Operation');
   });
 
-  it('initializes a missing recovery record only from a verified operation and current compute project', () => {
+  it('initializes a missing recovery record only from task-linked provider output and the current compute project', () => {
     expect(serverSource).toContain('projectId: session.projectId');
-    expect(serverSource).toContain("message: '已核实 Provider Operation，并安全初始化 Firestore 恢复任务；未发起新的 Veo 生成。'");
+    expect(serverSource).toContain('已通过 GCS task 专属输出核实 Provider Operation，并安全初始化 Firestore 恢复任务');
   });
 
   it('keeps same-task unknown idempotent and never falls through to a second create attempt', () => {
