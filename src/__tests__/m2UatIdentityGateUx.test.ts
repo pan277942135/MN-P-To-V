@@ -53,14 +53,15 @@ describe('M2 UAT identity-gate UX regression', () => {
     expect(payload.outputs.recommendedAction).toContain('不要原样一键重试');
   });
 
-  it('shows a corrective identity action in task history instead of telling the user to check compute', () => {
+  it('shows a corrective identity action in task history instead of the old compute-retry instruction', () => {
     const task = makeFailedTask('Identity QA failed: uploaded face does not match the selected character master.');
     const failure = getExplicitTaskFailureReason(task);
 
     expect(failure.errorCode).toBe('IDENTITY_QA_FAILED');
     expect(failure.primaryReason).toContain('Veo 已在提交前拦截');
     expect(failure.recommendedAction).toContain('更换');
-    expect(failure.recommendedAction).not.toContain('检查算力');
+    expect(failure.recommendedAction).toContain('无需检查算力');
+    expect(failure.recommendedAction).not.toContain('请在【任务记录】页面检查算力或重试');
   });
 
   it('humanizes the exact UAT error as a successful safety gate outcome', () => {
