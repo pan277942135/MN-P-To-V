@@ -19,8 +19,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Apply direct identity hardening
-        run: python3 scripts/run-m21-direct-identity-fix.py
+      - name: Apply legacy identity retry guard
+        run: python3 scripts/patch-legacy-identity-retry-guard.py
 
       - name: Source contract gate
         shell: bash
@@ -31,6 +31,8 @@ jobs:
           grep -Fq '...masterParts' src/services/qa/visualQaService.ts
           grep -Fq '(pipelineError as any).startData = startData' src/pages/StudioPage.tsx
           grep -Fq "failureReason === 'identity_qa_failed'" src/pages/TaskHistoryPage.tsx
+          grep -Fq "legacyErrorCode === 'IDENTITY_QA_FAILED'" src/pages/TaskHistoryPage.tsx
+          grep -Fq "legacyErrorText.includes('角色一致性质检未通过')" src/pages/TaskHistoryPage.tsx
           grep -Fq '(task as any).firstFrameQaReport' src/utils/taskHelper.ts
           if grep -Fq 'const masterBufForQa = masterBuffers[0]' server.ts; then
             echo 'Single-master QA wiring still present.' >&2
@@ -60,16 +62,16 @@ jobs:
       - name: Diff integrity
         run: git diff --check
 
-      - name: Commit verified product fix
+      - name: Commit verified compatibility fix
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add server.ts src/services/character/identityLockService.ts src/services/qa/visualQaService.ts src/pages/StudioPage.tsx src/pages/TaskHistoryPage.tsx src/utils/taskHelper.ts src/types/index.ts
+          git add src/pages/TaskHistoryPage.tsx
           if git diff --cached --quiet; then
-            echo 'No source patch to commit.'
+            echo 'No compatibility source patch to commit.'
             exit 0
           fi
-          git commit -m 'fix: harden direct identity gate against false negatives'
+          git commit -m 'fix: block legacy identity gate one-click retries'
           git push origin HEAD:fix-m21-direct-identity-false-negative
