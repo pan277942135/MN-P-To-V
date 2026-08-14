@@ -31,7 +31,9 @@ jobs:
         run: npm install
 
       - name: Apply provider admission migration
-        run: node scripts/apply_provider_admission_patch.mjs
+        run: |
+          node scripts/apply_provider_admission_patch.mjs
+          node scripts/refine_provider_admission_patch.mjs
 
       - name: TypeScript gate
         run: npm run lint
