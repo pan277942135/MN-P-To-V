@@ -589,7 +589,7 @@ export async function createApp() {
     }
   }
 
-  const serverCharacterStore = loadCharactersFromDisk();
+  const serverCharacterStore = new Map<string, ServerCharacter>();
 
   // Durable Character Library: Firestore metadata + GCS master-image authority.
   app.get('/api/characters/list', async (_req, res) => {
