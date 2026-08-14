@@ -145,6 +145,19 @@ export function sanitizeError(err: unknown, defaultMessage = '系统发生内部
   };
 }
 
+function isOutputPolicyFilteredMessage(source: string, message: unknown): boolean {
+  if (source !== 'vertex_polling' || typeof message !== 'string') return false;
+  const text = message.toLowerCase();
+  return (
+    text.includes('安全策略过滤') ||
+    text.includes('responsible ai') ||
+    text.includes('rai filtered') ||
+    text.includes('media filtered') ||
+    text.includes('filtered by google') ||
+    text.includes('未生成可下载的视频')
+  );
+}
+
 export function createStructuredError(opts: {
   source?: 'vertex_submit' | 'vertex_polling' | 'output_download' | 'artifact_persist' | 'character_api' | 'internal_api' | 'authentication' | 'unknown';
   failureStage?: 'submit' | 'polling' | 'output_download' | 'artifact_persist' | 'internal_api';
@@ -178,7 +191,10 @@ export function createStructuredError(opts: {
 
   const rawUpstreamStatus = opts.upstreamHttpStatus ?? (opts.rawError as any)?.upstreamHttpStatus ?? (opts.rawError as any)?.httpStatus;
   const upstreamHttpStatus = rawUpstreamStatus ? Number(rawUpstreamStatus) : null;
-  const appHttpStatus = opts.appHttpStatus ?? opts.httpStatus ?? 500;
+  const isOutputPolicyFiltered = isOutputPolicyFilteredMessage(source, opts.customUserMessage);
+  // Output RAI filtering is a provider policy outcome returned after a successful poll.
+  // It is not an application/server HTTP failure, so do not surface a synthetic 500.
+  const appHttpStatus = isOutputPolicyFiltered ? null : (opts.appHttpStatus ?? opts.httpStatus ?? 500);
   const httpStatus = appHttpStatus;
 
   const { redactedMessage } = sanitizeError(opts.rawError);
