@@ -1,0 +1,68 @@
+name: M2 UAT Review Pending UX
+
+on:
+  push:
+    branches:
+      - fix-m2-uat-review-pending-ux
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  review-pending-ux:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply one-shot source migration when needed
+        run: |
+          if grep -q 'QA REVIEW 是人工决策状态，不属于“生成中”' src/pages/TaskHistoryPage.tsx; then
+            echo 'M2 UAT review-pending UX already applied.'
+          else
+            python3 scripts/apply-m2-uat-review-pending-ux.py
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Focused UAT regression
+        run: npx vitest run src/__tests__/m2UatReviewPendingUx.test.ts
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
+
+      - name: Commit applied source migration
+        if: github.event_name == 'push'
+        run: |
+          if git diff --quiet -- src/pages/TaskHistoryPage.tsx; then
+            echo 'No source migration commit required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/pages/TaskHistoryPage.tsx
+          git commit -m 'fix(M2 UAT): surface QA REVIEW as actionable human review'
+          git push origin HEAD:${GITHUB_REF_NAME}
