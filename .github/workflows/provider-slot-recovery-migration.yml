@@ -31,7 +31,9 @@ jobs:
         run: npm install
 
       - name: Apply provider slot recovery migration
-        run: node scripts/apply_provider_slot_recovery_patch.mjs
+        run: |
+          node scripts/apply_provider_slot_recovery_patch.mjs
+          node scripts/refine_provider_operation_linkage.mjs
 
       - name: TypeScript gate
         run: npm run lint
@@ -54,5 +56,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add server.ts
-          git commit -m "feat: enforce provider-safe task deletion and recovery"
+          git commit -m "feat: enforce provider-safe task deletion and task-linked recovery"
           git push origin HEAD:core-provider-slot-recovery
