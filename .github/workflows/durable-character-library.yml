@@ -1,0 +1,52 @@
+name: Durable Character Library
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - core-durable-character-library
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  durable-character-library:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Durable authority contract gate
+        run: |
+          grep -q "durableCharacterService" server.ts
+          grep -q "storageAuthority: 'firestore'" server.ts
+          grep -q "artifactAuthority: 'gcs'" server.ts
+          grep -q "collectionName = 'characters'" src/server/repositories/firestoreCharacterRepository.ts
+          grep -q "characters/\${params.id}/masters/" src/server/services/durableCharacterService.ts
+          grep -q "One-time self-healing migration" src/repositories/characterRepository.ts
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
