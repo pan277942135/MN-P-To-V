@@ -67,13 +67,13 @@ jobs:
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/debug-store" -o store.json
           jq -e '.storageAuthority == "firestore"' store.json >/dev/null
 
-          TASK_ID="$(jq -r '[.tasks[] | select(.status == "failed") | select(((.error // "") | tostring | test("安全策略|RAI|rai|filtered|FILTERED")) or ((.failureReason // "") | tostring | test("rai|filtered"; "i")))] | sort_by(.createdAt) | reverse | .[0].id // empty' store.json)"
+          TASK_ID="$(jq -r '[.tasks[] | select(.status == "failed") | select(((.error // "") | tostring | test("安全策略|RAI|rai|filtered|FILTERED")))] | sort_by(.createdAt) | reverse | .[0].id // empty' store.json)"
           if [ -z "$TASK_ID" ]; then
             TASK_ID="$(jq -r '[.tasks[] | select(.status == "failed")] | sort_by(.createdAt) | reverse | .[0].id // empty' store.json)"
           fi
           test -n "$TASK_ID"
 
-          OPERATION_NAME="$(jq -r --arg id "$TASK_ID" '.tasks[] | select(.id == $id) | (.operationName // .externalOperationName // empty)' store.json)"
+          OPERATION_NAME="$(jq -r --arg id "$TASK_ID" '.tasks[] | select(.id == $id) | .operationName // empty' store.json)"
           CREATED_AT="$(jq -r --arg id "$TASK_ID" '.tasks[] | select(.id == $id) | .createdAt // 0' store.json)"
           echo "task_id=$TASK_ID" >> "$GITHUB_OUTPUT"
           echo "operation_name=$OPERATION_NAME" >> "$GITHUB_OUTPUT"
@@ -82,7 +82,19 @@ jobs:
           echo "task=$TASK_ID"
           echo "createdAt=$CREATED_AT"
           echo "operationNamePresent=$([ -n "$OPERATION_NAME" ] && echo true || echo false)"
-          jq --arg id "$TASK_ID" '.tasks[] | select(.id == $id) | {id,status,createdAt,updatedAt,operationName,externalOperationName,failureReason,retryMode,error,structuredError,raiStatus,raiMediaFilteredCount,raiMediaFilteredReasons,videoUri,outputUri,outputBucket,outputObjectPath}' store.json
+          jq --arg id "$TASK_ID" '.tasks[] | select(.id == $id)' store.json
+
+      - name: Read persisted RAI audit fields
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.service.outputs.url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+          TASK_ID: ${{ steps.task.outputs.task_id }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/audit" -o audit.json
+          jq -e '.storageAuthority == "firestore"' audit.json >/dev/null
+          jq --arg id "$TASK_ID" '.tasks[] | select(.taskId == $id) | {taskId,status,submissionState,upstreamHttpStatus,upstreamErrorCode,upstreamErrorMessage,raiMediaFilteredCount,raiStatus,artifactPersisted,outputBucket,outputObjectPath}' audit.json
 
       - name: Inspect submitted GCS prefix read-only
         shell: bash
@@ -105,27 +117,6 @@ jobs:
             echo 'REAL_MP4_PRESENT=unknown_or_false'
           fi
 
-      - name: Re-poll Vertex operation read-only
-        if: ${{ steps.task.outputs.operation_name != '' }}
-        shell: bash
-        env:
-          OPERATION_NAME: ${{ steps.task.outputs.operation_name }}
-        run: |
-          set -euo pipefail
-          TOKEN="$(gcloud auth print-access-token)"
-          ENDPOINT="https://$REGION-aiplatform.googleapis.com/v1/projects/$PROJECT_ID/locations/$REGION/publishers/google/models/veo-3.1-fast-generate-001:fetchPredictOperation"
-          HTTP="$(curl -sS -o operation.json -w '%{http_code}' -X POST \
-            -H "Authorization: Bearer $TOKEN" \
-            -H 'Content-Type: application/json' \
-            "$ENDPOINT" \
-            -d "$(jq -cn --arg n "$OPERATION_NAME" '{operationName:$n}')")"
-          echo "vertexHttp=$HTTP"
-          if [ "$HTTP" = "200" ]; then
-            jq '{name,done,error,response:{type:(.response["@type"] // null),raiMediaFilteredCount:(.response.raiMediaFilteredCount // null),raiMediaFilteredReasons:(.response.raiMediaFilteredReasons // []),videos:(.response.videos // [] | map({gcsUri,mimeType})),generatedSamples:(.response.generatedSamples // [] | map({gcsUri,uri,mimeType}))}}' operation.json
-          else
-            jq '{error:{code:.error.code,status:.error.status,message:.error.message}}' operation.json || true
-          fi
-
       - name: Summary
         shell: bash
         run: |
@@ -134,7 +125,7 @@ jobs:
             echo "- taskId: \`${{ steps.task.outputs.task_id }}\`"
             echo "- createdAt: \`${{ steps.task.outputs.created_at }}\`"
             echo "- operationName present: $([ -n '${{ steps.task.outputs.operation_name }}' ] && echo yes || echo no)"
-            echo '- Vertex operation was queried read-only.'
+            echo '- Firestore/audit/GCS reads only.'
             echo '- No Veo generation was invoked.'
             echo '- No Firestore task state was mutated.'
           } >> "$GITHUB_STEP_SUMMARY"
