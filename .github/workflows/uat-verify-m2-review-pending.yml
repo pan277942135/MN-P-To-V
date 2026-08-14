@@ -1,0 +1,175 @@
+name: UAT Verify M2 Review Pending
+
+on:
+  push:
+    branches:
+      - uat-verify-m2-review-pending
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  SOURCE_SHA: 2353afd2fed5e54394310d28148308bde4ff7920
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  GAR_REPO: zaojing
+  SERVICE: zaojing-m2-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+  VEO_MODEL_ID: veo-3.1-fast-generate-001
+  FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+
+jobs:
+  deploy-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout exact merged M2 source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Build and push immutable UAT image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$SERVICE:$SOURCE_SHA"
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy private Cloud Run UAT
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE='${{ steps.image.outputs.image }}'
+          gcloud run deploy "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --platform=managed \
+            --image="$IMAGE" \
+            --service-account="$RUNTIME_SA" \
+            --no-allow-unauthenticated \
+            --cpu=1 \
+            --memory=2Gi \
+            --timeout=900 \
+            --concurrency=1 \
+            --min-instances=0 \
+            --max-instances=2 \
+            --set-env-vars="NODE_ENV=production,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_MODEL_ID=$VEO_MODEL_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID" \
+            --quiet
+
+          gcloud run services add-iam-policy-binding "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --member="serviceAccount:$DEPLOY_SA" \
+            --role="roles/run.invoker" \
+            --quiet >/dev/null
+
+          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          IMAGE_LIVE="$(gcloud run revisions describe "$REVISION" --project="$PROJECT_ID" --region="$REGION" --format='value(spec.containers[0].image)')"
+          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+          echo "image_live=$IMAGE_LIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Mint Cloud Run ID token
+        uses: google-github-actions/auth@v3
+        id: invoke_auth
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.deploy.outputs.service_url }}
+          id_token_include_email: true
+
+      - name: Verify deployed revision and health
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+          REVISION: ${{ steps.deploy.outputs.revision }}
+          IMAGE_LIVE: ${{ steps.deploy.outputs.image_live }}
+        run: |
+          set -euo pipefail
+          echo "revision=$REVISION"
+          echo "image=$IMAGE_LIVE"
+          [[ "$IMAGE_LIVE" == *":$SOURCE_SHA" ]]
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/health" | tee health.json
+          jq -e . health.json >/dev/null
+
+      - name: Verify live frontend bundle contains REVIEW UX
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/" -o index.html
+          ASSET_PATH="$(grep -oE 'src="/[^"]+\.js"' index.html | head -n1 | cut -d'"' -f2)"
+          test -n "$ASSET_PATH"
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL$ASSET_PATH" -o app.js
+          grep -Fq '待审核' app.js
+          grep -Fq '进入人工审核' app.js
+          grep -Fq '视频身份质检需要人工复核' app.js
+          echo "Live frontend REVIEW UX strings verified in $ASSET_PATH"
+
+      - name: Verify existing qa_pending REVIEW task read-only
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/list?limit=50" -o tasks.json
+          jq -e '.storageAuthority == "firestore"' tasks.json >/dev/null
+          QA_TASK_ID="$(jq -r '[.tasks[] | select(.status == "qa_pending")][0].taskId // empty' tasks.json)"
+          if [ -z "$QA_TASK_ID" ]; then
+            echo 'No current qa_pending task found; deployed frontend and health checks remain authoritative for this run.'
+            exit 0
+          fi
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/status/$QA_TASK_ID" -o status.json
+          cat status.json
+          jq -e '.status == "qa_pending"' status.json >/dev/null
+          jq -e '.identityQaStatus == "review"' status.json >/dev/null
+          jq -e '.requiresManualApproval == true' status.json >/dev/null
+          jq -e '.reviewActions | index("accepted") and index("rejected")' status.json >/dev/null
+          echo "Read-only REVIEW state verified for task $QA_TASK_ID"
+
+      - name: Publish UAT verification summary
+        shell: bash
+        run: |
+          {
+            echo '## M2 REVIEW UAT deployment verified'
+            echo ''
+            echo "- Source commit: \`$SOURCE_SHA\`"
+            echo "- Cloud Run service: \`$SERVICE\`"
+            echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
+            echo "- Service URL: ${{ steps.deploy.outputs.service_url }}"
+            echo '- Health: PASS'
+            echo '- Live frontend REVIEW UX bundle: PASS'
+            echo '- Firestore/list access: PASS'
+            echo '- No Veo generation invoked by this workflow'
+            echo '- No human review decision mutated by this workflow'
+          } >> "$GITHUB_STEP_SUMMARY"
