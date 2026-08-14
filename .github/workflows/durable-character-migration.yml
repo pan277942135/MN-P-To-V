@@ -30,6 +30,25 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Normalize Veo character lookup anchor
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('server.ts')
+          source = path.read_text()
+          legacy = "      const storedChar = characterId ? serverCharacterStore.get(characterId) : undefined;"
+          normalized = "      const storedChar = serverCharacterStore.get(characterId);"
+          if legacy in source:
+              path.write_text(source.replace(legacy, normalized, 1))
+              print('normalized Veo start character lookup')
+          elif 'durableCharacterService.getHydrated(characterId)' in source:
+              print('durable lookup already applied')
+          elif source.count(normalized) >= 2:
+              print('lookup anchors already normalized')
+          else:
+              raise SystemExit('expected Veo start character lookup anchor not found')
+          PY
+
       - name: Apply durable character route migration
         run: node scripts/apply_durable_character_patch_v2.mjs
 
