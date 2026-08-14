@@ -1,0 +1,98 @@
+name: Diagnose task_71f Identity Gate
+
+on:
+  push:
+    branches:
+      - diag-task-71f-identity
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  SERVICE: zaojing-m2-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Resolve UAT URL
+        id: service
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Mint UAT ID token
+        id: invoke_auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.service.outputs.url }}
+          id_token_include_email: true
+
+      - name: Read task_71f identity evidence
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.service.outputs.url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/debug-store" -o store.json
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/audit" -o audit.json
+          jq -e '.storageAuthority == "firestore"' store.json >/dev/null
+          jq -e '.storageAuthority == "firestore"' audit.json >/dev/null
+
+          TASK_ID="$(jq -r '[.tasks[] | select((.id // "") | startswith("task_71f"))] | sort_by(.createdAt) | reverse | .[0].id // empty' store.json)"
+          if [ -z "$TASK_ID" ]; then
+            echo 'No task starting with task_71f found.' >&2
+            jq -r '[.tasks[] | select(.status == "failed")] | sort_by(.createdAt) | reverse | .[:10][] | [.id,.createdAt,.error] | @tsv' store.json
+            exit 1
+          fi
+          echo "TASK_ID=$TASK_ID"
+          echo '--- CORE TASK ---'
+          jq --arg id "$TASK_ID" '.tasks[] | select(.id == $id) | {id,status,characterId,sceneMode,createdAt,updatedAt,operationName,error,failureReason,retryMode,identityQaStatus,firstFrameQaStatus,identityQaReport,firstFrameQaReport,qaReport,identityScore,firstFrameIdentityScore,identityThreshold,identityDecision,progressStage}' store.json
+
+          echo '--- MATCHING SCALAR EVIDENCE ---'
+          jq -r --arg id "$TASK_ID" '
+            .tasks[] | select(.id == $id) |
+            paths(scalars) as $p |
+            ($p | map(tostring) | join(".")) as $k |
+            select($k | test("identity|score|threshold|qa|master|character|failure|retry|scene|status|operation|decision|reference"; "i")) |
+            "\($k)=\(getpath($p))"
+          ' store.json
+
+          echo '--- AUDIT ---'
+          jq --arg id "$TASK_ID" '.tasks[] | select(.taskId == $id)' audit.json
+
+          {
+            echo '## task_71f identity diagnostic'
+            echo "- taskId: \`$TASK_ID\`"
+            echo '- Read-only Firestore/API inspection only.'
+            echo '- No Veo generation invoked.'
+            echo '- No task mutation performed.'
+          } >> "$GITHUB_STEP_SUMMARY"
