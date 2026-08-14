@@ -208,6 +208,13 @@ const isTaskHumanReviewState = (task?: GenerationTask | null): boolean => {
   );
 };
 
+const isTaskInputRewriteRequired = (task?: GenerationTask | null): boolean => {
+  if (!task) return false;
+  const failureReason = (task as any).failureReason;
+  const retryMode = (task as any).retryMode;
+  return failureReason === 'output_rai_filtered' || retryMode === 'REWRITE_INPUT_THEN_REGENERATE';
+};
+
 const getVideoUrl = (task?: GenerationTask | null): string | null => {
   if (!task) return null;
   if (isTaskFailedState(task)) return null;
@@ -395,6 +402,15 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
               await taskRepository.save(t);
             } else if (data.status === 'failed') {
               t.status = 'failed';
+              (t as any).failureReason = data.failureReason || (t as any).failureReason;
+              (t as any).retryMode = data.retryMode || (t as any).retryMode;
+              (t as any).raiStatus = data.raiStatus || (t as any).raiStatus;
+              if (data.raiMediaFilteredCount !== undefined && data.raiMediaFilteredCount !== null) {
+                (t as any).raiMediaFilteredCount = data.raiMediaFilteredCount;
+              }
+              if (Array.isArray(data.raiMediaFilteredReasons)) {
+                (t as any).raiMediaFilteredReasons = data.raiMediaFilteredReasons;
+              }
               t.progressStage = '视频生成失败';
               const errStr = typeof data.error === 'string'
                 ? data.error
@@ -487,6 +503,13 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
     onNavigateToStudio?.();
   };
 
+  const handleOpenInputRewrite = (task: GenerationTask) => {
+    if (!task?.id) return;
+    sessionStorage.setItem('zaojing_bring_task_id', task.id);
+    setSelectedTask(null);
+    onNavigateToStudio?.();
+  };
+
   const handleClearFailedTasks = async () => {
     if (failedTaskCount === 0) return;
     if (confirm(`确认批量清空所有已失败或卡死的任务 (${failedTaskCount} 个)，并清理云端后台渲染进程？`)) {
@@ -503,6 +526,10 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
   const handleRetryTask = async (task: GenerationTask) => {
     if (!task || !task.id) {
       alert('未选定有效任务 ID，无法重试');
+      return;
+    }
+    if (isTaskInputRewriteRequired(task)) {
+      alert('该任务已被 Google Veo 安全过滤。原样一键重试已禁用，请返回创作工作台修改提示词或更换图片后重新生成。');
       return;
     }
     setIsRetryingTaskId(task.id);
@@ -559,7 +586,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
         }
       }
 
-      if (!isNotSubmitted && task.retryMode !== 'SAFE_TO_REGENERATE' && task.retryMode !== 'REWRITE_INPUT_THEN_REGENERATE') {
+      if (!isNotSubmitted && task.retryMode !== 'SAFE_TO_REGENERATE') {
         alert('当前无法确认云端提交结果，请勿重复提交。请稍后继续查询。');
         return;
       }
@@ -711,6 +738,15 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
         await loadTasks();
       } else if (data.status === 'failed') {
         task.status = 'failed';
+        (task as any).failureReason = data.failureReason || (task as any).failureReason;
+        (task as any).retryMode = data.retryMode || (task as any).retryMode;
+        (task as any).raiStatus = data.raiStatus || (task as any).raiStatus;
+        if (data.raiMediaFilteredCount !== undefined && data.raiMediaFilteredCount !== null) {
+          (task as any).raiMediaFilteredCount = data.raiMediaFilteredCount;
+        }
+        if (Array.isArray(data.raiMediaFilteredReasons)) {
+          (task as any).raiMediaFilteredReasons = data.raiMediaFilteredReasons;
+        }
         const errStr = typeof data.error === 'string'
           ? data.error
           : (data.error?.message ? String(data.error.message) : (data.error ? JSON.stringify(data.error) : '视频生成失败'));
@@ -970,6 +1006,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
 
                     {isTaskFailedState(task) && task.status !== 'orphaned_local_task' && (() => {
                       const failInfo = getExplicitTaskFailureReason(task);
+                      const requiresInputRewrite = isTaskInputRewriteRequired(task);
                       return (
                         <div className="mt-2.5 p-3 bg-rose-950/60 border border-rose-800/80 rounded-lg text-xs space-y-2.5">
                           <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2.5">
@@ -990,17 +1027,31 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
                               </div>
                             </div>
                             <div className="flex items-center gap-2 shrink-0 pt-1 sm:pt-0 self-end sm:self-auto w-full sm:w-auto justify-end">
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleRetryTask(task);
-                                }}
-                                disabled={isRetryingTaskId === task.id}
-                                className="px-3 py-1.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs flex items-center gap-1 shadow transition disabled:opacity-50 shrink-0 cursor-pointer"
-                              >
-                                <RefreshCw className={`w-3.5 h-3.5 ${isRetryingTaskId === task.id ? 'animate-spin' : ''}`} />
-                                一键重试
-                              </button>
+                              {requiresInputRewrite ? (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleOpenInputRewrite(task);
+                                  }}
+                                  className="px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs flex items-center gap-1 shadow transition shrink-0 cursor-pointer"
+                                  title="安全过滤任务必须先修改提示词或图片；不会从任务记录原样重新提交 Veo"
+                                >
+                                  <ExternalLink className="w-3.5 h-3.5" />
+                                  返回工作台调整输入
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRetryTask(task);
+                                  }}
+                                  disabled={isRetryingTaskId === task.id}
+                                  className="px-3 py-1.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs flex items-center gap-1 shadow transition disabled:opacity-50 shrink-0 cursor-pointer"
+                                >
+                                  <RefreshCw className={`w-3.5 h-3.5 ${isRetryingTaskId === task.id ? 'animate-spin' : ''}`} />
+                                  一键重试
+                                </button>
+                              )}
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
