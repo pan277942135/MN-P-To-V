@@ -1,0 +1,136 @@
+name: Diagnose 48-byte Video Artifact
+
+on:
+  push:
+    branches:
+      - uat-verify-m2-review-pending
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  SERVICE: zaojing-m2-uat
+  BUCKET: ai-studio-bucket-89614354864-asia-south1
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Resolve private UAT URL
+        id: service
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Mint UAT ID token
+        id: invoke_auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.service.outputs.url }}
+          id_token_include_email: true
+
+      - name: Locate latest sizeBytes=48 failure
+        id: task
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.service.outputs.url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/debug-store" -o store.json
+          jq -e '.storageAuthority == "firestore"' store.json >/dev/null
+          TASK_ID="$(jq -r '[.tasks[] | select(.status == "failed" and ((.error // "") | contains("sizeBytes=48")))] | sort_by(.createdAt) | reverse | .[0].id // empty' store.json)"
+          if [ -z "$TASK_ID" ]; then
+            TASK_ID="$(jq -r '[.tasks[] | select(.status == "failed")] | sort_by(.createdAt) | reverse | .[0].id // empty' store.json)"
+          fi
+          test -n "$TASK_ID"
+          OPERATION_NAME="$(jq -r --arg id "$TASK_ID" '.tasks[] | select(.id == $id) | .operationName // empty' store.json)"
+          ERROR_TEXT="$(jq -r --arg id "$TASK_ID" '.tasks[] | select(.id == $id) | .error // empty' store.json)"
+          CREATED_AT="$(jq -r --arg id "$TASK_ID" '.tasks[] | select(.id == $id) | .createdAt // 0' store.json)"
+          echo "task_id=$TASK_ID" >> "$GITHUB_OUTPUT"
+          echo "operation_name=$OPERATION_NAME" >> "$GITHUB_OUTPUT"
+          echo "created_at=$CREATED_AT" >> "$GITHUB_OUTPUT"
+          echo "task=$TASK_ID"
+          echo "createdAt=$CREATED_AT"
+          echo "operationNamePresent=$([ -n "$OPERATION_NAME" ] && echo true || echo false)"
+          echo "error=$ERROR_TEXT"
+
+      - name: Inspect submitted GCS prefix read-only
+        shell: bash
+        env:
+          TASK_ID: ${{ steps.task.outputs.task_id }}
+        run: |
+          set -euo pipefail
+          PREFIX="gs://$BUCKET/veo/$TASK_ID/"
+          echo "prefix=$PREFIX"
+          set +e
+          gcloud storage ls --long --recursive "${PREFIX}**" 2>&1 | tee gcs-ls.txt
+          RC=${PIPESTATUS[0]}
+          set -e
+          if [ "$RC" -ne 0 ]; then
+            echo "GCS listing unavailable to deploy principal (diagnostic only); continuing."
+          fi
+          if grep -Eq '[[:space:]][1-9][0-9]{3,}[[:space:]].*\.mp4' gcs-ls.txt; then
+            echo 'REAL_MP4_PRESENT=true'
+          else
+            echo 'REAL_MP4_PRESENT=unknown_or_false'
+          fi
+
+      - name: Re-poll Vertex operation read-only when permitted
+        if: ${{ steps.task.outputs.operation_name != '' }}
+        shell: bash
+        env:
+          OPERATION_NAME: ${{ steps.task.outputs.operation_name }}
+        run: |
+          set -euo pipefail
+          TOKEN="$(gcloud auth print-access-token)"
+          ENDPOINT="https://$REGION-aiplatform.googleapis.com/v1/projects/$PROJECT_ID/locations/$REGION/publishers/google/models/veo-3.1-fast-generate-001:fetchPredictOperation"
+          HTTP="$(curl -sS -o operation.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            "$ENDPOINT" \
+            -d "$(jq -cn --arg n "$OPERATION_NAME" '{operationName:$n}')")"
+          echo "vertexHttp=$HTTP"
+          if [ "$HTTP" = "200" ]; then
+            jq '{done, responseKeys:(.response|keys // []), videos:(.response.videos // [] | map({gcsUri,mimeType})), generatedSamples:(.response.generatedSamples // [] | map({gcsUri,video,uri,mimeType})), raiMediaFilteredCount:(.response.raiMediaFilteredCount // null)}' operation.json
+          else
+            jq '{error:{code:.error.code,status:.error.status,message:.error.message}}' operation.json || true
+          fi
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo '## 48-byte artifact diagnostic'
+            echo "- taskId: \`${{ steps.task.outputs.task_id }}\`"
+            echo "- operationName present: $([ -n '${{ steps.task.outputs.operation_name }}' ] && echo yes || echo no)"
+            echo '- No Veo generation was invoked.'
+            echo '- No Firestore task state was mutated.'
+          } >> "$GITHUB_STEP_SUMMARY"
