@@ -58,6 +58,7 @@ const classifyRecoveryResult = (status: number, payload: any): RecoveryResult =>
 export const ProviderOperationRecoveryCard: React.FC<ProviderOperationRecoveryCardProps> = ({ taskId, onRecovered }) => {
   const [operationName, setOperationName] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [scanningGcs, setScanningGcs] = useState(false);
   const [result, setResult] = useState<RecoveryResult | null>(null);
 
   const normalized = operationName.trim();
@@ -67,6 +68,56 @@ export const ProviderOperationRecoveryCard: React.FC<ProviderOperationRecoveryCa
     !/\s/.test(normalized) &&
     /(^|\/)operations\/[^/]+$/.test(normalized)
   ), [normalized]);
+
+  const scanTaskGcs = async () => {
+    if (scanningGcs || submitting) return;
+    setScanningGcs(true);
+    setResult(null);
+    try {
+      const connectionId = localStorage.getItem('zaojing_connection_id') || '';
+      const response = await fetch(`/api/videos/recover/${encodeURIComponent(taskId)}`, {
+        method: 'POST',
+        headers: {
+          ...(connectionId ? { 'x-connection-id': connectionId } : {}),
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (response.ok && payload?.success && payload?.recoveredBy === 'task_gcs_prefix' && payload?.providerTaskLinked) {
+        setResult({
+          tone: 'success',
+          title: '已从任务专属 GCS 找回原视频',
+          detail: payload?.message || '已找回原 Provider 产物并进入身份质检，没有发起新的 Veo 生成。',
+        });
+        await onRecovered?.();
+      } else if (payload?.failureReason === 'task_gcs_artifact_not_found') {
+        setResult({
+          tone: 'warning',
+          title: '暂未发现任务视频产物',
+          detail: payload?.error || '任务保持锁定。可稍后再次检查，或在下方使用完整 Operation Name 核实。',
+        });
+      } else if (payload?.failureReason === 'task_gcs_artifact_ambiguous') {
+        setResult({
+          tone: 'warning',
+          title: '发现多个候选视频，未自动解除锁定',
+          detail: payload?.error || '为避免误绑定，系统拒绝自动选择候选产物。',
+        });
+      } else {
+        setResult({
+          tone: 'error',
+          title: 'GCS 安全恢复未完成',
+          detail: payload?.error || `任务专属 GCS 检查失败 (HTTP ${response.status})。当前任务继续锁定。`,
+        });
+      }
+    } catch (err: any) {
+      setResult({
+        tone: 'error',
+        title: '无法检查任务 GCS 产物',
+        detail: err?.message || String(err),
+      });
+    } finally {
+      setScanningGcs(false);
+    }
+  };
 
   const recover = async () => {
     if (!looksValid || submitting) return;
@@ -109,6 +160,22 @@ export const ProviderOperationRecoveryCard: React.FC<ProviderOperationRecoveryCa
             服务器未能确认最初提交是否已被 Veo 接收。为避免重复扣费，本任务不能删除或重新生成。只有核实到属于本 taskId 的原 Provider Operation 后，才能恢复原任务轮询。
           </p>
         </div>
+      </div>
+
+      <div className="rounded-xl border border-emerald-900/70 bg-emerald-950/20 p-3 space-y-2">
+        <div className="text-xs font-semibold text-emerald-200">优先自动恢复 · 不需要 Operation Name</div>
+        <div className="text-[11px] text-emerald-200/70 leading-relaxed">
+          系统只读检查本次 Provider 尝试对应的 task 专属 GCS 前缀。只有找到唯一有效 MP4（或已写入的 canonical video.mp4）才会恢复；不会重新提交 Veo。
+        </div>
+        <button
+          type="button"
+          onClick={scanTaskGcs}
+          disabled={scanningGcs || submitting}
+          className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-700 bg-emerald-950/60 px-4 py-2.5 text-sm font-semibold text-emerald-100 hover:bg-emerald-900/60 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {scanningGcs ? <Loader2 className="w-4 h-4 animate-spin" /> : <ClipboardCheck className="w-4 h-4" />}
+          {scanningGcs ? '正在检查任务 GCS…' : '自动检查并找回原视频'}
+        </button>
       </div>
 
       <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-3 space-y-2">

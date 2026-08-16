@@ -3430,6 +3430,83 @@ ${cleanPrompt}`
         });
       }
 
+      // 0. submission_outcome_unknown can lose operationName even when Veo accepted the
+      // request. Because every submission uses an exact task/attempt-specific storageUri,
+      // a valid MP4 already present under that prefix is sufficient task-linkage evidence.
+      // This path only lists/downloads GCS; it never calls predictLongRunning.
+      if (rec.status === 'submission_outcome_unknown' && !rec.outputObjectPath) {
+        const requestedConnectionId = req.headers['x-connection-id'] as string;
+        const recoverySession =
+          CredentialService.getSession(requestedConnectionId || rec.connectionId) ||
+          CredentialService.getSession(rec.connectionId) ||
+          CredentialService.getSession();
+        const providerAttempt = Math.max(1, Number(rec.providerAttempt) || 1);
+        const recoveryTaskKey = DurableVideoRetryService.getAttemptTaskKey(taskId, providerAttempt);
+        const discovery = await gcsArtifactStore.discoverTaskPrefixVideo({
+          taskKey: recoveryTaskKey,
+          session: recoverySession,
+        });
+
+        if (discovery.status === 'ambiguous') {
+          return res.status(409).json({
+            success: false,
+            providerTaskLinked: false,
+            failureReason: 'task_gcs_artifact_ambiguous',
+            status: 'submission_outcome_unknown',
+            expectedStoragePrefix: discovery.expectedStoragePrefix,
+            candidateCount: discovery.candidates.length,
+            predictLongRunningCalls: 0,
+            error: '任务专属 GCS 前缀下发现多个有效视频，无法安全判断本次 Provider 尝试对应哪一个产物；任务继续锁定。',
+            storageAuthority: 'firestore',
+          });
+        }
+
+        if (discovery.status === 'found' && discovery.artifact && discovery.videoBuffer) {
+          ephemeralVideoStore.set(taskId, discovery.videoBuffer);
+          const recoveredTask = await taskStateMachineService.persistArtifactForQa({
+            taskId,
+            outputBucket: discovery.artifact.outputBucket,
+            outputObjectPath: discovery.artifact.outputObjectPath,
+            videoUri: discovery.artifact.videoUri,
+            sizeBytes: discovery.artifact.sizeBytes,
+            contentType: discovery.artifact.contentType,
+            artifactPersistedAt: discovery.artifact.artifactPersistedAt,
+            patch: {
+              failureReason: null as any,
+              retryMode: 'NO_RETRY',
+              error: '',
+              structuredError: null as any,
+            },
+          });
+          serverVideoTaskStore.set(taskId, recoveredTask);
+          return res.json({
+            success: true,
+            status: recoveredTask.status,
+            recoveredBy: 'task_gcs_prefix',
+            providerTaskLinked: true,
+            providerAttempt,
+            expectedStoragePrefix: discovery.expectedStoragePrefix,
+            videoDataUrl: `/api/videos/stream/${taskId}`,
+            predictLongRunningCalls: 0,
+            message: '已从本次 Provider 尝试专属 GCS 前缀找回有效视频，并进入身份质检；未发起新的 Veo 生成。',
+            storageAuthority: 'gcs',
+          });
+        }
+
+        if (!rec.operationName && !rec.videoUri) {
+          return res.status(404).json({
+            success: false,
+            providerTaskLinked: false,
+            failureReason: 'task_gcs_artifact_not_found',
+            status: 'submission_outcome_unknown',
+            expectedStoragePrefix: discovery.expectedStoragePrefix,
+            predictLongRunningCalls: 0,
+            error: '本次 Provider 尝试的专属 GCS 前缀暂未发现有效视频。任务继续锁定，可稍后再次自动检查或使用 Operation Name 核实。',
+            storageAuthority: 'gcs',
+          });
+        }
+      }
+
       // 1. Reconcile an already-owned GCS object without resubmitting the provider.
       if (rec.outputBucket && rec.outputObjectPath) {
         const existing = await gcsArtifactStore.checkArtifactExists(rec.outputBucket, rec.outputObjectPath);
