@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  apply-and-verify:
+  refine-and-verify:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     env:
@@ -31,12 +31,9 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Apply retry Provider authorization patch
+      - name: Move retry preparation before Provider authorization
         run: |
-          node scripts/disable_retry_stale_anchor.mjs
-          node scripts/apply_retry_provider_authorization_patch.mjs
-          node scripts/apply_retry_stale_server_patch.mjs
-          node scripts/fix_retry_authorization_types.mjs
+          node scripts/refine_retry_prepare_before_authorization.mjs
           rm -f scripts/refine_retry_provider_authorization_patch.mjs
 
       - name: TypeScript gate
@@ -51,21 +48,18 @@ jobs:
       - name: Diff integrity
         run: git diff --check
 
-      - name: Persist verified product changes
+      - name: Persist verified product refinement
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
             server.ts \
-            src/types/index.ts \
-            src/server/services/taskStateMachineService.ts \
             src/server/services/durableVideoRetryService.ts \
             src/__tests__/m24DurableRetryReservation.test.ts \
-            src/__tests__/m24RetryOutcomeUnknown.test.ts \
             src/__tests__/retryProviderAuthorizationBoundarySourceContract.test.ts
           if git diff --cached --quiet; then
-            echo "No product changes to persist"
+            echo "No product refinement to persist"
           else
-            git commit -m "feat: add durable Provider authorization boundary to automatic retry"
+            git commit -m "fix: complete retry preparation before Provider authorization"
             git push origin HEAD:core-retry-provider-authorization-boundary
           fi
