@@ -50,7 +50,7 @@ const ALLOWED_TRANSITIONS: Record<string, TaskStatus[]> = {
   artifact_persist_failed: ['artifact_persisting', 'failed', 'cancelled', 'canceled'],
   artifact_persisted: ['qa_pending', 'failed'],
   qa_pending: ['completed', 'generating', 'failed', 'cancelled', 'canceled'],
-  submission_outcome_unknown: ['polling', 'failed', 'cancelled', 'canceled'],
+  submission_outcome_unknown: ['polling', 'generation_succeeded', 'failed', 'cancelled', 'canceled'],
   completed: [],
   failed: [],
   cancelled: [],
@@ -639,6 +639,14 @@ export class TaskStateMachineService {
     if (task.status === 'created') task = await advance('preparing');
     if (task.status === 'preparing' || task.status === 'submitting' || task.status === 'submitted') {
       task = await advance('generating');
+    }
+    if (task.status === 'submission_outcome_unknown') {
+      task = await advance('generation_succeeded', {
+        failureReason: null as any,
+        retryMode: 'NO_RETRY',
+        error: '',
+        structuredError: null as any,
+      });
     }
     if (task.status === 'polling_timeout') task = await advance('polling');
     if (task.status === 'generating' || task.status === 'polling') {

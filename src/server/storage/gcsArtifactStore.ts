@@ -191,6 +191,24 @@ export interface ArtifactMetadata {
   artifactPersistedAt: number;
 }
 
+export type TaskPrefixVideoDiscoveryStatus = 'found' | 'not_found' | 'ambiguous';
+
+export interface TaskPrefixVideoCandidate {
+  outputObjectPath: string;
+  videoUri: string;
+  sizeBytes: number;
+  contentType: string;
+  updatedAt?: string;
+}
+
+export interface TaskPrefixVideoDiscoveryResult {
+  status: TaskPrefixVideoDiscoveryStatus;
+  expectedStoragePrefix: string;
+  candidates: TaskPrefixVideoCandidate[];
+  artifact?: ArtifactMetadata;
+  videoBuffer?: Buffer;
+}
+
 export class GcsArtifactStore {
   private mockStore = new Map<string, { buffer: Buffer; contentType: string }>();
   public useMock = false;
@@ -405,6 +423,165 @@ export class GcsArtifactStore {
       contentType: 'video/mp4',
       artifactPersisted: true,
       artifactPersistedAt: Date.now(),
+    };
+  }
+
+  private async fetchExactArtifactBuffer(
+    bucketName: string,
+    objectPath: string,
+    options?: { session?: any }
+  ): Promise<Buffer> {
+    const exactMockKey = `${bucketName}/${objectPath}`;
+    if (this.mockStore.has(exactMockKey)) {
+      return this.mockStore.get(exactMockKey)!.buffer;
+    }
+    if (this.useMock || process.env.NODE_ENV === 'test') {
+      throw new Error(`[GcsArtifactStore Mock] Exact artifact gs://${bucketName}/${objectPath} not found.`);
+    }
+
+    const clients = await getStorageClientsForSessions({ session: options?.session });
+    let lastError: any = null;
+    for (const storage of clients) {
+      try {
+        const [bytes] = await storage.bucket(bucketName).file(objectPath).download();
+        const buffer = Buffer.from(bytes);
+        if (buffer.length > 0) return buffer;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw new Error(
+      `[GcsArtifactStore] Exact artifact download failed for gs://${bucketName}/${objectPath}: ${sanitizeGcsError(String(lastError?.message || lastError || 'no usable storage client'))}`
+    );
+  }
+
+  public async discoverTaskPrefixVideo(params: {
+    taskKey: string;
+    session?: any;
+  }): Promise<TaskPrefixVideoDiscoveryResult> {
+    const rawTaskKey = String(params.taskKey || '').trim().replace(/^\/+|\/+$/g, '');
+    if (!rawTaskKey || rawTaskKey.includes('..') || rawTaskKey.includes('\\') || rawTaskKey.includes('//')) {
+      throw new Error('[GcsArtifactStore] Invalid taskKey for task-prefix recovery.');
+    }
+
+    const storageConfig = assertProductionStorageConfig();
+    if (!storageConfig.valid) {
+      throw new Error(`[GcsArtifactStore Guard Error] ${storageConfig.error}`);
+    }
+
+    const bucketName = storageConfig.effectiveBucket;
+    const prefix = `veo/${rawTaskKey}/`;
+    const expectedStoragePrefix = `gs://${bucketName}/${prefix}`;
+    const candidatesByPath = new Map<string, TaskPrefixVideoCandidate>();
+
+    const addCandidate = (objectPath: string, sizeBytes: number, contentType = '', updatedAt?: string) => {
+      if (!objectPath.startsWith(prefix)) return;
+      if (objectPath.includes('/qa/')) return;
+      const isMp4 = objectPath.toLowerCase().endsWith('.mp4') || contentType.toLowerCase().includes('video/mp4');
+      if (!isMp4 || !Number.isFinite(sizeBytes) || sizeBytes < 1000) return;
+      candidatesByPath.set(objectPath, {
+        outputObjectPath: objectPath,
+        videoUri: `gs://${bucketName}/${objectPath}`,
+        sizeBytes,
+        contentType: contentType || 'video/mp4',
+        updatedAt,
+      });
+    };
+
+    if (this.useMock || process.env.NODE_ENV === 'test') {
+      const bucketPrefix = `${bucketName}/`;
+      for (const [key, item] of this.mockStore.entries()) {
+        if (!key.startsWith(bucketPrefix)) continue;
+        const objectPath = key.slice(bucketPrefix.length);
+        addCandidate(objectPath, item.buffer.length, item.contentType);
+      }
+    } else {
+      const clients = await getStorageClientsForSessions({ session: params.session });
+      let listingSucceeded = false;
+      let lastError: any = null;
+
+      for (const storage of clients) {
+        try {
+          const [files] = await storage.bucket(bucketName).getFiles({ prefix });
+          listingSucceeded = true;
+          for (const file of files) {
+            let metadata: any = (file as any).metadata || {};
+            if (!metadata.size || !metadata.contentType || !metadata.updated) {
+              try {
+                [metadata] = await file.getMetadata();
+              } catch {}
+            }
+            addCandidate(
+              file.name,
+              Number(metadata?.size || 0),
+              String(metadata?.contentType || ''),
+              metadata?.updated ? String(metadata.updated) : undefined
+            );
+          }
+          break;
+        } catch (err) {
+          lastError = err;
+        }
+      }
+
+      if (!listingSucceeded) {
+        throw new Error(`[GcsArtifactStore] Unable to list task-prefix objects for ${expectedStoragePrefix}: ${sanitizeGcsError(String(lastError?.message || lastError || 'no usable storage client'))}`);
+      }
+    }
+
+    const candidates = Array.from(candidatesByPath.values()).sort((a, b) => a.outputObjectPath.localeCompare(b.outputObjectPath));
+    if (candidates.length === 0) {
+      return { status: 'not_found', expectedStoragePrefix, candidates: [] };
+    }
+
+    const valid: Array<{ candidate: TaskPrefixVideoCandidate; buffer: Buffer }> = [];
+    for (const candidate of candidates) {
+      try {
+        // Recovery evidence must be the exact object returned by the exact task/attempt
+        // prefix listing. The general artifact fetcher intentionally has historical
+        // fallback paths, so it is forbidden here.
+        const buffer = await this.fetchExactArtifactBuffer(bucketName, candidate.outputObjectPath, { session: params.session });
+        if (buffer.length >= 1000 && VideoGenerator.isMp4Valid(buffer)) {
+          valid.push({ candidate, buffer });
+        }
+      } catch {}
+    }
+
+    if (valid.length === 0) {
+      return { status: 'not_found', expectedStoragePrefix, candidates };
+    }
+
+    // If the app already managed to write its canonical video.mp4 before crashing, that
+    // object is stronger evidence than additional Provider files under the same prefix.
+    const canonicalPath = `${prefix}video.mp4`;
+    const canonical = valid.find((entry) => entry.candidate.outputObjectPath === canonicalPath);
+    const selected = canonical || (valid.length === 1 ? valid[0] : null);
+
+    if (!selected) {
+      return {
+        status: 'ambiguous',
+        expectedStoragePrefix,
+        candidates: valid.map((entry) => entry.candidate),
+      };
+    }
+
+    const persistedAt = selected.candidate.updatedAt
+      ? Date.parse(selected.candidate.updatedAt) || Date.now()
+      : Date.now();
+    return {
+      status: 'found',
+      expectedStoragePrefix,
+      candidates: valid.map((entry) => entry.candidate),
+      artifact: {
+        outputBucket: bucketName,
+        outputObjectPath: selected.candidate.outputObjectPath,
+        videoUri: selected.candidate.videoUri,
+        sizeBytes: selected.buffer.length,
+        contentType: selected.candidate.contentType || 'video/mp4',
+        artifactPersisted: true,
+        artifactPersistedAt: persistedAt,
+      },
+      videoBuffer: selected.buffer,
     };
   }
 

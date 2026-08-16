@@ -1,0 +1,69 @@
+name: GCS Unknown Recovery Safety
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - core-gcs-unknown-recovery
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  gcs-unknown-recovery:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: GCS unknown recovery contract gate
+        run: |
+          grep -q "discoverTaskPrefixVideo" src/server/storage/gcsArtifactStore.ts
+          grep -q "getFiles({ prefix })" src/server/storage/gcsArtifactStore.ts
+          grep -q "fetchExactArtifactBuffer" src/server/storage/gcsArtifactStore.ts
+          grep -q "file(objectPath).download()" src/server/storage/gcsArtifactStore.ts
+          grep -q "objectPath.includes('/qa/')" src/server/storage/gcsArtifactStore.ts
+          grep -q "VideoGenerator.isMp4Valid(buffer)" src/server/storage/gcsArtifactStore.ts
+          grep -q "status: 'ambiguous'" src/server/storage/gcsArtifactStore.ts
+          grep -q "submission_outcome_unknown: \['polling', 'generation_succeeded'" src/server/services/taskStateMachineService.ts
+          grep -q "DurableVideoRetryService.getAttemptTaskKey(taskId, providerAttempt)" server.ts
+          grep -q "recoveredBy: 'task_gcs_prefix'" server.ts
+          grep -q "failureReason: 'task_gcs_artifact_ambiguous'" server.ts
+          grep -q "failureReason: 'task_gcs_artifact_not_found'" server.ts
+          grep -q "predictLongRunningCalls: 0" server.ts
+          grep -q "自动检查并找回原视频" src/components/ProviderOperationRecoveryCard.tsx
+          grep -q "/api/videos/recover/" src/components/ProviderOperationRecoveryCard.tsx
+          if grep -q "/api/videos/start" src/components/ProviderOperationRecoveryCard.tsx; then
+            echo "GCS recovery UI must never invoke /api/videos/start" >&2
+            exit 1
+          fi
+          if grep -q "predictLongRunning" src/components/ProviderOperationRecoveryCard.tsx; then
+            echo "GCS recovery UI must never invoke provider generation" >&2
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
