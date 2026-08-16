@@ -31,27 +31,8 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Apply pre-provider durability boundary patch
-        run: |
-          set +e
-          {
-            node scripts/fix_pre_provider_patch_syntax.mjs &&
-            node scripts/apply_pre_provider_boundary_patch.mjs &&
-            node scripts/refine_pre_provider_boundary_tests.mjs &&
-            node scripts/refine_pre_provider_types.mjs &&
-            node scripts/refine_pre_provider_route_integration_test.mjs
-          } > /tmp/pre-provider-patch.log 2>&1
-          PATCH_STATUS=$?
-          cat /tmp/pre-provider-patch.log
-          if [ "$PATCH_STATUS" -ne 0 ]; then
-            cp /tmp/pre-provider-patch.log .pre-provider-patch-error.txt
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add .pre-provider-patch-error.txt
-            git commit -m "debug: capture pre-provider patch failure"
-            git push origin HEAD:core-pre-provider-durability-boundary
-            exit "$PATCH_STATUS"
-          fi
+      - name: Apply final pre-provider safety assertions
+        run: node scripts/finalize_pre_provider_boundary.mjs
 
       - name: TypeScript gate
         run: npm run lint
@@ -65,20 +46,16 @@ jobs:
       - name: Diff integrity
         run: git diff --check
 
-      - name: Persist verified product changes
+      - name: Persist verified final refinements
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
-            server.ts \
-            src/types/index.ts \
             src/server/services/taskStateMachineService.ts \
-            src/__tests__/apiVideoStartRouteIntegration.test.ts \
-            src/__tests__/preProviderDurabilityBoundary.test.ts \
-            src/__tests__/preProviderDurabilityBoundarySourceContract.test.ts
+            src/__tests__/preProviderDurabilityBoundary.test.ts
           if git diff --cached --quiet; then
-            echo "No product changes to persist"
+            echo "No final refinements to persist"
           else
-            git commit -m "feat: establish durable pre-provider submission boundary"
+            git commit -m "test: lock pre-provider fail-closed authorization invariants"
             git push origin HEAD:core-pre-provider-durability-boundary
           fi
