@@ -32,7 +32,9 @@ jobs:
         run: npm install
 
       - name: Apply dense temporal identity sampling patch
-        run: node scripts/apply_dense_temporal_identity_sampling_patch.mjs
+        run: |
+          node scripts/apply_dense_temporal_identity_sampling_patch.mjs
+          node scripts/refine_dense_sampling_test_fixtures.mjs
 
       - name: TypeScript gate
         run: npm run lint
@@ -55,6 +57,8 @@ jobs:
             src/services/qa/videoIdentityQaService.ts \
             src/server/services/durableVideoIdentityQaService.ts \
             src/__tests__/m22VideoIdentityQa.test.ts \
+            src/__tests__/m23FailureDiagnosis.test.ts \
+            src/__tests__/m24VideoRetryPolicy.test.ts \
             src/__tests__/denseTemporalIdentitySamplingSourceContract.test.ts
           if git diff --cached --quiet; then
             echo "No product changes to persist"
