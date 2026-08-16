@@ -25,6 +25,7 @@ import {
 import { buildExecutionTuningPayload, copyExecutionParamsToClipboard, getExplicitTaskFailureReason, humanizeErrorMessage } from '../utils/taskHelper';
 import { downloadVideoFile } from '../utils/downloadHelper';
 import { GcsLocationCard, parseGcsUri } from '../components/GcsLocationCard';
+import { ProviderOperationRecoveryCard } from '../components/ProviderOperationRecoveryCard';
 import { parseJsonResponse } from '../utils/apiClient';
 
 const getStatusBadgeInfo = (status: string) => {
@@ -37,6 +38,8 @@ const getStatusBadgeInfo = (status: string) => {
       return { text: '生成失败', cls: 'bg-rose-950 text-rose-400 border border-rose-800/50' };
     case 'orphaned_local_task':
       return { text: '本地孤儿记录', cls: 'bg-amber-950/80 text-amber-300 border border-amber-800' };
+    case 'submission_outcome_unknown':
+      return { text: '提交结果待核实 · 已锁定', cls: 'bg-amber-950 text-amber-200 border border-amber-700/80' };
     case 'polling_timeout':
       return { text: '云端渲染较慢 (可继续查询)', cls: 'bg-amber-950 text-amber-300 border border-amber-800/80' };
     case 'submitting':
@@ -207,6 +210,10 @@ const isTaskHumanReviewState = (task?: GenerationTask | null): boolean => {
     (typeof task.progressStage === 'string' && task.progressStage.includes('人工复核'))
   );
 };
+
+const isTaskProviderOutcomeUnknown = (task?: GenerationTask | null): boolean => (
+  Boolean(task) && String(task?.status || '') === 'submission_outcome_unknown'
+);
 
 const isTaskInputRewriteRequired = (task?: GenerationTask | null): boolean => {
   if (!task) return false;
@@ -503,6 +510,11 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
   };
 
   const handleDeleteTask = async (id: string) => {
+    const targetTask = tasks.find((task) => task.id === id) || (selectedTask?.id === id ? selectedTask : null);
+    if (isTaskProviderOutcomeUnknown(targetTask)) {
+      alert('该任务仍受 Provider 安全锁保护，禁止删除。请先核实原 Provider Operation，避免释放算力槽后发生重复提交或重复扣费。');
+      return;
+    }
     if (confirm('确认删除此任务及本地产物记录？')) {
       await taskRepository.delete(id);
       if (selectedTask?.id === id) {
@@ -513,6 +525,8 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
   };
 
   const failedTaskCount = tasks.filter(isTaskFailedState).length;
+  const clearableFailedTaskCount = tasks.filter((t) => isTaskFailedState(t) && !isTaskProviderOutcomeUnknown(t)).length;
+  const protectedUnknownTaskCount = tasks.filter(isTaskProviderOutcomeUnknown).length;
   const completedTaskCount = tasks.filter((t) => t.status === 'completed' || t.status === 'completed_with_warning').length;
   const reviewTaskCount = tasks.filter(isTaskHumanReviewState).length;
   const inProgressTaskCount = tasks.filter((t) =>
@@ -537,10 +551,15 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
   };
 
   const handleClearFailedTasks = async () => {
-    if (failedTaskCount === 0) return;
-    if (confirm(`确认批量清空所有已失败或卡死的任务 (${failedTaskCount} 个)，并清理云端后台渲染进程？`)) {
+    if (clearableFailedTaskCount === 0) {
+      if (protectedUnknownTaskCount > 0) {
+        alert(`当前 ${protectedUnknownTaskCount} 个异常任务属于【提交结果待核实】，受 Provider 安全锁保护，不能批量删除。`);
+      }
+      return;
+    }
+    if (confirm(`确认批量清空 ${clearableFailedTaskCount} 个可安全删除的失败任务？提交结果待核实任务不会被删除。`)) {
       await taskRepository.clearFailed();
-      if (selectedTask && isTaskFailedState(selectedTask)) {
+      if (selectedTask && isTaskFailedState(selectedTask) && !isTaskProviderOutcomeUnknown(selectedTask)) {
         setSelectedTask(null);
       }
       await loadTasks();
@@ -552,6 +571,10 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
   const handleRetryTask = async (task: GenerationTask) => {
     if (!task || !task.id) {
       alert('未选定有效任务 ID，无法重试');
+      return;
+    }
+    if (isTaskProviderOutcomeUnknown(task)) {
+      alert('该任务的 Veo 提交结果尚未核实，已禁止重新生成。请在任务详情中使用【安全核实并恢复原任务】，避免重复提交或重复扣费。');
       return;
     }
     if (isTaskInputRewriteRequired(task)) {
@@ -861,16 +884,16 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
         <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 w-full sm:w-auto">
           <button
             onClick={handleClearFailedTasks}
-            disabled={failedTaskCount === 0}
+            disabled={clearableFailedTaskCount === 0}
             className={`px-3 py-1.5 rounded-lg border transition flex items-center gap-1.5 text-xs font-semibold shrink-0 ${
-              failedTaskCount > 0
+              clearableFailedTaskCount > 0
                 ? 'bg-rose-950/80 hover:bg-rose-900 border-rose-800 text-rose-200 hover:text-white shadow-sm cursor-pointer'
                 : 'bg-zinc-900/60 border-zinc-800/80 text-zinc-600 cursor-not-allowed'
             }`}
-            title={failedTaskCount > 0 ? `一键批量清空 ${failedTaskCount} 个失败任务` : '当前暂无失败任务'}
+            title={clearableFailedTaskCount > 0 ? `一键批量清空 ${clearableFailedTaskCount} 个可安全删除的失败任务` : (protectedUnknownTaskCount > 0 ? '提交结果待核实任务受安全锁保护，不能批量删除' : '当前暂无可清理失败任务')}
           >
             <Trash2 className={`w-3.5 h-3.5 ${failedTaskCount > 0 ? 'text-rose-400' : 'text-zinc-600'}`} />
-            <span>批量清空失败任务{failedTaskCount > 0 ? ` (${failedTaskCount})` : ''}</span>
+            <span>批量清空失败任务{clearableFailedTaskCount > 0 ? ` (${clearableFailedTaskCount})` : ''}</span>
           </button>
 
           <div className="flex bg-zinc-900 border border-zinc-800 p-1 rounded-lg text-xs w-full sm:w-auto overflow-x-auto">
@@ -924,7 +947,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
             <Trash2 className="w-5 h-5 text-rose-400 shrink-0" />
             <div>
               <h4 className="text-sm font-bold text-rose-200">发现 {failedTaskCount} 个失败或异常断开的任务</h4>
-              <p className="text-xs text-rose-300/80 mt-0.5">点击批量清空可以一键删除所有失败任务并清理云端僵尸渲染进程。</p>
+              <p className="text-xs text-rose-300/80 mt-0.5">批量清空只删除可安全清理的终态失败任务；提交结果待核实任务会继续保留并锁定 Provider。</p>
             </div>
           </div>
           <button
@@ -932,7 +955,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
             className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition shadow-lg shrink-0 flex items-center gap-1.5 cursor-pointer"
           >
             <Trash2 className="w-4 h-4" />
-            批量清空 ({failedTaskCount})
+            批量清空 ({clearableFailedTaskCount})
           </button>
         </div>
       )}
@@ -1076,7 +1099,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
                                     e.stopPropagation();
                                     handleRetryTask(task);
                                   }}
-                                  disabled={isRetryingTaskId === task.id}
+                                  disabled={isRetryingTaskId === task.id || isTaskProviderOutcomeUnknown(task)}
                                   className="px-3 py-1.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs flex items-center gap-1 shadow transition disabled:opacity-50 shrink-0 cursor-pointer"
                                 >
                                   <RefreshCw className={`w-3.5 h-3.5 ${isRetryingTaskId === task.id ? 'animate-spin' : ''}`} />
@@ -1088,6 +1111,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
                                   e.stopPropagation();
                                   handleDeleteTask(task.id);
                                 }}
+                                disabled={isTaskProviderOutcomeUnknown(task)}
                                 className="px-2.5 py-1.5 rounded bg-rose-950 hover:bg-rose-900 border border-rose-800/80 text-rose-300 hover:text-rose-200 font-semibold text-xs flex items-center gap-1 shadow transition shrink-0 cursor-pointer"
                                 title="删除此失败任务及云端记录"
                               >
@@ -1163,7 +1187,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
                                 e.stopPropagation();
                                 handleRetryTask(task);
                               }}
-                              disabled={isRetryingTaskId === task.id}
+                              disabled={isRetryingTaskId === task.id || isTaskProviderOutcomeUnknown(task)}
                               className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white font-semibold text-[11px] flex items-center gap-1 shadow transition disabled:opacity-50 cursor-pointer"
                               title="使用保存的本地参数向云端重新发起生成任务"
                             >
@@ -1175,6 +1199,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
                                 e.stopPropagation();
                                 handleDeleteTask(task.id);
                               }}
+                              disabled={isTaskProviderOutcomeUnknown(task)}
                               className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-medium text-[11px] flex items-center gap-1 transition cursor-pointer"
                             >
                               <Trash2 className="w-3 h-3" />
@@ -1279,7 +1304,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
                       e.stopPropagation();
                       handleRetryTask(task);
                     }}
-                    disabled={isRetryingTaskId === task.id}
+                    disabled={isRetryingTaskId === task.id || isTaskProviderOutcomeUnknown(task)}
                     className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-indigo-600/90 text-zinc-300 hover:text-white border border-zinc-700/80 hover:border-indigo-500 transition flex items-center gap-1.5 text-xs font-medium disabled:opacity-50 cursor-pointer"
                     title="重新提交 Veo 生成任务"
                   >
@@ -1292,6 +1317,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
                       e.stopPropagation();
                       handleDeleteTask(task.id);
                     }}
+                    disabled={isTaskProviderOutcomeUnknown(task)}
                     className="p-1.5 rounded-lg hover:bg-rose-950/40 text-zinc-500 hover:text-rose-400 transition cursor-pointer"
                     title="删除记录"
                   >
@@ -1308,6 +1334,15 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
       {selectedTask && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex justify-end">
           <div className="bg-zinc-900 border-l border-zinc-800 w-full max-w-xl h-full overflow-y-auto p-6 space-y-6 shadow-2xl">
+            {isTaskProviderOutcomeUnknown(selectedTask) && (
+              <ProviderOperationRecoveryCard
+                taskId={selectedTask.id}
+                onRecovered={async () => {
+                  await loadTasks();
+                  setSelectedTask(null);
+                }}
+              />
+            )}
             <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
               <h3 className="text-base font-bold text-zinc-100 truncate pr-2">任务详情归档 ({selectedTask.id.slice(0, 8)})</h3>
               <div className="flex items-center gap-2 shrink-0">
@@ -1390,7 +1425,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
                   <button
                     type="button"
                     onClick={() => handleRetryTask(selectedTask)}
-                    disabled={isRetryingTaskId === selectedTask.id}
+                    disabled={isRetryingTaskId === selectedTask.id || isTaskProviderOutcomeUnknown(selectedTask)}
                     className="px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-indigo-600 text-zinc-200 hover:text-white font-medium text-xs flex items-center gap-1.5 transition border border-zinc-700/80 shadow cursor-pointer disabled:opacity-50"
                     title="重新发起 Veo 渲染任务"
                   >
@@ -1485,6 +1520,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
                     )}
                     <button
                       onClick={() => handleDeleteTask(selectedTask.id)}
+                      disabled={isTaskProviderOutcomeUnknown(selectedTask)}
                       className="px-3 py-1.5 rounded-lg bg-rose-950 hover:bg-rose-900 border border-rose-800/80 text-rose-300 font-semibold text-xs flex items-center gap-1.5 shadow transition cursor-pointer"
                       title="删除任务并清理云端进程"
                     >
@@ -1493,7 +1529,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
                     </button>
                     <button
                       onClick={() => handleRetryTask(selectedTask)}
-                      disabled={isRetryingTaskId === selectedTask.id}
+                      disabled={isRetryingTaskId === selectedTask.id || isTaskProviderOutcomeUnknown(selectedTask)}
                       className="px-4 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs flex items-center gap-1.5 shadow-lg transition disabled:opacity-50 cursor-pointer"
                     >
                       <RefreshCw className={`w-3.5 h-3.5 ${isRetryingTaskId === selectedTask.id ? 'animate-spin' : ''}`} />
@@ -1665,6 +1701,7 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
               )}
               <button
                 onClick={() => handleDeleteTask(selectedTask.id)}
+                disabled={isTaskProviderOutcomeUnknown(selectedTask)}
                 className="px-4 py-2 rounded bg-rose-950 text-rose-400 text-xs font-medium hover:bg-rose-900/60 transition ml-auto"
               >
                 删除任务记录
