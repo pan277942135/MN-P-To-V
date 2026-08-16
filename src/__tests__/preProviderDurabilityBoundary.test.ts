@@ -105,6 +105,35 @@ describe('pre-provider durable authorization boundary', () => {
     expect(failed.providerSubmissionAuthorizedAt).toBeUndefined();
   });
 
+  it('never downgrades a durably authorized submitting task to safe-to-regenerate failure', async () => {
+    const task = preparingTask('prep_no_downgrade');
+    await firestoreTaskRepository.createTask(task);
+    const authorized = await taskStateMachineService.authorizeProviderSubmission({
+      taskId: task.taskId, executionId: task.executionId!, providerStorageTaskKey: task.providerStorageTaskKey!,
+      expectedProviderStorageUri: task.expectedProviderStorageUri!,
+    });
+    expect(authorized.status).toBe('submitting');
+
+    const afterFailureAttempt = await taskStateMachineService.failPreparingBeforeProvider({
+      taskId: task.taskId, executionId: task.executionId!, message: 'ambiguous authorization response',
+    });
+    expect(afterFailureAttempt.status).toBe('submitting');
+    expect(afterFailureAttempt.providerSubmissionAuthorizedAt).toBe(authorized.providerSubmissionAuthorizedAt);
+    expect(afterFailureAttempt.retryMode).not.toBe('SAFE_TO_REGENERATE');
+  });
+
+  it('keeps inconsistent preparing records with Provider authorization evidence fail-closed', async () => {
+    const task = preparingTask('prep_inconsistent', Date.now() - 1);
+    task.providerSubmissionAuthorizedAt = Date.now() - 1000;
+    task.providerSubmissionAuthorizedExecutionId = task.executionId;
+    await firestoreTaskRepository.createTask(task);
+
+    const result = await taskStateMachineService.reconcileStalePreparingTask({ taskId: task.taskId });
+    expect(result.failed).toBe(false);
+    expect(result.task.status).toBe('preparing');
+    expect(result.task.providerSubmissionAuthorizedAt).toBe(task.providerSubmissionAuthorizedAt);
+  });
+
   it('reconciles an expired preparing lease to safe failure but leaves a fresh lease alone', async () => {
     const fresh = preparingTask('prep_fresh', Date.now() + 60000);
     const stale = preparingTask('prep_stale', Date.now() - 1);

@@ -257,7 +257,7 @@ export class TaskStateMachineService {
       const version = currentVersion(currentTask);
       const patch: Partial<ServerVideoTaskRecord> = {
         status: 'failed',
-        failureReason: 'pre_provider_authorization_failed' as any,
+        failureReason: 'pre_provider_authorization_failed',
         retryMode: 'SAFE_TO_REGENERATE',
         error: message,
         structuredError: buildStructuredError({
@@ -305,7 +305,7 @@ export class TaskStateMachineService {
       const message = 'Provider 调用尚未授权，但准备阶段执行租约已失效；确认没有进入 Veo 提交窗口，任务已安全终止。';
       const patch: Partial<ServerVideoTaskRecord> = {
         status: 'failed',
-        failureReason: 'pre_provider_abandoned' as any,
+        failureReason: 'pre_provider_abandoned',
         retryMode: 'SAFE_TO_REGENERATE',
         error: message,
         structuredError: buildStructuredError({
