@@ -1,0 +1,64 @@
+name: Provider Storage Intent Safety
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - core-durable-provider-storage-intent
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  provider-storage-intent:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Provider storage intent contract gate
+        run: |
+          grep -q "providerStorageTaskKey?: string" src/types/index.ts
+          grep -q "expectedProviderStorageUri?: string" src/types/index.ts
+          grep -q "providerStorageIntentPersistedAt?: number" src/types/index.ts
+          grep -q "const providerStorageTaskKey = DurableVideoRetryService.getAttemptTaskKey(taskId, 1)" server.ts
+          grep -q "const expectedProviderStorageUri = resolveVeoStorageUri(providerStorageTaskKey)" server.ts
+          grep -q "providerStorageIntentPersistedAt: now" server.ts
+          grep -q "expectedProviderStorageUri" server.ts
+          grep -q "retryProviderStorageTaskKey" server.ts
+          grep -q "retryExpectedProviderStorageUri" server.ts
+          grep -q "failureReason: 'provider_storage_intent_mismatch'" server.ts
+          grep -q "const recoveryTaskKey = persistedStorageTaskKey || derivedRecoveryTaskKey" server.ts
+          grep -q "providerStorageTaskKey: string" src/server/services/taskStateMachineService.ts
+          grep -q "expectedProviderStorageUri: string" src/server/services/taskStateMachineService.ts
+          grep -q "providerStorageIntentPersistedAt: now" src/server/services/taskStateMachineService.ts
+          grep -q "M2_4_RETRY_STORAGE_INTENT_MISMATCH" src/server/services/durableVideoRetryService.ts
+          grep -q "task.expectedProviderStorageUri !== derivedStorageUri" src/server/services/durableVideoRetryService.ts
+          grep -q "expectedStorageUri?: string" src/services/video/videoGenerator.ts
+          grep -q "storageUri: expectedStorageUri" src/services/video/videoGenerator.ts
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
