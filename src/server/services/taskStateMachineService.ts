@@ -307,10 +307,22 @@ export class TaskStateMachineService {
     taskId: string;
     decision: any;
     diagnosisCode?: string;
+    providerStorageTaskKey: string;
+    expectedProviderStorageUri: string;
   }): Promise<{ reserved: boolean; task: ServerVideoTaskRecord }> {
-    const { taskId, decision, diagnosisCode } = params;
+    const { taskId, decision, diagnosisCode, providerStorageTaskKey, expectedProviderStorageUri } = params;
     if (decision?.action !== 'REGENERATE_VIDEO' || !decision?.idempotencyKey) {
       throw new Error('[M2_4_RETRY_RESERVATION_INVALID] REGENERATE_VIDEO decision with idempotency key is required.');
+    }
+    const expectedTaskKey = decision.nextProviderAttempt <= 1
+      ? taskId
+      : `${taskId}/attempts/${decision.nextProviderAttempt}`;
+    const normalizedStorageUri = String(expectedProviderStorageUri || '').trim();
+    if (providerStorageTaskKey !== expectedTaskKey) {
+      throw new Error(`[M2_4_RETRY_STORAGE_INTENT_MISMATCH] expected task key ${expectedTaskKey} but received ${providerStorageTaskKey || 'empty'}`);
+    }
+    if (!normalizedStorageUri.startsWith('gs://') || !normalizedStorageUri.endsWith(`/veo/${providerStorageTaskKey}/`)) {
+      throw new Error('[M2_4_RETRY_STORAGE_INTENT_INVALID] expectedProviderStorageUri must target the exact reserved providerStorageTaskKey.');
     }
 
     return await firestoreTaskRepository.runTaskTransaction<{ reserved: boolean; task: ServerVideoTaskRecord }>(taskId, (currentTask) => {
@@ -367,6 +379,9 @@ export class TaskStateMachineService {
         stateVersion: version + 1,
         statusVersion: version + 1,
         providerAttempt: decision.nextProviderAttempt,
+        providerStorageTaskKey,
+        expectedProviderStorageUri: normalizedStorageUri,
+        providerStorageIntentPersistedAt: now,
         qaAttempt: 1,
         retryCount: Math.max(0, decision.nextProviderAttempt - 1),
         automaticRetryPlan: decision,
