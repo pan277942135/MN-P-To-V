@@ -364,6 +364,9 @@ export interface ServerVideoTaskRecord {
   sceneMode?: string;
   retryCount?: number;
   providerAttempt?: number;
+  providerStorageTaskKey?: string;
+  expectedProviderStorageUri?: string;
+  providerStorageIntentPersistedAt?: number;
   qaAttempt?: number;
   automaticRetryPlan?: any;
   providerRetryIdempotencyKey?: string;

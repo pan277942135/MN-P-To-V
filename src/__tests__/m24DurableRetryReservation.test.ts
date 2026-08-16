@@ -91,6 +91,11 @@ const qaReport: any = {
   worstFrameTimestamp: 2,
   identityDriftSegments: [],
 };
+const storageIntent = (taskId: string, providerAttempt = 2) => ({
+  providerStorageTaskKey: providerAttempt <= 1 ? taskId : `${taskId}/attempts/${providerAttempt}`,
+  expectedProviderStorageUri: `gs://test-bucket/veo/${providerAttempt <= 1 ? taskId : `${taskId}/attempts/${providerAttempt}`}/`,
+});
+
 const diagnosis: any = {
   version: 'm2-3-v1',
   primaryCode: 'IDENTITY_DRIFT',
@@ -128,11 +133,15 @@ describe('M2-4 durable provider retry reservation', () => {
       taskId: task.taskId,
       decision,
       diagnosisCode: diagnosis.primaryCode,
+      ...storageIntent(task.taskId, decision.nextProviderAttempt),
     });
 
     expect(reserved.reserved).toBe(true);
     expect(reserved.task.status).toBe('generating');
     expect(reserved.task.providerAttempt).toBe(2);
+    expect(reserved.task.providerStorageTaskKey).toBe(`retry_reserve/attempts/2`);
+    expect(reserved.task.expectedProviderStorageUri).toBe(`gs://test-bucket/veo/retry_reserve/attempts/2/`);
+    expect(reserved.task.providerStorageIntentPersistedAt).toBeTypeOf('number');
     expect(reserved.task.retryCount).toBe(1);
     expect(reserved.task.retrySubmissionState).toBe('reserved');
     expect(reserved.task.artifactPersisted).toBe(false);
@@ -157,17 +166,44 @@ describe('M2-4 durable provider retry reservation', () => {
       taskId: task.taskId,
       decision,
       diagnosisCode: diagnosis.primaryCode,
+      ...storageIntent(task.taskId, decision.nextProviderAttempt),
     });
     const second = await taskStateMachineService.reserveAutomaticProviderRetry({
       taskId: task.taskId,
       decision,
       diagnosisCode: diagnosis.primaryCode,
+      ...storageIntent(task.taskId, decision.nextProviderAttempt),
     });
 
     expect(first.reserved).toBe(true);
     expect(second.reserved).toBe(false);
     expect(second.task.providerAttempt).toBe(2);
     expect(second.task.retryHistory).toHaveLength(1);
+  });
+
+  it('fails before reservation when storage intent targets a different provider attempt', async () => {
+    const task = qaPendingTask('retry_bad_intent');
+    await firestoreTaskRepository.createTask(task);
+    const decision = VideoRetryPolicyService.decide({
+      taskId: task.taskId,
+      qaReport,
+      diagnosis,
+      providerAttempt: 1,
+      qaAttempt: 1,
+      artifactObjectPath: task.outputObjectPath,
+    });
+
+    await expect(taskStateMachineService.reserveAutomaticProviderRetry({
+      taskId: task.taskId,
+      decision,
+      diagnosisCode: diagnosis.primaryCode,
+      providerStorageTaskKey: task.taskId,
+      expectedProviderStorageUri: `gs://test-bucket/veo/${task.taskId}/`,
+    })).rejects.toThrow('M2_4_RETRY_STORAGE_INTENT_MISMATCH');
+
+    const untouched = await firestoreTaskRepository.getTask(task.taskId);
+    expect(untouched?.status).toBe('qa_pending');
+    expect(untouched?.providerAttempt).toBe(1);
   });
 
   it('marks the reserved retry as submitted only when idempotency key still owns the task', async () => {
@@ -185,6 +221,7 @@ describe('M2-4 durable provider retry reservation', () => {
       taskId: task.taskId,
       decision,
       diagnosisCode: diagnosis.primaryCode,
+      ...storageIntent(task.taskId, decision.nextProviderAttempt),
     });
 
     const submitted = await taskStateMachineService.markAutomaticRetrySubmitted({

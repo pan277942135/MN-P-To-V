@@ -3,7 +3,7 @@ import type { ActiveSession } from '../../services/google/credentialService';
 import { VideoGenerator, type VideoStartResult } from '../../services/video/videoGenerator';
 import type { ServerVideoTaskRecord } from '../../types';
 import type { VideoRetryDecision } from '../../services/qa/videoRetryPolicyService';
-import { gcsArtifactStore } from '../storage/gcsArtifactStore';
+import { gcsArtifactStore, resolveVeoStorageUri } from '../storage/gcsArtifactStore';
 
 export class DurableVideoRetryService {
   static getAttemptTaskKey(taskId: string, providerAttempt: number): string {
@@ -54,6 +54,12 @@ export class DurableVideoRetryService {
       'Natural subtle motion while preserving the approved character identity.';
 
     const attemptTaskKey = this.getAttemptTaskKey(task.taskId, decision.nextProviderAttempt);
+    const derivedStorageUri = resolveVeoStorageUri(attemptTaskKey);
+    if (task.providerStorageTaskKey !== attemptTaskKey || task.expectedProviderStorageUri !== derivedStorageUri) {
+      throw new Error(
+        `M2_4_RETRY_STORAGE_INTENT_MISMATCH: durable storage intent does not match provider attempt ${decision.nextProviderAttempt}`
+      );
+    }
 
     return await VideoGenerator.startVideoGeneration(
       ai,
@@ -70,7 +76,8 @@ export class DurableVideoRetryService {
       task.sceneMode,
       task.characterDescription,
       task.durationSeconds || 6,
-      attemptTaskKey
+      attemptTaskKey,
+      task.expectedProviderStorageUri
     );
   }
 }

@@ -74,7 +74,8 @@ export class VideoGenerator {
     sceneMode?: string,
     characterDescription?: string,
     durationSeconds = 6,
-    taskId?: string
+    taskId?: string,
+    expectedStorageUri?: string
   ): Promise<VideoStartResult> {
     const isOmni = typeof modelName === 'string' && modelName.includes('omni') && session.type !== 'vertex_ai';
 
@@ -226,6 +227,7 @@ export class VideoGenerator {
             modelId: targetModel,
             durationSeconds,
             taskId,
+            storageUri: expectedStorageUri,
           }),
         { actionName: `Veo predictLongRunning 启动 (${targetModel})` }
       );

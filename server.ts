@@ -289,10 +289,17 @@ async function settlePersistedVideoThroughQa(params: {
   }
 
   if (retryDecision.action === 'REGENERATE_VIDEO' && retryDecision.idempotencyKey) {
+    const retryProviderStorageTaskKey = DurableVideoRetryService.getAttemptTaskKey(
+      taskId,
+      retryDecision.nextProviderAttempt
+    );
+    const retryExpectedProviderStorageUri = resolveVeoStorageUri(retryProviderStorageTaskKey);
     const reservation = await taskStateMachineService.reserveAutomaticProviderRetry({
       taskId,
       decision: retryDecision,
       diagnosisCode: failureDiagnosis?.primaryCode,
+      providerStorageTaskKey: retryProviderStorageTaskKey,
+      expectedProviderStorageUri: retryExpectedProviderStorageUri,
     });
     if (!reservation.reserved) return reservation.task;
 
@@ -1499,6 +1506,8 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
 
       const taskId = req.body.taskId || `vtask_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const now = Date.now();
+      const providerStorageTaskKey = DurableVideoRetryService.getAttemptTaskKey(taskId, 1);
+      const expectedProviderStorageUri = resolveVeoStorageUri(providerStorageTaskKey);
 
       // Persist QA anchors before the provider call. Cloud Run memory/local files are never
       // accepted as post-generation identity evidence.
@@ -1563,6 +1572,9 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         identityCriticalIssues: gateResult.identityCriticalIssues,
         identityQaStatus: 'not_run',
         providerAttempt: 1,
+        providerStorageTaskKey,
+        expectedProviderStorageUri,
+        providerStorageIntentPersistedAt: now,
         qaAttempt: 1,
         retryCount: 0,
         retrySubmissionState: 'none',
@@ -1771,7 +1783,8 @@ ${cleanPrompt}`
               sceneMode,
               characterDescription,
               durationSeconds,
-              taskId
+              taskId,
+              expectedProviderStorageUri
             ),
             new Promise<never>((_, reject) =>
               setTimeout(() => reject(new Error('云端视频模型提交接口响应超时 (120s)，请检查 API 配额或算力连接后重试。')), submitTimeoutMs)
@@ -3441,7 +3454,35 @@ ${cleanPrompt}`
           CredentialService.getSession(rec.connectionId) ||
           CredentialService.getSession();
         const providerAttempt = Math.max(1, Number(rec.providerAttempt) || 1);
-        const recoveryTaskKey = DurableVideoRetryService.getAttemptTaskKey(taskId, providerAttempt);
+        const derivedRecoveryTaskKey = DurableVideoRetryService.getAttemptTaskKey(taskId, providerAttempt);
+        const persistedStorageTaskKey = String(rec.providerStorageTaskKey || '').trim();
+        const persistedExpectedStorageUri = String(rec.expectedProviderStorageUri || '').trim();
+        const hasAnyPersistedStorageIntent = Boolean(persistedStorageTaskKey || persistedExpectedStorageUri);
+        const hasCompletePersistedStorageIntent = Boolean(persistedStorageTaskKey && persistedExpectedStorageUri);
+        const recoveryTaskKey = persistedStorageTaskKey || derivedRecoveryTaskKey;
+        const derivedExpectedStorageUri = resolveVeoStorageUri(recoveryTaskKey);
+
+        if (
+          (hasAnyPersistedStorageIntent && !hasCompletePersistedStorageIntent) ||
+          (persistedStorageTaskKey && persistedStorageTaskKey !== derivedRecoveryTaskKey) ||
+          (persistedExpectedStorageUri && persistedExpectedStorageUri !== derivedExpectedStorageUri)
+        ) {
+          return res.status(409).json({
+            success: false,
+            providerTaskLinked: false,
+            failureReason: 'provider_storage_intent_mismatch',
+            status: 'submission_outcome_unknown',
+            providerAttempt,
+            persistedStorageTaskKey: persistedStorageTaskKey || null,
+            persistedExpectedStorageUri: persistedExpectedStorageUri || null,
+            derivedRecoveryTaskKey,
+            derivedExpectedStorageUri,
+            predictLongRunningCalls: 0,
+            error: 'Provider 存储意图与当前任务/配置不一致。为避免扫描错误路径或误绑定其他产物，任务继续锁定。',
+            storageAuthority: 'firestore',
+          });
+        }
+
         const discovery = await gcsArtifactStore.discoverTaskPrefixVideo({
           taskKey: recoveryTaskKey,
           session: recoverySession,
