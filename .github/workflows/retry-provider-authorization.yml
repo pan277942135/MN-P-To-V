@@ -24,6 +24,7 @@ jobs:
 
       - name: Retry Provider authorization contract gate
         run: |
+          grep -q "^  contents: read$" .github/workflows/retry-provider-authorization.yml
           grep -q "'reserved' | 'authorized' | 'submitted'" src/types/index.ts
           grep -q "retryProviderAuthorizedAt?: number | null" src/types/index.ts
           grep -q "authorizeAutomaticProviderRetry" src/server/services/taskStateMachineService.ts
@@ -39,10 +40,6 @@ jobs:
           grep -q "AUTOMATIC_RETRY_AUTHORIZATION_STALE" server.ts
           grep -q "refuses a late unknown write" src/__tests__/m24RetryOutcomeUnknown.test.ts
           grep -q "finishes fallible preparation before authorization" src/__tests__/retryProviderAuthorizationBoundarySourceContract.test.ts
-          if grep -R -q "contents: write" .github/workflows/retry-provider-authorization.yml; then
-            echo "permanent retry Provider authorization workflow must be read-only" >&2
-            exit 1
-          fi
 
       - name: Setup Node
         uses: actions/setup-node@v4
