@@ -35,6 +35,7 @@ jobs:
         run: |
           set +e
           {
+            node scripts/fix_pre_provider_patch_syntax.mjs &&
             node scripts/apply_pre_provider_boundary_patch.mjs &&
             node scripts/refine_pre_provider_boundary_tests.mjs
           } > /tmp/pre-provider-patch.log 2>&1
