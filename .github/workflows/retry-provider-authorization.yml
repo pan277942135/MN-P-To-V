@@ -1,0 +1,62 @@
+name: Retry Provider Authorization Safety
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - core-retry-provider-authorization-boundary
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  retry-provider-authorization:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Retry Provider authorization contract gate
+        run: |
+          grep -q "^  contents: read$" .github/workflows/retry-provider-authorization.yml
+          grep -q "'reserved' | 'authorized' | 'submitted'" src/types/index.ts
+          grep -q "retryProviderAuthorizedAt?: number | null" src/types/index.ts
+          grep -q "authorizeAutomaticProviderRetry" src/server/services/taskStateMachineService.ts
+          grep -q "reconcileStaleAutomaticRetryReservation" src/server/services/taskStateMachineService.ts
+          grep -q "M2_4_RETRY_OUTCOME_UNKNOWN_BEFORE_AUTHORIZATION" src/server/services/taskStateMachineService.ts
+          grep -q "M2_4_RETRY_OUTCOME_UNKNOWN_INVALID_STATE" src/server/services/taskStateMachineService.ts
+          grep -q "failureReason: 'pre_provider_retry_abandoned'" src/server/services/taskStateMachineService.ts
+          grep -q "failureReason: 'pre_provider_retry_authorization_failed'" src/server/services/taskStateMachineService.ts
+          grep -q "static async prepare" src/server/services/durableVideoRetryService.ts
+          grep -q "M2_4_RETRY_PROVIDER_NOT_AUTHORIZED" src/server/services/durableVideoRetryService.ts
+          grep -q "DurableVideoRetryService.prepare" server.ts
+          grep -q "DurableVideoRetryService.launch" server.ts
+          grep -q "AUTOMATIC_RETRY_AUTHORIZATION_STALE" server.ts
+          grep -q "refuses a late unknown write" src/__tests__/m24RetryOutcomeUnknown.test.ts
+          grep -q "finishes fallible preparation before authorization" src/__tests__/retryProviderAuthorizationBoundarySourceContract.test.ts
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check

@@ -206,6 +206,38 @@ describe('M2-4 durable provider retry reservation', () => {
     expect(untouched?.providerAttempt).toBe(1);
   });
 
+  it('refuses Provider launch and submitted state while retry is only reserved', async () => {
+    const task = qaPendingTask('retry_reserved_only');
+    await firestoreTaskRepository.createTask(task);
+    const decision = VideoRetryPolicyService.decide({
+      taskId: task.taskId, qaReport, diagnosis, providerAttempt: 1, qaAttempt: 1, artifactObjectPath: task.outputObjectPath,
+    });
+    const reserved = await taskStateMachineService.reserveAutomaticProviderRetry({
+      taskId: task.taskId, decision, diagnosisCode: diagnosis.primaryCode,
+      ...storageIntent(task.taskId, decision.nextProviderAttempt),
+    });
+
+    await expect(taskStateMachineService.markAutomaticRetrySubmitted({
+      taskId: task.taskId, idempotencyKey: decision.idempotencyKey!, operationName: 'projects/test/locations/us-central1/operations/too-early',
+    })).rejects.toThrow('M2_4_RETRY_SUBMISSION_STALE');
+
+    await expect(DurableVideoRetryService.launch({
+      task: reserved.task,
+      decision,
+      session: {} as any,
+      ai: {} as any,
+      prepared: {
+        firstFrame: Buffer.from('frame'),
+        firstFrameMimeType: 'image/jpeg',
+        masterImages: [Buffer.from('master')],
+        masterImageMimeTypes: ['image/jpeg'],
+        prompt: 'test',
+        attemptTaskKey: reserved.task.providerStorageTaskKey!,
+        expectedStorageUri: reserved.task.expectedProviderStorageUri!,
+      },
+    })).rejects.toThrow('M2_4_RETRY_PROVIDER_NOT_AUTHORIZED');
+  });
+
   it('marks the reserved retry as submitted only when idempotency key still owns the task', async () => {
     const task = qaPendingTask('retry_submit');
     await firestoreTaskRepository.createTask(task);
@@ -223,6 +255,13 @@ describe('M2-4 durable provider retry reservation', () => {
       diagnosisCode: diagnosis.primaryCode,
       ...storageIntent(task.taskId, decision.nextProviderAttempt),
     });
+
+    const authorized = await taskStateMachineService.authorizeAutomaticProviderRetry({
+      taskId: task.taskId,
+      idempotencyKey: decision.idempotencyKey!,
+    });
+    expect(authorized.retrySubmissionState).toBe('authorized');
+    expect(authorized.retryProviderAuthorizedAt).toBeTypeOf('number');
 
     const submitted = await taskStateMachineService.markAutomaticRetrySubmitted({
       taskId: task.taskId,

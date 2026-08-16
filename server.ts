@@ -303,12 +303,44 @@ async function settlePersistedVideoThroughQa(params: {
     });
     if (!reservation.reserved) return reservation.task;
 
+    let preparedRetry;
     try {
-      const retryStart = await DurableVideoRetryService.launch({
+      preparedRetry = await DurableVideoRetryService.prepare({
         task: reservation.task,
         decision: retryDecision,
         session,
+      });
+    } catch (preparationErr: any) {
+      const message = `自动重试 Provider 输入准备失败，Veo 尚未进入调用窗口: ${preparationErr?.message || preparationErr}`;
+      return await taskStateMachineService.failAutomaticRetryBeforeProvider({
+        taskId,
+        idempotencyKey: retryDecision.idempotencyKey,
+        message,
+      });
+    }
+
+    let authorizedRetryTask: ServerVideoTaskRecord;
+    try {
+      authorizedRetryTask = await taskStateMachineService.authorizeAutomaticProviderRetry({
+        taskId,
+        idempotencyKey: retryDecision.idempotencyKey,
+      });
+    } catch (authorizationErr: any) {
+      const message = `自动重试 Provider 调用授权失败，Veo 尚未进入调用窗口: ${authorizationErr?.message || authorizationErr}`;
+      return await taskStateMachineService.failAutomaticRetryBeforeProvider({
+        taskId,
+        idempotencyKey: retryDecision.idempotencyKey,
+        message,
+      });
+    }
+
+    try {
+      const retryStart = await DurableVideoRetryService.launch({
+        task: authorizedRetryTask,
+        decision: retryDecision,
+        session,
         ai,
+        prepared: preparedRetry,
       });
 
       if (retryStart.operationName) {
@@ -2929,26 +2961,43 @@ ${cleanPrompt}`
         record.retrySubmissionState === 'reserved' &&
         !record.operationName
       ) {
-        const reservedAgeMs = Date.now() - (record.retryReservedAt || record.updatedAt || Date.now());
-        if (reservedAgeMs > 180000) {
+        const reconciled = await taskStateMachineService.reconcileStaleAutomaticRetryReservation({ taskId });
+        record = reconciled.task;
+        serverVideoTaskStore.set(taskId, record);
+        if (reconciled.reclaimed) {
+          return res.json({
+            status: record.status,
+            submissionState: 'not_submitted',
+            providerInvocationAuthorized: false,
+            failureReason: record.failureReason,
+            retryMode: record.retryMode,
+            error: record.error,
+            structuredError: record.structuredError,
+          });
+        }
+      }
+
+      if (
+        record.status === 'generating' &&
+        !record.operationName &&
+        record.retryProviderAuthorizedAt &&
+        record.retryProviderAuthorizedIdempotencyKey === record.providerRetryIdempotencyKey
+      ) {
+        const authorizedAgeMs = Date.now() - record.retryProviderAuthorizedAt;
+        if (authorizedAgeMs > 180000) {
           const unknown = await taskStateMachineService.markAutomaticRetryOutcomeUnknown({
             taskId,
             idempotencyKey: record.providerRetryIdempotencyKey || 'missing',
-            message: 'AUTOMATIC_RETRY_RESERVATION_STALE: retry reservation outlived the provider submission window; refusing automatic resubmission.',
+            message: 'AUTOMATIC_RETRY_AUTHORIZATION_STALE: retry crossed the durable Provider authorization boundary but no submission result was persisted; refusing automatic resubmission.',
           });
           return res.json({
             status: unknown.status,
             error: unknown.error,
             structuredError: unknown.structuredError,
-            automaticRetryPlan: unknown.automaticRetryPlan,
+            failureReason: unknown.failureReason,
+            retryMode: unknown.retryMode,
           });
         }
-        return res.json({
-          status: 'submitting',
-          progressStage: '正在提交自动定向重试；已持久化 retry reservation，禁止重复提单',
-          providerAttempt: record.providerAttempt,
-          automaticRetryPlan: record.automaticRetryPlan,
-        });
       }
 
       if (record.status === 'submission_outcome_unknown') {
