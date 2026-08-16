@@ -64,6 +64,19 @@ describe('GCS evidence recovery for submission_outcome_unknown', () => {
     expect(result.artifact?.outputObjectPath).not.toContain('provider-output-old');
   });
 
+  it('does not let a corrupt current-attempt object borrow a valid root fallback', async () => {
+    await gcsArtifactStore.uploadVideoArtifact({ taskId: 'task_exact', videoBuffer: validMp4() });
+    await gcsArtifactStore.uploadImageArtifact({
+      objectPath: 'veo/task_exact/attempts/2/provider-output/video.mp4',
+      buffer: Buffer.alloc(1200, 7),
+      contentType: 'video/mp4',
+    });
+
+    const result = await gcsArtifactStore.discoverTaskPrefixVideo({ taskKey: 'task_exact/attempts/2' });
+    expect(result.status).toBe('not_found');
+    expect(result.artifact).toBeUndefined();
+  });
+
   it('returns not_found without manufacturing provider evidence', async () => {
     const result = await gcsArtifactStore.discoverTaskPrefixVideo({ taskKey: 'task_empty' });
     expect(result.status).toBe('not_found');

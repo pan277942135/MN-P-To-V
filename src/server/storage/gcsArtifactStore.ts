@@ -426,6 +426,35 @@ export class GcsArtifactStore {
     };
   }
 
+  private async fetchExactArtifactBuffer(
+    bucketName: string,
+    objectPath: string,
+    options?: { session?: any }
+  ): Promise<Buffer> {
+    const exactMockKey = `${bucketName}/${objectPath}`;
+    if (this.mockStore.has(exactMockKey)) {
+      return this.mockStore.get(exactMockKey)!.buffer;
+    }
+    if (this.useMock || process.env.NODE_ENV === 'test') {
+      throw new Error(`[GcsArtifactStore Mock] Exact artifact gs://${bucketName}/${objectPath} not found.`);
+    }
+
+    const clients = await getStorageClientsForSessions({ session: options?.session });
+    let lastError: any = null;
+    for (const storage of clients) {
+      try {
+        const [bytes] = await storage.bucket(bucketName).file(objectPath).download();
+        const buffer = Buffer.from(bytes);
+        if (buffer.length > 0) return buffer;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw new Error(
+      `[GcsArtifactStore] Exact artifact download failed for gs://${bucketName}/${objectPath}: ${sanitizeGcsError(String(lastError?.message || lastError || 'no usable storage client'))}`
+    );
+  }
+
   public async discoverTaskPrefixVideo(params: {
     taskKey: string;
     session?: any;
@@ -508,7 +537,10 @@ export class GcsArtifactStore {
     const valid: Array<{ candidate: TaskPrefixVideoCandidate; buffer: Buffer }> = [];
     for (const candidate of candidates) {
       try {
-        const buffer = await this.fetchArtifactBuffer(bucketName, candidate.outputObjectPath, { session: params.session });
+        // Recovery evidence must be the exact object returned by the exact task/attempt
+        // prefix listing. The general artifact fetcher intentionally has historical
+        // fallback paths, so it is forbidden here.
+        const buffer = await this.fetchExactArtifactBuffer(bucketName, candidate.outputObjectPath, { session: params.session });
         if (buffer.length >= 1000 && VideoGenerator.isMp4Valid(buffer)) {
           valid.push({ candidate, buffer });
         }

@@ -11,6 +11,8 @@ describe('GCS unknown recovery source contract', () => {
     expect(gcs).toContain('discoverTaskPrefixVideo');
     expect(gcs).toContain('getFiles({ prefix })');
     expect(gcs).toContain("objectPath.includes('/qa/')");
+    expect(gcs).toContain('fetchExactArtifactBuffer');
+    expect(gcs).toContain('file(objectPath).download()');
     expect(gcs).toContain('VideoGenerator.isMp4Valid(buffer)');
     expect(gcs).toContain("status: 'ambiguous'");
   });
