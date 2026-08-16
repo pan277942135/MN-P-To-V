@@ -36,6 +36,7 @@ jobs:
           node scripts/disable_retry_stale_anchor.mjs
           node scripts/apply_retry_provider_authorization_patch.mjs
           node scripts/apply_retry_stale_server_patch.mjs
+          rm -f scripts/refine_retry_provider_authorization_patch.mjs
 
       - name: TypeScript gate
         run: npm run lint
