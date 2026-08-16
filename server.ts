@@ -303,6 +303,22 @@ async function settlePersistedVideoThroughQa(params: {
     });
     if (!reservation.reserved) return reservation.task;
 
+    let preparedRetry;
+    try {
+      preparedRetry = await DurableVideoRetryService.prepare({
+        task: reservation.task,
+        decision: retryDecision,
+        session,
+      });
+    } catch (preparationErr: any) {
+      const message = `自动重试 Provider 输入准备失败，Veo 尚未进入调用窗口: ${preparationErr?.message || preparationErr}`;
+      return await taskStateMachineService.failAutomaticRetryBeforeProvider({
+        taskId,
+        idempotencyKey: retryDecision.idempotencyKey,
+        message,
+      });
+    }
+
     let authorizedRetryTask: ServerVideoTaskRecord;
     try {
       authorizedRetryTask = await taskStateMachineService.authorizeAutomaticProviderRetry({
@@ -324,6 +340,7 @@ async function settlePersistedVideoThroughQa(params: {
         decision: retryDecision,
         session,
         ai,
+        prepared: preparedRetry,
       });
 
       if (retryStart.operationName) {

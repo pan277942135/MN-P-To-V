@@ -37,7 +37,9 @@ describe('durable provider storage intent source contract', () => {
     expect(state).toContain('providerStorageIntentPersistedAt: now');
     expect(retry).toContain('M2_4_RETRY_STORAGE_INTENT_MISMATCH');
     expect(retry).toContain('task.expectedProviderStorageUri !== derivedStorageUri');
-    expect(retry).toContain('task.expectedProviderStorageUri\n    );');
+    expect(retry).toContain('expectedStorageUri: task.expectedProviderStorageUri');
+    expect(retry).toContain('prepared.expectedStorageUri !== task.expectedProviderStorageUri');
+    expect(retry).toContain('prepared.expectedStorageUri\n    );');
   });
 
   it('fails closed on persisted/derived intent mismatch while retaining legacy derived fallback', () => {

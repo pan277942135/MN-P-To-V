@@ -222,7 +222,19 @@ describe('M2-4 durable provider retry reservation', () => {
     })).rejects.toThrow('M2_4_RETRY_SUBMISSION_STALE');
 
     await expect(DurableVideoRetryService.launch({
-      task: reserved.task, decision, session: {} as any, ai: {} as any,
+      task: reserved.task,
+      decision,
+      session: {} as any,
+      ai: {} as any,
+      prepared: {
+        firstFrame: Buffer.from('frame'),
+        firstFrameMimeType: 'image/jpeg',
+        masterImages: [Buffer.from('master')],
+        masterImageMimeTypes: ['image/jpeg'],
+        prompt: 'test',
+        attemptTaskKey: reserved.task.providerStorageTaskKey!,
+        expectedStorageUri: reserved.task.expectedProviderStorageUri!,
+      },
     })).rejects.toThrow('M2_4_RETRY_PROVIDER_NOT_AUTHORIZED');
   });
 

@@ -15,11 +15,22 @@ describe('automatic retry Provider authorization source contract', () => {
     expect(state).toContain("retrySubmissionState: 'authorized'");
   });
 
-  it('authorizes before launch and launch rejects a mere reservation', () => {
+  it('finishes fallible preparation before authorization and Provider launch', () => {
+    const prepareIndex = server.indexOf('DurableVideoRetryService.prepare({');
     const authorizeIndex = server.indexOf('authorizeAutomaticProviderRetry({');
     const launchIndex = server.indexOf('DurableVideoRetryService.launch({');
-    expect(authorizeIndex).toBeGreaterThan(-1);
+    expect(prepareIndex).toBeGreaterThan(-1);
+    expect(authorizeIndex).toBeGreaterThan(prepareIndex);
     expect(launchIndex).toBeGreaterThan(authorizeIndex);
+
+    const prepareMethod = retry.indexOf('static async prepare');
+    const launchMethod = retry.indexOf('static async launch');
+    const providerCall = retry.indexOf('VideoGenerator.startVideoGeneration', launchMethod);
+    expect(prepareMethod).toBeGreaterThan(-1);
+    expect(retry.indexOf('fetchArtifactBuffer', prepareMethod)).toBeLessThan(launchMethod);
+    expect(launchMethod).toBeGreaterThan(prepareMethod);
+    expect(providerCall).toBeGreaterThan(launchMethod);
+    expect(retry.slice(launchMethod, providerCall)).not.toContain('fetchArtifactBuffer');
     expect(retry).toContain('M2_4_RETRY_PROVIDER_NOT_AUTHORIZED');
   });
 
