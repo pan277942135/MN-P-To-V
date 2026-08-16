@@ -1,0 +1,66 @@
+name: Pre-Provider Durability Boundary Cutover
+
+on:
+  push:
+    branches:
+      - core-pre-provider-durability-boundary
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: core-pre-provider-durability-boundary
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Apply pre-provider durability boundary patch
+        run: |
+          node scripts/apply_pre_provider_boundary_patch.mjs
+          node scripts/refine_pre_provider_boundary_tests.mjs
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
+
+      - name: Persist verified product changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            server.ts \
+            src/types/index.ts \
+            src/server/services/taskStateMachineService.ts \
+            src/__tests__/preProviderDurabilityBoundary.test.ts \
+            src/__tests__/preProviderDurabilityBoundarySourceContract.test.ts
+          if git diff --cached --quiet; then
+            echo "No product changes to persist"
+          else
+            git commit -m "feat: establish durable pre-provider submission boundary"
+            git push origin HEAD:core-pre-provider-durability-boundary
+          fi
