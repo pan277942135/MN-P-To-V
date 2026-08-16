@@ -32,7 +32,9 @@ jobs:
         run: npm install
 
       - name: Apply retry Provider authorization patch
-        run: node scripts/apply_retry_provider_authorization_patch.mjs
+        run: |
+          node scripts/refine_retry_provider_authorization_patch.mjs
+          node scripts/apply_retry_provider_authorization_patch.mjs
 
       - name: TypeScript gate
         run: npm run lint
