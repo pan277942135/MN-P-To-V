@@ -24,6 +24,8 @@ export interface VideoInspectionResult {
   extractedFrames: ExtractedVideoFrame[];
   extractedFrameBuffers: Buffer[];
   sampleTimestampsSec: number[];
+  samplingStrategyVersion?: 'dense_temporal_v1';
+  identityQaTargetIntervalSec?: number;
   issueReason?: string;
 }
 
@@ -35,6 +37,11 @@ export interface VideoProbeMetadata {
 }
 
 export class VideoInspector {
+  static readonly IDENTITY_QA_SAMPLING_VERSION = 'dense_temporal_v1' as const;
+  static readonly IDENTITY_QA_TARGET_INTERVAL_SEC = 0.5;
+  static readonly IDENTITY_QA_MIN_SAMPLES = 6;
+  static readonly IDENTITY_QA_MAX_SAMPLES = 16;
+
   static verifyMp4Container(buffer: Buffer): boolean {
     // Offset 4..7 must be readable for the ISO BMFF `ftyp` box identifier.
     if (!buffer || buffer.length < 8) return false;
@@ -90,7 +97,7 @@ export class VideoInspector {
   }
 
   /**
-   * Build six evenly distributed sample timestamps from the real duration.
+   * Build evenly distributed sample timestamps from the real duration.
    * The final sample is moved one frame (or at least 50 ms) before EOS so ffmpeg
    * does not seek beyond the last decodable frame.
    */
@@ -113,6 +120,30 @@ export class VideoInspector {
       timestamps.push(Number(t.toFixed(3)));
     }
     return timestamps;
+  }
+
+  static computeIdentityQaSampleCount(
+    durationSeconds: number,
+    targetIntervalSec = this.IDENTITY_QA_TARGET_INTERVAL_SEC,
+    minSamples = this.IDENTITY_QA_MIN_SAMPLES,
+    maxSamples = this.IDENTITY_QA_MAX_SAMPLES
+  ): number {
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return 0;
+    if (!Number.isFinite(targetIntervalSec) || targetIntervalSec <= 0) return 0;
+    if (!Number.isInteger(minSamples) || !Number.isInteger(maxSamples) || minSamples <= 0 || maxSamples < minSamples) {
+      return 0;
+    }
+
+    // +1 preserves both temporal endpoints. For the common Veo durations this yields:
+    // 4s -> 9 frames, 6s -> 13 frames, 8s -> capped at 16 frames.
+    const requested = Math.ceil(durationSeconds / targetIntervalSec) + 1;
+    return Math.min(maxSamples, Math.max(minSamples, requested));
+  }
+
+  static buildIdentityQaSampleTimestamps(durationSeconds: number, fps = 24): number[] {
+    const sampleCount = this.computeIdentityQaSampleCount(durationSeconds);
+    if (sampleCount <= 0) return [];
+    return this.buildSampleTimestamps(durationSeconds, sampleCount, fps);
   }
 
   private static async probeVideoFile(inputMp4Path: string): Promise<VideoProbeMetadata> {
@@ -168,13 +199,13 @@ export class VideoInspector {
 
     try {
       metadata = await this.probeVideoFile(inputMp4Path);
-      const timestamps = this.buildSampleTimestamps(
+      const expectedSampleCount = this.computeIdentityQaSampleCount(metadata.durationSeconds);
+      const timestamps = this.buildIdentityQaSampleTimestamps(
         metadata.durationSeconds,
-        6,
         metadata.fps
       );
 
-      if (timestamps.length !== 6) {
+      if (expectedSampleCount <= 0 || timestamps.length !== expectedSampleCount) {
         return {
           valid: false,
           sizeBytes,
@@ -182,7 +213,9 @@ export class VideoInspector {
           extractedFrames: [],
           extractedFrameBuffers: [],
           sampleTimestampsSec: timestamps,
-          issueReason: 'video_sampling_plan_invalid: 无法根据真实时长生成 6 个抽帧时间点',
+          samplingStrategyVersion: this.IDENTITY_QA_SAMPLING_VERSION,
+          identityQaTargetIntervalSec: this.IDENTITY_QA_TARGET_INTERVAL_SEC,
+          issueReason: `video_sampling_plan_invalid: 无法根据真实时长生成动态身份 QA 抽帧计划（expected=${expectedSampleCount}, actual=${timestamps.length}）`,
         };
       }
 
@@ -246,6 +279,8 @@ export class VideoInspector {
           extractedFrames,
           extractedFrameBuffers,
           sampleTimestampsSec,
+          samplingStrategyVersion: this.IDENTITY_QA_SAMPLING_VERSION,
+          identityQaTargetIntervalSec: this.IDENTITY_QA_TARGET_INTERVAL_SEC,
           issueReason: `video_frame_extraction_incomplete: 抽帧失败时间点 ${failedTimestamps.join(', ')}`,
         };
       }
@@ -265,6 +300,8 @@ export class VideoInspector {
           extractedFrames,
           extractedFrameBuffers,
           sampleTimestampsSec,
+          samplingStrategyVersion: this.IDENTITY_QA_SAMPLING_VERSION,
+          identityQaTargetIntervalSec: this.IDENTITY_QA_TARGET_INTERVAL_SEC,
           issueReason: '视频所有真实抽帧完全相同（视频流冻结或静态假视频）',
         };
       }
@@ -276,6 +313,8 @@ export class VideoInspector {
         extractedFrames,
         extractedFrameBuffers,
         sampleTimestampsSec,
+        samplingStrategyVersion: this.IDENTITY_QA_SAMPLING_VERSION,
+        identityQaTargetIntervalSec: this.IDENTITY_QA_TARGET_INTERVAL_SEC,
       };
     } catch (err) {
       return emptyResult(`video_probe_or_extraction_failed: ${redactSecrets(err)}`);

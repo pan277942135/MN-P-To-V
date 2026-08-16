@@ -54,6 +54,7 @@ export class DurableVideoIdentityQaService {
       masterMimeTypes: task.qaMasterImageMimeTypes || [],
       identitySpec: task.identitySpec,
       characterDescription: task.characterDescription || '',
+      samplingStrategyVersion: inspection.samplingStrategyVersion || 'unspecified',
     });
   }
 }

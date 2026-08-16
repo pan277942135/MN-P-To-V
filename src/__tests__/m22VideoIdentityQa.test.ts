@@ -46,6 +46,22 @@ function basePayload(scores: number[]) {
 }
 
 describe('M2-2 Video Identity QA', () => {
+  it('builds dense identity QA sample plans from real duration instead of a fixed six-frame blind spot', () => {
+    expect(VideoInspector.computeIdentityQaSampleCount(2)).toBe(6);
+    expect(VideoInspector.computeIdentityQaSampleCount(4)).toBe(9);
+    expect(VideoInspector.computeIdentityQaSampleCount(6)).toBe(13);
+    expect(VideoInspector.computeIdentityQaSampleCount(8)).toBe(16);
+    expect(VideoInspector.computeIdentityQaSampleCount(30)).toBe(16);
+
+    const fourSecondDense = VideoInspector.buildIdentityQaSampleTimestamps(4, 24);
+    const eightSecondDense = VideoInspector.buildIdentityQaSampleTimestamps(8, 24);
+    expect(fourSecondDense).toHaveLength(9);
+    expect(eightSecondDense).toHaveLength(16);
+    expect(Math.max(...eightSecondDense.slice(1).map((t, i) => t - eightSecondDense[i]))).toBeLessThanOrEqual(0.54);
+    expect(eightSecondDense[0]).toBe(0);
+    expect(eightSecondDense.at(-1)).toBeLessThan(8);
+  });
+
   it('builds sample timestamps from real duration instead of fixed 8s magic values', () => {
     const fourSecond = VideoInspector.buildSampleTimestamps(4, 6, 24);
     const sixSecond = VideoInspector.buildSampleTimestamps(6, 6, 24);
@@ -89,6 +105,14 @@ describe('M2-2 Video Identity QA', () => {
     expect(report.worstFrameTimestamp).toBe(3.95);
     expect(report.frameReports.map((frame) => frame.timestampSec)).toEqual(timestamps);
     expect(report.frameReports.map((frame) => frame.identityScore)).toEqual([98, 97, 96, 95, 94, 93]);
+    expect(report.samplingManifest).toEqual({
+      version: 'unspecified',
+      sampleCount: 6,
+      timestampsSec: timestamps,
+      firstTimestampSec: 0,
+      lastTimestampSec: 3.95,
+      maximumGapSec: 0.79,
+    });
   });
 
   it('returns review with a coarse drift segment for recoverable sampled-frame identity drift', async () => {
