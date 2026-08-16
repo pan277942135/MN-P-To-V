@@ -1,0 +1,66 @@
+name: Provider Recovery UI Safety
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - core-provider-recovery-ui
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  provider-recovery-ui:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Recovery UI safety contract gate
+        run: |
+          grep -q "case 'submission_outcome_unknown':" src/pages/TaskHistoryPage.tsx
+          grep -q "提交结果待核实" src/pages/TaskHistoryPage.tsx
+          grep -q "isTaskProviderOutcomeUnknown" src/pages/TaskHistoryPage.tsx
+          grep -q "ProviderOperationRecoveryCard" src/pages/TaskHistoryPage.tsx
+          grep -q "该任务的 Veo 提交结果尚未核实，已禁止重新生成" src/pages/TaskHistoryPage.tsx
+          grep -q "该任务仍受 Provider 安全锁保护，禁止删除" src/pages/TaskHistoryPage.tsx
+          grep -q "clearableFailedTaskCount" src/pages/TaskHistoryPage.tsx
+          grep -q "!isTaskProviderOutcomeUnknown(t)" src/pages/TaskHistoryPage.tsx
+          grep -q "fetch('/api/videos/recover-task'" src/components/ProviderOperationRecoveryCard.tsx
+          grep -q "'x-connection-id': connectionId" src/components/ProviderOperationRecoveryCard.tsx
+          grep -q "provider_operation_linkage_not_proven" src/components/ProviderOperationRecoveryCard.tsx
+          grep -q "当前任务继续锁定" src/components/ProviderOperationRecoveryCard.tsx
+          if grep -q "/api/videos/start" src/components/ProviderOperationRecoveryCard.tsx; then
+            echo "recovery UI must not invoke /api/videos/start" >&2
+            exit 1
+          fi
+          if grep -q "predictLongRunning" src/components/ProviderOperationRecoveryCard.tsx; then
+            echo "recovery UI must not invoke provider generation" >&2
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
