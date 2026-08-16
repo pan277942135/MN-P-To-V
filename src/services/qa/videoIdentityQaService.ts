@@ -18,11 +18,21 @@ export interface IdentityDriftSegment {
   severity: 'review' | 'fail';
 }
 
+export interface IdentityQaSamplingManifest {
+  version: string;
+  sampleCount: number;
+  timestampsSec: number[];
+  firstTimestampSec: number;
+  lastTimestampSec: number;
+  maximumGapSec: number;
+}
+
 export interface VideoIdentityQaReport extends VideoQaReport {
   gateStatus: VideoIdentityGateStatus;
   identityDriftDetected: boolean;
   worstFrameTimestamp: number | null;
   identityDriftSegments: IdentityDriftSegment[];
+  samplingManifest: IdentityQaSamplingManifest;
 }
 
 interface FrameAssessment {
@@ -106,6 +116,7 @@ export class VideoIdentityQaService {
     masterMimeTypes?: string[];
     identitySpec: IdentitySpec;
     characterDescription?: string;
+    samplingStrategyVersion?: string;
   }): Promise<VideoIdentityQaReport> {
     const {
       ai,
@@ -117,6 +128,7 @@ export class VideoIdentityQaService {
       masterMimeTypes = [],
       identitySpec,
       characterDescription = '',
+      samplingStrategyVersion = 'unspecified',
     } = params;
 
     if (!samples || samples.length < 2) {
@@ -128,6 +140,25 @@ export class VideoIdentityQaService {
     if (samples.some((sample) => !sample.buffer?.length || !Number.isFinite(sample.timestampSec))) {
       throw new Error('VIDEO_QA_INPUT_INVALID: 抽帧数据或真实时间戳无效');
     }
+    for (let i = 1; i < samples.length; i++) {
+      if (samples[i].timestampSec <= samples[i - 1].timestampSec) {
+        throw new Error('VIDEO_QA_INPUT_INVALID: 抽帧时间戳必须严格递增');
+      }
+    }
+
+    const timestampsSec = samples.map((sample) => Number(sample.timestampSec.toFixed(3)));
+    let maximumGapSec = 0;
+    for (let i = 1; i < timestampsSec.length; i++) {
+      maximumGapSec = Math.max(maximumGapSec, timestampsSec[i] - timestampsSec[i - 1]);
+    }
+    const samplingManifest: IdentityQaSamplingManifest = {
+      version: samplingStrategyVersion,
+      sampleCount: timestampsSec.length,
+      timestampsSec,
+      firstTimestampSec: timestampsSec[0],
+      lastTimestampSec: timestampsSec[timestampsSec.length - 1],
+      maximumGapSec: Number(maximumGapSec.toFixed(3)),
+    };
 
     const parts: any[] = [];
 
@@ -373,6 +404,7 @@ IdentitySpec：${JSON.stringify(identitySpec)}
         identityDriftDetected,
         worstFrameTimestamp: worstFrame?.timestampSec ?? null,
         identityDriftSegments,
+        samplingManifest,
       };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

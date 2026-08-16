@@ -25,6 +25,14 @@ function report(overrides: Partial<VideoIdentityQaReport> = {}): VideoIdentityQa
     identityDriftSegments: [
       { startTimestampSec: 2, endTimestampSec: 2, minimumIdentityScore: 85, severity: 'review' },
     ],
+    samplingManifest: {
+      version: 'fixture',
+      sampleCount: 2,
+      timestampsSec: [0, 2],
+      firstTimestampSec: 0,
+      lastTimestampSec: 2,
+      maximumGapSec: 2,
+    },
     ...overrides,
   };
 }

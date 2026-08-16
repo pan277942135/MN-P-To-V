@@ -26,6 +26,14 @@ function qa(overrides: Partial<VideoIdentityQaReport> = {}): VideoIdentityQaRepo
     identityDriftSegments: [
       { startTimestampSec: 2, endTimestampSec: 2, minimumIdentityScore: 82, severity: 'review' },
     ],
+    samplingManifest: {
+      version: 'fixture',
+      sampleCount: 2,
+      timestampsSec: [0, 2],
+      firstTimestampSec: 0,
+      lastTimestampSec: 2,
+      maximumGapSec: 2,
+    },
     ...overrides,
   };
 }
