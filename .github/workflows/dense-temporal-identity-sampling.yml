@@ -1,0 +1,65 @@
+name: Dense Temporal Identity Sampling Safety
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - core-dense-temporal-identity-sampling
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  dense-temporal-identity-sampling:
+    runs-on: ubuntu-latest
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dense temporal identity sampling contract gate
+        run: |
+          grep -q "^  contents: read$" .github/workflows/dense-temporal-identity-sampling.yml
+          grep -q "IDENTITY_QA_SAMPLING_VERSION = 'dense_temporal_v1'" src/services/video/videoInspector.ts
+          grep -q "IDENTITY_QA_TARGET_INTERVAL_SEC = 0.5" src/services/video/videoInspector.ts
+          grep -q "IDENTITY_QA_MIN_SAMPLES = 6" src/services/video/videoInspector.ts
+          grep -q "IDENTITY_QA_MAX_SAMPLES = 16" src/services/video/videoInspector.ts
+          grep -q "computeIdentityQaSampleCount" src/services/video/videoInspector.ts
+          grep -q "buildIdentityQaSampleTimestamps" src/services/video/videoInspector.ts
+          grep -q "samplingManifest: IdentityQaSamplingManifest" src/services/qa/videoIdentityQaService.ts
+          grep -q "maximumGapSec" src/services/qa/videoIdentityQaService.ts
+          grep -q "抽帧时间戳必须严格递增" src/services/qa/videoIdentityQaService.ts
+          grep -q "samplingStrategyVersion: inspection.samplingStrategyVersion" src/server/services/durableVideoIdentityQaService.ts
+          grep -q "computeIdentityQaSampleCount(4)).toBe(9)" src/__tests__/m22VideoIdentityQa.test.ts
+          grep -q "computeIdentityQaSampleCount(6)).toBe(13)" src/__tests__/m22VideoIdentityQa.test.ts
+          grep -q "computeIdentityQaSampleCount(8)).toBe(16)" src/__tests__/m22VideoIdentityQa.test.ts
+          grep -q "toBeLessThanOrEqual(0.54)" src/__tests__/m22VideoIdentityQa.test.ts
+          grep -q "averageIdentityScore >= 95" src/services/qa/videoIdentityQaService.ts
+          grep -q "minimumIdentityScore >= 90" src/services/qa/videoIdentityQaService.ts
+          grep -q "minimumIdentityScore < 80" src/services/qa/videoIdentityQaService.ts
+          grep -q "temporalConsistencyScore < 75" src/services/qa/videoIdentityQaService.ts
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: TypeScript gate
+        run: npm run lint
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Diff integrity
+        run: git diff --check
