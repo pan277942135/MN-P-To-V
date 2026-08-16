@@ -789,6 +789,9 @@ export class TaskStateMachineService {
       ) {
         throw new Error(`[M2_4_RETRY_OUTCOME_UNKNOWN_BEFORE_AUTHORIZATION] Retry ${idempotencyKey} has no durable Provider authorization evidence.`);
       }
+      if (currentTask.status !== 'generating' || currentTask.retrySubmissionState !== 'authorized') {
+        throw new Error(`[M2_4_RETRY_OUTCOME_UNKNOWN_INVALID_STATE] Retry ${idempotencyKey} is already ${currentTask.status}/${currentTask.retrySubmissionState || 'unset'}; refusing late unknown overwrite.`);
+      }
       const now = Date.now();
       const version = currentVersion(currentTask);
       const patch: Partial<ServerVideoTaskRecord> = {

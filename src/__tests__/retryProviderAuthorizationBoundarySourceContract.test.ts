@@ -36,6 +36,8 @@ describe('automatic retry Provider authorization source contract', () => {
 
   it('never turns an evidence-free reserved retry into unknown', () => {
     expect(state).toContain('M2_4_RETRY_OUTCOME_UNKNOWN_BEFORE_AUTHORIZATION');
+    expect(state).toContain('M2_4_RETRY_OUTCOME_UNKNOWN_INVALID_STATE');
+    expect(state).toContain("currentTask.status !== 'generating' || currentTask.retrySubmissionState !== 'authorized'");
     expect(state).toContain("failureReason: 'pre_provider_retry_abandoned'");
     expect(server).toContain('reconcileStaleAutomaticRetryReservation');
     expect(server).toContain('AUTOMATIC_RETRY_AUTHORIZATION_STALE');

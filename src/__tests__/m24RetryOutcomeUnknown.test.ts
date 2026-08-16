@@ -55,6 +55,25 @@ describe('M2-4 automatic retry Provider authorization boundary', () => {
     expect(unknown.structuredError?.retryable).toBe(false);
   });
 
+  it('refuses a late unknown write after the authorized retry has already been submitted', async () => {
+    const task = retryTask('retry_late_worker', 'authorized');
+    await firestoreTaskRepository.createTask(task);
+    await firestoreTaskRepository.updateTask(task.taskId, {
+      status: 'polling',
+      retrySubmissionState: 'submitted',
+      operationName: 'projects/test/locations/us-central1/operations/already-submitted',
+      providerOperationId: 'projects/test/locations/us-central1/operations/already-submitted',
+    });
+
+    await expect(taskStateMachineService.markAutomaticRetryOutcomeUnknown({
+      taskId: task.taskId, idempotencyKey: task.providerRetryIdempotencyKey!, message: 'late worker',
+    })).rejects.toThrow('M2_4_RETRY_OUTCOME_UNKNOWN_INVALID_STATE');
+
+    const stored = await firestoreTaskRepository.getTask(task.taskId);
+    expect(stored?.status).toBe('polling');
+    expect(stored?.retrySubmissionState).toBe('submitted');
+  });
+
   it('refuses to manufacture unknown from a reservation with no Provider authorization evidence', async () => {
     const task = retryTask('retry_reserved', 'reserved');
     await firestoreTaskRepository.createTask(task);
