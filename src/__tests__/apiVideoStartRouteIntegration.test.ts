@@ -44,18 +44,20 @@ describe('M2-1.2 Express Route Integration Test: /api/videos/start', () => {
       return mockDurableTask;
     });
 
-    // Mock the durable execution boundary used by the production route.
-    vi.spyOn(taskStateMachineService, 'acquireLease').mockImplementation(async ({ taskId, leaseOwner }: any) => {
-      const now = Date.now();
-      mockDurableTask = {
-        ...(mockDurableTask || { id: taskId, taskId, status: 'submitting' }),
-        executionId: 'exec_route_test',
-        leaseOwner,
-        leaseExpiresAt: now + 180000,
-        stateVersion: 2,
-        statusVersion: 2,
-      };
-      return { acquired: true, reason: 'acquired', executionId: 'exec_route_test', task: mockDurableTask };
+    // Mock Firestore transactions, not Provider authorization itself. Successful route
+    // cases must prove the durable preparing -> submitting transaction can commit before
+    // predictLongRunning is allowed to execute.
+    vi.spyOn(firestoreTaskRepository, 'runTaskTransaction').mockImplementation(async (taskId: string, mutator: any) => {
+      const outcome = await mutator(mockDurableTask);
+      if (outcome?.taskPatch) {
+        mockDurableTask = {
+          ...(mockDurableTask || { id: taskId, taskId }),
+          ...outcome.taskPatch,
+          id: taskId,
+          taskId,
+        };
+      }
+      return outcome?.result;
     });
     vi.spyOn(taskStateMachineService, 'transitionTask').mockImplementation(async ({ taskId, toStatus, patch }: any) => {
       mockDurableTask = {

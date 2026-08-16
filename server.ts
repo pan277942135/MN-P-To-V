@@ -1532,12 +1532,16 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const sceneImgBuf = sceneFile ? sceneFile.buffer : approvedFirstFrameBuf;
       const sceneImgMime = sceneFile ? (sceneFile.mimetype || 'image/jpeg') : approvedFirstFrameMime;
       const sceneImageUrl = saveImageBufferToFile(taskId, sceneImgBuf, sceneImgMime);
+      const initialLeaseOwner = process.env.K_REVISION || process.env.K_SERVICE || `pid_${process.pid}`;
+      const initialExecutionId = `exec_${crypto.randomUUID()}`;
+      const initialLeaseStartedAt = Date.now();
+      const initialLeaseExpiresAt = initialLeaseStartedAt + 180000;
 
       const taskRecord: ServerVideoTaskRecord = {
         id: taskId,
         taskId,
         sceneImageUrl,
-        status: 'submitting',
+        status: 'preparing',
         modelId: models.videoModel,
         projectId: session.projectId || 'xp-vertex-project',
         region: session.region || session.location || 'us-central1',
@@ -1575,6 +1579,14 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         providerStorageTaskKey,
         expectedProviderStorageUri,
         providerStorageIntentPersistedAt: now,
+        executionId: initialExecutionId,
+        leaseOwner: initialLeaseOwner,
+        leaseExpiresAt: initialLeaseExpiresAt,
+        heartbeatAt: initialLeaseStartedAt,
+        attempt: 1,
+        maxAttempts: 3,
+        stateVersion: 1,
+        statusVersion: 1,
         qaAttempt: 1,
         retryCount: 0,
         retrySubmissionState: 'none',
@@ -1610,24 +1622,9 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
 
       try {
         taskRecord.evidenceSource = 'firestore';
+        // Task creation, provider admission, and the initial execution lease commit in one
+        // Firestore transaction. There is no post-create lease-acquisition gap.
         await firestoreTaskRepository.createTask(taskRecord);
-
-        // P0-5: acquire a durable Firestore execution lease before invoking the provider.
-        const leaseOwner = process.env.K_REVISION || process.env.K_SERVICE || `pid_${process.pid}`;
-        const leaseResult = await taskStateMachineService.acquireLease({
-          taskId,
-          leaseOwner,
-          leaseDurationMs: 180000,
-          maxAttempts: 3,
-        });
-        if (!leaseResult.acquired || !leaseResult.executionId) {
-          throw new Error(`Unable to acquire durable execution lease for task ${taskId}: ${leaseResult.reason || 'unknown'}`);
-        }
-        taskRecord.executionId = leaseResult.executionId;
-        taskRecord.leaseOwner = leaseOwner;
-        taskRecord.leaseExpiresAt = leaseResult.task?.leaseExpiresAt;
-        taskRecord.stateVersion = leaseResult.task?.stateVersion;
-        taskRecord.statusVersion = leaseResult.task?.statusVersion;
       } catch (fsErr: any) {
         console.error('[Firestore Task Creation Error]:', fsErr);
         const errStr = String(fsErr?.message || fsErr);
@@ -1644,7 +1641,15 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
               serverPersisted: true,
               taskId: existing.taskId,
               status: existing.status,
-              submissionState: 'submitted',
+              submissionState: existing.status === 'preparing'
+                ? 'reserved'
+                : existing.status === 'submission_outcome_unknown'
+                  ? 'outcome_unknown'
+                  : existing.operationName
+                    ? 'submitted'
+                    : existing.status === 'submitting'
+                      ? 'submitting'
+                      : 'not_submitted',
               operationNamePresent: Boolean(existing.operationName),
               isIdempotentReuse: true,
               createdAt: existing.createdAt,
@@ -1763,7 +1768,28 @@ ${cleanPrompt}`
           }
         }
 
-        console.log(`[Video Start] 启动 Veo 视频生成后台任务 (taskId: ${taskId}, 时长: ${durationSeconds}s, 模型: ${models.videoModel})...`);
+        try {
+          const authorizedTask = await taskStateMachineService.authorizeProviderSubmission({
+            taskId,
+            executionId: taskRecord.executionId!,
+            providerStorageTaskKey,
+            expectedProviderStorageUri,
+          });
+          Object.assign(taskRecord, authorizedTask);
+          serverVideoTaskStore.set(taskId, authorizedTask);
+        } catch (authorizationErr: any) {
+          const message = `Provider 调用授权失败，Veo 未被调用: ${authorizationErr?.message || authorizationErr}`;
+          console.error(`[Pre-Provider Authorization Failed] Task ${taskId}:`, authorizationErr);
+          const failedTask = await taskStateMachineService.failPreparingBeforeProvider({
+            taskId,
+            executionId: taskRecord.executionId!,
+            message,
+          }).catch(() => null);
+          if (failedTask) serverVideoTaskStore.set(taskId, failedTask);
+          return;
+        }
+
+        console.log(`[Video Start] Durable Provider authorization committed; invoking Veo (taskId: ${taskId}, 时长: ${durationSeconds}s, 模型: ${models.videoModel})...`);
 
         try {
           const submitTimeoutMs = 120000;
@@ -1926,11 +1952,19 @@ ${cleanPrompt}`
       // Return only after the provider submission outcome has been durably recorded.
       const durableTask = await firestoreTaskRepository.getTask(taskId);
       return res.json({
-        accepted: true,
+        accepted: durableTask?.status !== 'failed',
         serverPersisted: true,
         taskId,
-        status: durableTask?.status || 'submitting',
-        submissionState: durableTask?.status === 'submission_outcome_unknown' ? 'outcome_unknown' : (durableTask?.operationName ? 'submitted' : 'submitting'),
+        status: durableTask?.status || 'preparing',
+        submissionState: durableTask?.status === 'submission_outcome_unknown'
+          ? 'outcome_unknown'
+          : durableTask?.operationName
+            ? 'submitted'
+            : durableTask?.status === 'submitting'
+              ? 'submitting'
+              : durableTask?.status === 'preparing'
+                ? 'reserved'
+                : 'not_submitted',
         operationNamePresent: Boolean(durableTask?.operationName),
         operationName: durableTask?.operationName,
         isIdempotentReuse: false,
@@ -2022,6 +2056,22 @@ ${cleanPrompt}`
           error: '存储服务读取异常',
           structuredError: errObj,
         });
+      }
+
+      for (let i = 0; i < tasksFromStore.length; i++) {
+        const candidate = tasksFromStore[i];
+        if (candidate?.status !== 'preparing') continue;
+        try {
+          const reconciled = await taskStateMachineService.reconcileStalePreparingTask({
+            taskId: candidate.taskId || candidate.id,
+            now,
+          });
+          tasksFromStore[i] = reconciled.task;
+          serverVideoTaskStore.set(reconciled.task.taskId || reconciled.task.id, reconciled.task);
+          if (reconciled.failed) hasUpdates = true;
+        } catch (prepErr) {
+          console.warn('[Pre-Provider Preparing Reconcile Warning]:', prepErr);
+        }
       }
 
       const tasks = tasksFromStore
@@ -2127,8 +2177,10 @@ ${cleanPrompt}`
               ? '视频生成完成'
               : effectiveStatus === 'failed'
               ? (userMsg || '视频生成未成功完成')
-              : '云端渲染中...',
-            progressPercent: effectiveStatus === 'completed' ? 100 : effectiveStatus === 'failed' ? 0 : 75,
+              : effectiveStatus === 'preparing'
+                ? '准备提交 Veo（尚未调用 Provider）'
+                : '云端渲染中...',
+            progressPercent: effectiveStatus === 'completed' ? 100 : effectiveStatus === 'failed' ? 0 : effectiveStatus === 'preparing' ? 20 : 75,
             resultVideoUrl: rec.videoDataUrl || null,
             videoUri: rec.videoUri || null,
             outputUri: rec.outputUri || null,
@@ -2607,7 +2659,7 @@ ${cleanPrompt}`
         submissionState = 'submitted';
       } else if (mappedStatus === 'submitting') {
         submissionState = 'submitting';
-      } else if (mappedStatus === 'validating') {
+      } else if (mappedStatus === 'validating' || mappedStatus === 'preparing') {
         submissionState = 'reserved';
       } else if (mappedStatus === 'submission_outcome_unknown') {
         submissionState = 'outcome_unknown';
@@ -2743,6 +2795,21 @@ ${cleanPrompt}`
       // Update memory cache with authority record from Firestore
       serverVideoTaskStore.set(taskId, record);
 
+      if (record.status === 'preparing') {
+        const reconciled = await taskStateMachineService.reconcileStalePreparingTask({ taskId });
+        record = reconciled.task;
+        serverVideoTaskStore.set(taskId, record);
+        if (record.status === 'preparing') {
+          return res.json({
+            status: 'preparing',
+            submissionState: 'reserved',
+            providerInvocationAuthorized: false,
+            progressStage: '准备提交 Veo（尚未调用 Provider）',
+            elapsedSeconds: Math.floor((Date.now() - record.createdAt) / 1000),
+          });
+        }
+      }
+
       if (record.status === 'qa_pending') {
         if (
           record.identityQaStatus === 'review' ||
@@ -2829,6 +2896,17 @@ ${cleanPrompt}`
       }
 
       if (record.status === 'failed') {
+        if (record.failureReason === 'pre_provider_abandoned' || record.failureReason === 'pre_provider_authorization_failed') {
+          return res.json({
+            status: 'failed',
+            submissionState: 'not_submitted',
+            providerInvocationAuthorized: false,
+            failureReason: record.failureReason,
+            retryMode: record.retryMode || 'SAFE_TO_REGENERATE',
+            error: record.error,
+            structuredError: record.structuredError,
+          });
+        }
         const force = req.query.force === 'true' || req.query.forceQuery === 'true' || req.query.retry === 'true';
         if (!force || !record.operationName) {
           const errObj = createStructuredError({
