@@ -174,6 +174,161 @@ export class TaskStateMachineService {
     });
   }
 
+  public async authorizeProviderSubmission(params: {
+    taskId: string;
+    executionId: string;
+    providerStorageTaskKey: string;
+    expectedProviderStorageUri: string;
+  }): Promise<ServerVideoTaskRecord> {
+    const { taskId, executionId, providerStorageTaskKey, expectedProviderStorageUri } = params;
+    return await firestoreTaskRepository.runTaskTransaction<ServerVideoTaskRecord>(taskId, (currentTask) => {
+      if (!currentTask) throw new Error(`[PRE_PROVIDER_AUTHORIZATION] Task ${taskId} not found.`);
+
+      // Firestore transactions can be retried after an ambiguous commit. Re-reading the same
+      // durable authorization for the same execution is idempotent and does not authorize twice.
+      if (
+        currentTask.status === 'submitting' &&
+        currentTask.providerSubmissionAuthorizedExecutionId === executionId &&
+        currentTask.executionId === executionId &&
+        currentTask.providerStorageTaskKey === providerStorageTaskKey &&
+        currentTask.expectedProviderStorageUri === expectedProviderStorageUri &&
+        currentTask.providerSubmissionAuthorizedAt
+      ) {
+        return { taskPatch: undefined, result: currentTask };
+      }
+
+      if (currentTask.status !== 'preparing') {
+        throw new InvalidStateTransitionError(currentTask.status, 'submitting', taskId);
+      }
+      if (!currentTask.executionId || currentTask.executionId !== executionId) {
+        throw new LateWorkerError(taskId, executionId, currentTask.executionId || 'missing');
+      }
+
+      const now = Date.now();
+      if (!currentTask.leaseExpiresAt || currentTask.leaseExpiresAt <= now) {
+        throw new Error('[PRE_PROVIDER_LEASE_EXPIRED] Durable execution lease expired before Provider authorization.');
+      }
+      if (
+        currentTask.providerStorageTaskKey !== providerStorageTaskKey ||
+        currentTask.expectedProviderStorageUri !== expectedProviderStorageUri
+      ) {
+        throw new Error('[PRE_PROVIDER_STORAGE_INTENT_MISMATCH] Durable Provider storage intent changed before submission authorization.');
+      }
+      if (currentTask.operationName || currentTask.providerOperationId || currentTask.providerSubmissionAuthorizedAt) {
+        throw new Error('[PRE_PROVIDER_INVARIANT_VIOLATION] Preparing task already contains Provider submission evidence.');
+      }
+
+      const version = currentVersion(currentTask);
+      const patch: Partial<ServerVideoTaskRecord> = {
+        status: 'submitting',
+        providerSubmissionAuthorizedAt: now,
+        providerSubmissionAuthorizedExecutionId: executionId,
+        stateVersion: version + 1,
+        statusVersion: version + 1,
+        updatedAt: now,
+      };
+      return {
+        taskPatch: patch,
+        result: { ...currentTask, ...patch } as ServerVideoTaskRecord,
+      };
+    });
+  }
+
+  public async failPreparingBeforeProvider(params: {
+    taskId: string;
+    executionId: string;
+    message: string;
+  }): Promise<ServerVideoTaskRecord> {
+    const { taskId, executionId, message } = params;
+    return await firestoreTaskRepository.runTaskTransaction<ServerVideoTaskRecord>(taskId, (currentTask) => {
+      if (!currentTask) throw new Error(`[PRE_PROVIDER_FAIL] Task ${taskId} not found.`);
+      if (currentTask.status !== 'preparing') {
+        // Once submitting is durably authorized, never downgrade it to a safe-to-retry failure.
+        return { taskPatch: undefined, result: currentTask };
+      }
+      if (!currentTask.executionId || currentTask.executionId !== executionId) {
+        throw new LateWorkerError(taskId, executionId, currentTask.executionId || 'missing');
+      }
+      if (currentTask.providerSubmissionAuthorizedAt || currentTask.operationName || currentTask.providerOperationId) {
+        return { taskPatch: undefined, result: currentTask };
+      }
+
+      const now = Date.now();
+      const version = currentVersion(currentTask);
+      const patch: Partial<ServerVideoTaskRecord> = {
+        status: 'failed',
+        failureReason: 'pre_provider_authorization_failed' as any,
+        retryMode: 'SAFE_TO_REGENERATE',
+        error: message,
+        structuredError: buildStructuredError({
+          code: 'PRE_PROVIDER_AUTHORIZATION_FAILED',
+          message,
+          stage: 'pre_provider',
+          retryable: true,
+          executionId,
+        }) as any,
+        leaseOwner: null as any,
+        leaseExpiresAt: null as any,
+        heartbeatAt: null as any,
+        stateVersion: version + 1,
+        statusVersion: version + 1,
+        updatedAt: now,
+      };
+      return { taskPatch: patch, result: { ...currentTask, ...patch } as ServerVideoTaskRecord };
+    });
+  }
+
+  public async reconcileStalePreparingTask(params: {
+    taskId: string;
+    now?: number;
+    fallbackStaleAfterMs?: number;
+  }): Promise<{ failed: boolean; task: ServerVideoTaskRecord }> {
+    const { taskId, now = Date.now(), fallbackStaleAfterMs = 180000 } = params;
+    return await firestoreTaskRepository.runTaskTransaction<{ failed: boolean; task: ServerVideoTaskRecord }>(taskId, (currentTask) => {
+      if (!currentTask) throw new Error(`[PRE_PROVIDER_RECONCILE] Task ${taskId} not found.`);
+      if (currentTask.status !== 'preparing') {
+        return { taskPatch: undefined, result: { failed: false, task: currentTask } };
+      }
+      if (currentTask.providerSubmissionAuthorizedAt || currentTask.operationName || currentTask.providerOperationId) {
+        // Inconsistent evidence is never auto-released. Preserve fail-closed semantics.
+        return { taskPatch: undefined, result: { failed: false, task: currentTask } };
+      }
+
+      const stale = currentTask.leaseExpiresAt
+        ? currentTask.leaseExpiresAt <= now
+        : now - (currentTask.updatedAt || currentTask.createdAt || now) > fallbackStaleAfterMs;
+      if (!stale) {
+        return { taskPatch: undefined, result: { failed: false, task: currentTask } };
+      }
+
+      const version = currentVersion(currentTask);
+      const message = 'Provider 调用尚未授权，但准备阶段执行租约已失效；确认没有进入 Veo 提交窗口，任务已安全终止。';
+      const patch: Partial<ServerVideoTaskRecord> = {
+        status: 'failed',
+        failureReason: 'pre_provider_abandoned' as any,
+        retryMode: 'SAFE_TO_REGENERATE',
+        error: message,
+        structuredError: buildStructuredError({
+          code: 'PRE_PROVIDER_ABANDONED',
+          message,
+          stage: 'pre_provider',
+          retryable: true,
+          executionId: currentTask.executionId,
+        }) as any,
+        leaseOwner: null as any,
+        leaseExpiresAt: null as any,
+        heartbeatAt: null as any,
+        stateVersion: version + 1,
+        statusVersion: version + 1,
+        updatedAt: now,
+      };
+      return {
+        taskPatch: patch,
+        result: { failed: true, task: { ...currentTask, ...patch } as ServerVideoTaskRecord },
+      };
+    });
+  }
+
   public async acquireLease(params: {
     taskId: string;
     leaseOwner: string;

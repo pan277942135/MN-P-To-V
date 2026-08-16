@@ -165,6 +165,8 @@ export type FailureReason =
   | 'authentication_failed'
   | 'quota_or_rate_limited'
   | 'upstream_failed'
+  | 'pre_provider_abandoned'
+  | 'pre_provider_authorization_failed'
   | 'unknown';
 
 export type RetryMode =
@@ -215,6 +217,7 @@ export type TaskStatus =
 
 export type AuditTaskStatus =
   | 'validating'
+  | 'preparing'
   | 'submitting'
   | 'polling'
   | 'polling_timeout'
@@ -367,6 +370,8 @@ export interface ServerVideoTaskRecord {
   providerStorageTaskKey?: string;
   expectedProviderStorageUri?: string;
   providerStorageIntentPersistedAt?: number;
+  providerSubmissionAuthorizedAt?: number;
+  providerSubmissionAuthorizedExecutionId?: string;
   qaAttempt?: number;
   automaticRetryPlan?: any;
   providerRetryIdempotencyKey?: string;
