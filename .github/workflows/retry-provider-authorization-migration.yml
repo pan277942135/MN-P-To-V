@@ -34,6 +34,7 @@ jobs:
       - name: Move retry preparation before Provider authorization
         run: |
           node scripts/refine_retry_prepare_before_authorization.mjs
+          node scripts/refine_provider_storage_intent_contract_for_prepared_retry.mjs
           rm -f scripts/refine_retry_provider_authorization_patch.mjs
 
       - name: TypeScript gate
@@ -56,6 +57,7 @@ jobs:
             server.ts \
             src/server/services/durableVideoRetryService.ts \
             src/__tests__/m24DurableRetryReservation.test.ts \
+            src/__tests__/providerStorageIntentSourceContract.test.ts \
             src/__tests__/retryProviderAuthorizationBoundarySourceContract.test.ts
           if git diff --cached --quiet; then
             echo "No product refinement to persist"
