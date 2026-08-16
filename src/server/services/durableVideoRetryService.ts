@@ -21,6 +21,13 @@ export class DurableVideoRetryService {
     if (decision.action !== 'REGENERATE_VIDEO' || !decision.idempotencyKey) {
       throw new Error('M2_4_RETRY_POLICY_VIOLATION: provider launch requires REGENERATE_VIDEO decision and idempotency key');
     }
+    if (
+      task.retrySubmissionState !== 'authorized' ||
+      !task.retryProviderAuthorizedAt ||
+      task.retryProviderAuthorizedIdempotencyKey !== decision.idempotencyKey
+    ) {
+      throw new Error('M2_4_RETRY_PROVIDER_NOT_AUTHORIZED: durable retry Provider authorization is required before launch');
+    }
     if (!task.qaApprovedFirstFrameObjectPath) {
       throw new Error('M2_4_RETRY_INPUT_MISSING: approved first-frame anchor is missing');
     }

@@ -167,6 +167,8 @@ export type FailureReason =
   | 'upstream_failed'
   | 'pre_provider_abandoned'
   | 'pre_provider_authorization_failed'
+  | 'pre_provider_retry_abandoned'
+  | 'pre_provider_retry_authorization_failed'
   | 'unknown';
 
 export type RetryMode =
@@ -246,7 +248,7 @@ export type IdentitySourceMode = 'DIRECT_CHARACTER_IMAGE' | 'IDENTITY_REBUILD_RE
 export type FirstFrameIdentityQaStatus = 'pass' | 'fail' | 'review';
 export type VideoIdentityQaStatus = 'not_run' | 'pass' | 'review' | 'fail';
 
-export type RetrySubmissionState = 'none' | 'reserved' | 'submitted' | 'outcome_unknown';
+export type RetrySubmissionState = 'none' | 'reserved' | 'authorized' | 'submitted' | 'outcome_unknown';
 
 export interface VideoRetryHistoryRecord {
   sequence: number;
@@ -257,7 +259,7 @@ export interface VideoRetryHistoryRecord {
   providerAttempt: number;
   qaAttempt: number;
   idempotencyKey?: string;
-  state: 'reserved' | 'submitted' | 'completed' | 'failed' | 'manual_review' | 'qa_retry';
+  state: 'reserved' | 'authorized' | 'submitted' | 'completed' | 'failed' | 'manual_review' | 'qa_retry';
   operationName?: string;
 }
 
@@ -377,6 +379,8 @@ export interface ServerVideoTaskRecord {
   providerRetryIdempotencyKey?: string;
   retrySubmissionState?: RetrySubmissionState;
   retryReservedAt?: number;
+  retryProviderAuthorizedAt?: number | null;
+  retryProviderAuthorizedIdempotencyKey?: string | null;
   retryHistory?: VideoRetryHistoryRecord[];
   artifactHistory?: VideoArtifactHistoryRecord[];
   humanReviewDecision?: HumanReviewDecision;

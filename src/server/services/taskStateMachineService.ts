@@ -543,6 +543,8 @@ export class TaskStateMachineService {
         providerRetryIdempotencyKey: decision.idempotencyKey,
         retrySubmissionState: 'reserved',
         retryReservedAt: now,
+        retryProviderAuthorizedAt: null,
+        retryProviderAuthorizedIdempotencyKey: null,
         retryHistory,
         artifactHistory,
         operationName: '',
@@ -569,6 +571,164 @@ export class TaskStateMachineService {
     });
   }
 
+  public async authorizeAutomaticProviderRetry(params: {
+    taskId: string;
+    idempotencyKey: string;
+  }): Promise<ServerVideoTaskRecord> {
+    const { taskId, idempotencyKey } = params;
+    return await firestoreTaskRepository.runTaskTransaction(taskId, (currentTask) => {
+      if (!currentTask) throw new Error(`[TaskStateMachine] Task ${taskId} not found.`);
+      if (currentTask.providerRetryIdempotencyKey !== idempotencyKey) {
+        throw new Error(`[M2_4_RETRY_AUTHORIZATION_STALE] Retry authorization no longer owns task ${taskId}.`);
+      }
+
+      if (
+        currentTask.retrySubmissionState === 'authorized' &&
+        currentTask.retryProviderAuthorizedAt &&
+        currentTask.retryProviderAuthorizedIdempotencyKey === idempotencyKey
+      ) {
+        return { taskPatch: undefined, result: currentTask };
+      }
+
+      if (currentTask.status !== 'generating' || currentTask.retrySubmissionState !== 'reserved') {
+        throw new Error(`[M2_4_RETRY_AUTHORIZATION_INVALID_STATE] Expected generating/reserved for task ${taskId}.`);
+      }
+      if (currentTask.operationName || currentTask.providerOperationId) {
+        throw new Error('[M2_4_RETRY_AUTHORIZATION_INVARIANT] Reserved retry already contains Provider operation evidence.');
+      }
+      if (!currentTask.providerStorageTaskKey || !currentTask.expectedProviderStorageUri) {
+        throw new Error('[M2_4_RETRY_AUTHORIZATION_STORAGE_INTENT_MISSING] Durable Provider storage intent is required before authorization.');
+      }
+
+      const now = Date.now();
+      const version = currentVersion(currentTask);
+      const retryHistory = [...(currentTask.retryHistory || [])];
+      const index = retryHistory.findIndex((item) => item.idempotencyKey === idempotencyKey);
+      if (index >= 0) retryHistory[index] = { ...retryHistory[index], state: 'authorized' };
+
+      const patch: Partial<ServerVideoTaskRecord> = {
+        retrySubmissionState: 'authorized',
+        retryProviderAuthorizedAt: now,
+        retryProviderAuthorizedIdempotencyKey: idempotencyKey,
+        retryHistory,
+        stateVersion: version + 1,
+        statusVersion: version + 1,
+        updatedAt: now,
+      };
+      return { taskPatch: patch, result: { ...currentTask, ...patch } as ServerVideoTaskRecord };
+    });
+  }
+
+  public async failAutomaticRetryBeforeProvider(params: {
+    taskId: string;
+    idempotencyKey: string;
+    message: string;
+  }): Promise<ServerVideoTaskRecord> {
+    const { taskId, idempotencyKey, message } = params;
+    return await firestoreTaskRepository.runTaskTransaction(taskId, (currentTask) => {
+      if (!currentTask) throw new Error(`[TaskStateMachine] Task ${taskId} not found.`);
+      if (currentTask.providerRetryIdempotencyKey !== idempotencyKey) {
+        return { taskPatch: undefined, result: currentTask };
+      }
+
+      // Once retry Provider authorization is durably proven, this task must never be
+      // downgraded to a safe-to-regenerate failure. It belongs to the ambiguous path.
+      if (
+        currentTask.retryProviderAuthorizedAt ||
+        currentTask.retryProviderAuthorizedIdempotencyKey ||
+        currentTask.retrySubmissionState === 'authorized' ||
+        currentTask.operationName ||
+        currentTask.providerOperationId
+      ) {
+        return { taskPatch: undefined, result: currentTask };
+      }
+      if (currentTask.status !== 'generating' || currentTask.retrySubmissionState !== 'reserved') {
+        return { taskPatch: undefined, result: currentTask };
+      }
+
+      const now = Date.now();
+      const version = currentVersion(currentTask);
+      const retryHistory = [...(currentTask.retryHistory || [])];
+      const index = retryHistory.findIndex((item) => item.idempotencyKey === idempotencyKey);
+      if (index >= 0) retryHistory[index] = { ...retryHistory[index], state: 'failed' };
+      const patch: Partial<ServerVideoTaskRecord> = {
+        status: 'failed',
+        failureReason: 'pre_provider_retry_authorization_failed',
+        retryMode: 'SAFE_TO_REGENERATE',
+        retryHistory,
+        error: message,
+        structuredError: buildStructuredError({
+          code: 'PRE_PROVIDER_RETRY_AUTHORIZATION_FAILED',
+          message,
+          stage: 'automatic_retry_pre_provider',
+          retryable: true,
+          attempt: currentTask.providerAttempt,
+        }),
+        stateVersion: version + 1,
+        statusVersion: version + 1,
+        updatedAt: now,
+      };
+      return { taskPatch: patch, result: { ...currentTask, ...patch } as ServerVideoTaskRecord };
+    });
+  }
+
+  public async reconcileStaleAutomaticRetryReservation(params: {
+    taskId: string;
+    now?: number;
+    staleAfterMs?: number;
+  }): Promise<{ reclaimed: boolean; task: ServerVideoTaskRecord }> {
+    const { taskId, now = Date.now(), staleAfterMs = 180000 } = params;
+    return await firestoreTaskRepository.runTaskTransaction<{ reclaimed: boolean; task: ServerVideoTaskRecord }>(taskId, (currentTask) => {
+      if (!currentTask) throw new Error(`[TaskStateMachine] Task ${taskId} not found.`);
+      if (currentTask.status !== 'generating' || currentTask.retrySubmissionState !== 'reserved') {
+        return { taskPatch: undefined, result: { reclaimed: false, task: currentTask } };
+      }
+
+      // Any durable authorization/operation evidence makes the record ambiguous and must
+      // remain blocked. Never reclaim it as a pre-Provider failure.
+      if (
+        currentTask.retryProviderAuthorizedAt ||
+        currentTask.retryProviderAuthorizedIdempotencyKey ||
+        currentTask.operationName ||
+        currentTask.providerOperationId
+      ) {
+        return { taskPatch: undefined, result: { reclaimed: false, task: currentTask } };
+      }
+
+      const ageMs = now - (currentTask.retryReservedAt || currentTask.updatedAt || now);
+      if (ageMs <= staleAfterMs) {
+        return { taskPatch: undefined, result: { reclaimed: false, task: currentTask } };
+      }
+
+      const version = currentVersion(currentTask);
+      const retryHistory = [...(currentTask.retryHistory || [])];
+      const index = retryHistory.findIndex((item) => item.idempotencyKey === currentTask.providerRetryIdempotencyKey);
+      if (index >= 0) retryHistory[index] = { ...retryHistory[index], state: 'failed' };
+      const message = '自动重试仅完成 durable reservation，Provider 调用尚未授权且 reservation 已过期；确认 Veo 未进入调用窗口，任务已安全终止。';
+      const patch: Partial<ServerVideoTaskRecord> = {
+        status: 'failed',
+        failureReason: 'pre_provider_retry_abandoned',
+        retryMode: 'SAFE_TO_REGENERATE',
+        retryHistory,
+        error: message,
+        structuredError: buildStructuredError({
+          code: 'PRE_PROVIDER_RETRY_ABANDONED',
+          message,
+          stage: 'automatic_retry_pre_provider',
+          retryable: true,
+          attempt: currentTask.providerAttempt,
+        }),
+        stateVersion: version + 1,
+        statusVersion: version + 1,
+        updatedAt: now,
+      };
+      return {
+        taskPatch: patch,
+        result: { reclaimed: true, task: { ...currentTask, ...patch } as ServerVideoTaskRecord },
+      };
+    });
+  }
+
   public async markAutomaticRetrySubmitted(params: {
     taskId: string;
     idempotencyKey: string;
@@ -580,7 +740,9 @@ export class TaskStateMachineService {
       if (!currentTask) throw new Error(`[TaskStateMachine] Task ${taskId} not found.`);
       if (
         currentTask.providerRetryIdempotencyKey !== idempotencyKey ||
-        currentTask.retrySubmissionState !== 'reserved' ||
+        currentTask.retrySubmissionState !== 'authorized' ||
+        !currentTask.retryProviderAuthorizedAt ||
+        currentTask.retryProviderAuthorizedIdempotencyKey !== idempotencyKey ||
         currentTask.status !== 'generating'
       ) {
         throw new Error(`[M2_4_RETRY_SUBMISSION_STALE] Retry submission no longer owns task ${taskId}.`);
@@ -620,6 +782,12 @@ export class TaskStateMachineService {
       if (!currentTask) throw new Error(`[TaskStateMachine] Task ${taskId} not found.`);
       if (currentTask.providerRetryIdempotencyKey !== idempotencyKey) {
         return { taskPatch: undefined, result: currentTask };
+      }
+      if (
+        !currentTask.retryProviderAuthorizedAt ||
+        currentTask.retryProviderAuthorizedIdempotencyKey !== idempotencyKey
+      ) {
+        throw new Error(`[M2_4_RETRY_OUTCOME_UNKNOWN_BEFORE_AUTHORIZATION] Retry ${idempotencyKey} has no durable Provider authorization evidence.`);
       }
       const now = Date.now();
       const version = currentVersion(currentTask);
