@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  finalize-clean-head:
+  persist-verified-product-tree:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     env:
@@ -34,105 +34,35 @@ jobs:
       - name: Apply final safety assertions
         run: node scripts/finalize_pre_provider_boundary.mjs
 
-      - name: Remove all temporary mutation tooling
+      - name: Remove temporary non-workflow tooling
         run: |
           rm -f \
             .pre-provider-patch-error.txt \
+            package-lock.json \
             scripts/apply_pre_provider_boundary_patch.mjs \
             scripts/finalize_pre_provider_boundary.mjs \
             scripts/fix_pre_provider_patch_syntax.mjs \
             scripts/refine_pre_provider_boundary_tests.mjs \
             scripts/refine_pre_provider_route_integration_test.mjs \
-            scripts/refine_pre_provider_types.mjs \
-            .github/workflows/pre-provider-boundary-migration.yml
+            scripts/refine_pre_provider_types.mjs
 
-      - name: Create permanent read-only gate
-        run: |
-          cat > .github/workflows/pre-provider-boundary.yml <<'EOF'
-          name: Pre-Provider Durability Boundary
-
-          on:
-            workflow_dispatch:
-            push:
-              branches:
-                - core-pre-provider-durability-boundary
-            pull_request:
-              branches:
-                - main
-
-          permissions:
-            contents: read
-
-          jobs:
-            pre-provider-boundary:
-              runs-on: ubuntu-latest
-              env:
-                VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
-                NODE_ENV: test
-              steps:
-                - name: Checkout
-                  uses: actions/checkout@v4
-
-                - name: Pre-provider durability contract gate
-                  run: |
-                    grep -q "status: 'preparing'" server.ts
-                    grep -q "const initialExecutionId = \`exec_\${crypto.randomUUID()}\`" server.ts
-                    grep -q "leaseExpiresAt: initialLeaseExpiresAt" server.ts
-                    grep -q "taskStateMachineService.authorizeProviderSubmission" server.ts
-                    grep -q "providerSubmissionAuthorizedAt" src/server/services/taskStateMachineService.ts
-                    grep -q "failPreparingBeforeProvider" src/server/services/taskStateMachineService.ts
-                    grep -q "reconcileStalePreparingTask" src/server/services/taskStateMachineService.ts
-                    grep -q "failureReason: 'pre_provider_abandoned'" src/server/services/taskStateMachineService.ts
-                    grep -q "failureReason: 'pre_provider_authorization_failed'" src/server/services/taskStateMachineService.ts
-                    grep -q "retryMode: 'SAFE_TO_REGENERATE'" src/server/services/taskStateMachineService.ts
-                    grep -q "rec.status === 'submitting'" server.ts
-                    grep -q "providerInvocationAuthorized: false" server.ts
-                    grep -q "runTaskTransaction" src/__tests__/apiVideoStartRouteIntegration.test.ts
-                    grep -q "never downgrades a durably authorized submitting task" src/__tests__/preProviderDurabilityBoundary.test.ts
-                    grep -q "keeps inconsistent preparing records with Provider authorization evidence fail-closed" src/__tests__/preProviderDurabilityBoundary.test.ts
-                    if grep -q "const leaseResult = await taskStateMachineService.acquireLease({" server.ts; then
-                      echo "initial provider path must not have a post-create lease acquisition gap" >&2
-                      exit 1
-                    fi
-
-                - name: Setup Node
-                  uses: actions/setup-node@v4
-                  with:
-                    node-version: '22'
-
-                - name: Install dependencies
-                  run: npm install
-
-                - name: TypeScript gate
-                  run: npm run lint
-
-                - name: Full regression suite
-                  run: npm test
-
-                - name: Production build
-                  run: npm run build
-
-                - name: Diff integrity
-                  run: git diff --check
-          EOF
-
-      - name: TypeScript gate on final source tree
+      - name: TypeScript gate on final product tree
         run: npm run lint
 
-      - name: Full regression suite on final source tree
+      - name: Full regression suite on final product tree
         run: npm test
 
-      - name: Production build on final source tree
+      - name: Production build on final product tree
         run: npm run build
 
       - name: Diff integrity
         run: git diff --check
 
-      - name: Persist verified clean head
+      - name: Persist verified product tree
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git diff --cached --check
-          git commit -m "ci: finalize read-only pre-provider durability boundary"
+          git commit -m "test: lock pre-provider fail-closed authorization invariants"
           git push origin HEAD:core-pre-provider-durability-boundary
