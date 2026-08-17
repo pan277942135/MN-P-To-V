@@ -1,0 +1,132 @@
+name: UAT Deploy Main 46da7e8
+
+on:
+  push:
+    branches:
+      - uat-deploy-main-46da7e8-20260817
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  GAR_REPO: zaojing
+  SERVICE: zaojing-m2-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+  VEO_MODEL_ID: veo-3.1-fast-generate-001
+  FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  SOURCE_REF: 46da7e8e6c90442ab7236b4f850bb5956a689bec
+
+jobs:
+  deploy-uat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact self-tested main source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+
+      - name: Verify exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_REF"
+          echo "Deploying exact source: $SOURCE_REF"
+
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Build and push immutable UAT image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$SERVICE:$SOURCE_SHA"
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy private Cloud Run UAT
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE='${{ steps.image.outputs.image }}'
+          gcloud run deploy "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --platform=managed \
+            --image="$IMAGE" \
+            --service-account="$RUNTIME_SA" \
+            --no-allow-unauthenticated \
+            --cpu=1 \
+            --memory=2Gi \
+            --timeout=900 \
+            --concurrency=1 \
+            --min-instances=0 \
+            --max-instances=2 \
+            --set-env-vars="NODE_ENV=production,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_MODEL_ID=$VEO_MODEL_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID" \
+            --quiet
+
+          gcloud run services add-iam-policy-binding "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --member="serviceAccount:$DEPLOY_SA" \
+            --role="roles/run.invoker" \
+            --quiet >/dev/null
+
+          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate for health check
+        uses: google-github-actions/auth@v3
+        id: invoke_auth
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.deploy.outputs.service_url }}
+          id_token_include_email: true
+
+      - name: Verify UAT service
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/health" | tee health.json
+
+      - name: Publish deployment summary
+        shell: bash
+        run: |
+          {
+            echo '## UAT deployment ready'
+            echo ''
+            echo "- Source commit: `${{ steps.image.outputs.source_sha }}`"
+            echo "- Cloud Run service: `$SERVICE`"
+            echo "- Revision: `${{ steps.deploy.outputs.revision }}`"
+            echo "- Private service URL: ${{ steps.deploy.outputs.service_url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
