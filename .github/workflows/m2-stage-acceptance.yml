@@ -1,17 +1,18 @@
 name: M2 Stage Acceptance + UAT Deploy
 
 on:
-  push:
+  pull_request:
     branches:
       - main
     paths:
-      - '.github/workflows/m2-stage-acceptance.yml'
+      - '.stage-acceptance-trigger'
 
 permissions:
   contents: read
   id-token: write
 
 env:
+  ACCEPTED_SOURCE_REF: 46da7e8e6c90442ab7236b4f850bb5956a689bec
   PROJECT_ID: xp-vertex-project
   REGION: us-central1
   GAR_REPO: zaojing
@@ -25,11 +26,20 @@ env:
 
 jobs:
   self-test:
+    if: github.head_ref == 'stage-acceptance-trigger-20260817'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Checkout main
+      - name: Checkout frozen accepted source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.ACCEPTED_SOURCE_REF }}
+
+      - name: Verify frozen source SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$ACCEPTED_SOURCE_REF"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -71,12 +81,15 @@ jobs:
           exit 1
 
   deploy-uat:
+    if: github.head_ref == 'stage-acceptance-trigger-20260817'
     needs: self-test
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - name: Checkout accepted source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.ACCEPTED_SOURCE_REF }}
 
       - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v3
@@ -97,6 +110,7 @@ jobs:
         run: |
           set -euo pipefail
           SOURCE_SHA="$(git rev-parse HEAD)"
+          test "$SOURCE_SHA" = "$ACCEPTED_SOURCE_REF"
           IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$SERVICE:$SOURCE_SHA"
           gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
           docker build -t "$IMAGE" .
@@ -170,7 +184,7 @@ jobs:
           {
             echo '## M2 Stage Acceptance PASSED'
             echo ''
-            echo "- Source commit: \`${{ steps.image.outputs.source_sha }}\`"
+            echo "- Frozen source commit: \`${{ steps.image.outputs.source_sha }}\`"
             echo "- Cloud Run service: \`$SERVICE\`"
             echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
             echo "- Private service URL: ${{ steps.deploy.outputs.service_url }}"
