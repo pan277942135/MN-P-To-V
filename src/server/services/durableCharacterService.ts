@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { Storage } from '@google-cloud/storage';
 import type { IdentitySpec } from '../../types';
 import { gcsArtifactStore } from '../storage/gcsArtifactStore';
 import {
@@ -32,6 +33,9 @@ export interface HydratedDurableCharacter {
   createdAt: string;
   evidenceSource: 'firestore';
 }
+
+const CHARACTER_REFERENCE_DOWNLOAD_TIMEOUT_MS = 10_000;
+const characterReferenceStorage = new Storage();
 
 function safeExtension(mimeType: string): string {
   if (mimeType === 'image/png') return 'png';
@@ -177,8 +181,30 @@ export class DurableCharacterService {
     if (!record) return null;
     const ref = record.referenceImages.find((item) => item.id === referenceId);
     if (!ref) return null;
-    const buffer = await gcsArtifactStore.fetchArtifactBuffer(ref.outputBucket, ref.outputObjectPath);
-    return { buffer, mimeType: ref.mimeType || 'image/jpeg' };
+
+    // Character masters are durable image artifacts owned by this Cloud Run service.
+    // Never route JPEG/PNG bytes through the generic video artifact downloader: that
+    // path validates MP4 signatures and performs video-oriented candidate/backoff
+    // retries, which previously kept image requests open for ~2 minutes and exhausted
+    // every Cloud Run concurrency slot.
+    if (gcsArtifactStore.useMock || process.env.NODE_ENV === 'test') {
+      const buffer = await gcsArtifactStore.fetchArtifactBuffer(ref.outputBucket, ref.outputObjectPath);
+      return { buffer, mimeType: ref.mimeType || 'image/jpeg' };
+    }
+
+    try {
+      const file = characterReferenceStorage.bucket(ref.outputBucket).file(ref.outputObjectPath);
+      const [bytes] = await file.download({ timeout: CHARACTER_REFERENCE_DOWNLOAD_TIMEOUT_MS } as any);
+      const buffer = Buffer.from(bytes);
+      if (buffer.length === 0) {
+        throw new Error('downloaded reference image is empty');
+      }
+      return { buffer, mimeType: ref.mimeType || 'image/jpeg' };
+    } catch (err: any) {
+      throw new Error(
+        `[DurableCharacterService] Character reference fast-path download failed for ${characterId}/${referenceId}: ${err?.message || String(err)}`
+      );
+    }
   }
 
   public async delete(id: string): Promise<boolean> {
