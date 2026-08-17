@@ -1,0 +1,293 @@
+name: Deploy Character Reference Fast Path UAT
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  ACCEPTED_SOURCE_REF: 55882e0b228c03cf37bc3464af1bd20b7ee21f66
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  GAR_REPO: zaojing
+  SERVICE: zaojing-m2-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+  VEO_MODEL_ID: veo-3.1-fast-generate-001
+  FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout accepted source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.ACCEPTED_SOURCE_REF }}
+      - name: Verify exact source SHA
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$ACCEPTED_SOURCE_REF"
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Diff integrity
+        run: git diff --check
+      - name: TypeScript gate
+        run: bun run lint
+      - name: Full regression suite
+        run: bun run test
+      - name: Production build
+        run: bun run build
+      - name: Docker build
+        run: docker build -t zaojing-character-fast-path:ci .
+      - name: Local health smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          cid="$(docker run -d -e PORT=8080 -e P0_DISABLE_STARTUP_RECOVERY=1 -p 18080:8080 zaojing-character-fast-path:ci)"
+          cleanup() { docker rm -f "$cid" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/api/health >/tmp/health.json; then
+              cat /tmp/health.json
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$cid" || true
+          exit 1
+
+  deploy-and-verify:
+    needs: self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout accepted source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.ACCEPTED_SOURCE_REF }}
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+      - name: Build and push immutable image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          test "$SOURCE_SHA" = "$ACCEPTED_SOURCE_REF"
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$SERVICE:$SOURCE_SHA"
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+      - name: Deploy private UAT revision
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run deploy "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --platform=managed \
+            --image='${{ steps.image.outputs.image }}' \
+            --service-account="$RUNTIME_SA" \
+            --no-allow-unauthenticated \
+            --cpu=1 \
+            --memory=2Gi \
+            --timeout=900 \
+            --concurrency=8 \
+            --min-instances=0 \
+            --max-instances=4 \
+            --set-env-vars="NODE_ENV=production,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_MODEL_ID=$VEO_MODEL_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID" \
+            --quiet
+          gcloud run services add-iam-policy-binding "$SERVICE" \
+            --project="$PROJECT_ID" --region="$REGION" \
+            --member="serviceAccount:$DEPLOY_SA" --role="roles/run.invoker" --quiet >/dev/null
+          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION"
+      - name: Mint Cloud Run ID token
+        uses: google-github-actions/auth@v3
+        id: invoke_auth
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.deploy.outputs.service_url }}
+          id_token_include_email: true
+      - name: Authenticated health smoke
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/health" | tee /tmp/cloud-health.json; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+      - name: Real character-reference fast-path probe
+        id: refs
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "started_at=$STARTED_AT" >> "$GITHUB_OUTPUT"
+
+          refs=(
+            'char_731dace9-bfaf-44e3-b280-be90f3708518/reference/ref_0'
+            'char_731dace9-bfaf-44e3-b280-be90f3708518/reference/ref_1'
+            'char_731dace9-bfaf-44e3-b280-be90f3708518/reference/ref_2'
+            'char_731dace9-bfaf-44e3-b280-be90f3708518/reference/ref_3'
+            'char_731dace9-bfaf-44e3-b280-be90f3708518/reference/ref_4'
+            'char_731dace9-bfaf-44e3-b280-be90f3708518/reference/ref_5'
+            'char_731dace9-bfaf-44e3-b280-be90f3708518/reference/ref_6'
+            'char_17099605/reference/ref_0'
+            'char_17099605/reference/ref_1'
+            'char_17099605/reference/ref_2'
+            'char_17099605/reference/ref_3'
+            'char_17099605/reference/ref_4'
+          )
+
+          mkdir -p /tmp/ref-probe
+          # Warm one real master read first, then issue the realistic burst.
+          warm="$(curl -sS -o /dev/null -w '%{http_code} %{time_total}' \
+            -H "Authorization: Bearer $ID_TOKEN" \
+            "$SERVICE_URL/api/characters/${refs[0]}")"
+          echo "warm: $warm"
+          test "${warm%% *}" = '200'
+
+          for i in "${!refs[@]}"; do
+            (
+              curl -sS -o /dev/null -w '%{http_code} %{time_total}\n' \
+                -H "Authorization: Bearer $ID_TOKEN" \
+                "$SERVICE_URL/api/characters/${refs[$i]}" > "/tmp/ref-probe/$i.txt"
+            ) &
+          done
+          wait
+
+          cat /tmp/ref-probe/*.txt | sort -k2 -n
+          python3 - <<'PY'
+          from pathlib import Path
+          rows=[]
+          for p in Path('/tmp/ref-probe').glob('*.txt'):
+              code,t=p.read_text().strip().split()
+              rows.append((int(code),float(t),p.name))
+          bad=[r for r in rows if r[0] != 200]
+          if bad:
+              raise SystemExit(f'non-200 character reference responses: {bad}')
+          times=sorted(r[1] for r in rows)
+          print(f'count={len(rows)} min={min(times):.3f}s max={max(times):.3f}s')
+          if max(times) >= 15:
+              raise SystemExit(f'character reference fast path still too slow: max={max(times):.3f}s')
+          PY
+      - name: Zero-generation connection test
+        id: connection
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          CODE="$(curl -sS -o /tmp/connect.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer $ID_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data '{"type":"vertex_ai","projectId":"xp-vertex-project","location":"us-central1","analysisModel":"gemini-2.5-flash","imageModel":"gemini-2.5-flash","videoModel":"veo-3.1-fast-generate-001"}' \
+            "$SERVICE_URL/api/connections/test")"
+          echo "connection test HTTP $CODE"
+          cat /tmp/connect.json
+          test "$CODE" = '200'
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/connect.json'))
+          assert d.get('success') is True, d
+          print('connectionId=',d.get('info',{}).get('connectionId'))
+          print('credentialSource=',d.get('info',{}).get('credentialSource'))
+          PY
+      - name: Verify Cloud Run request logs contain no admission exhaustion
+        shell: bash
+        env:
+          PROBE_STARTED_AT: ${{ steps.refs.outputs.started_at }}
+        run: |
+          set -euo pipefail
+          SINCE="$(date -u -d "$PROBE_STARTED_AT - 5 seconds" +%Y-%m-%dT%H:%M:%SZ)"
+          LOGS=''
+          for attempt in 1 2 3 4 5 6; do
+            gcloud logging read \
+              "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$SERVICE\" AND timestamp>=\"$SINCE\"" \
+              --project="$PROJECT_ID" --bucket=_Default --location=global --view=_Default \
+              --limit=300 --order=asc --format=json > /tmp/verify-logs.json || true
+            if [ -s /tmp/verify-logs.json ] && [ "$(cat /tmp/verify-logs.json)" != '[]' ]; then break; fi
+            sleep 5
+          done
+          python3 - <<'PY'
+          import json,re,urllib.parse
+          data=json.load(open('/tmp/verify-logs.json'))
+          bad=[]; refs=[]; connections=[]
+          for e in data:
+              text=str(e.get('textPayload') or '')
+              h=e.get('httpRequest') or {}
+              url=str(h.get('requestUrl') or '')
+              path=urllib.parse.urlsplit(url).path if url else ''
+              row=(e.get('timestamp'),h.get('status'),h.get('latency'),path,e.get('trace'))
+              if 'no available instance' in text.lower(): bad.append(row+(text,))
+              if '/api/characters/' in path and '/reference/' in path: refs.append(row)
+              if path == '/api/connections/test': connections.append(row)
+          print('reference request logs:')
+          for r in refs: print(r)
+          print('connection test logs:')
+          for r in connections: print(r)
+          if bad:
+              raise SystemExit(f'Cloud Run admission exhaustion still observed: {bad[:10]}')
+          if not refs:
+              raise SystemExit('no character-reference request logs observed')
+          if not connections:
+              raise SystemExit('no connection-test request log observed')
+          bad_status=[r for r in refs+connections if r[1] in (429,500,503)]
+          if bad_status:
+              raise SystemExit(f'bad request status after fix: {bad_status}')
+          print('PASS: no Cloud Run admission exhaustion during reference burst + connection test.')
+          PY
+      - name: Publish UAT summary
+        shell: bash
+        run: |
+          {
+            echo '## Character Reference Fast Path UAT PASSED'
+            echo ''
+            echo "- source: \`${{ steps.image.outputs.source_sha }}\`"
+            echo "- revision: \`${{ steps.deploy.outputs.revision }}\`"
+            echo '- Cloud Run: concurrency=8, min=0, max=4'
+            echo '- real character references: burst probe all HTTP 200, max <15s gate'
+            echo '- connection test: HTTP 200 using runtime ADC, zero-generation routing probe'
+            echo '- Cloud Logging: no `no available instance` during verification window'
+            echo '- Veo video generation: not invoked'
+          } >> "$GITHUB_STEP_SUMMARY"
