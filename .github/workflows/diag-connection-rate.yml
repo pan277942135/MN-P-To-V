@@ -31,28 +31,71 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v3
         with:
           project_id: ${{ env.PROJECT_ID }}
-      - name: Read connection-test logs around 18:09 +08
+      - name: Read effective Cloud Run config
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== REQUEST LOGS /api/connections/test ==='
+          gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format=json > /tmp/service.json
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/service.json'))
+          ann=d.get('metadata',{}).get('annotations',{})
+          tmpl=d.get('spec',{}).get('template',{})
+          tann=tmpl.get('metadata',{}).get('annotations',{})
+          spec=tmpl.get('spec',{})
+          print('latestReadyRevision=',d.get('status',{}).get('latestReadyRevisionName'))
+          print('containerConcurrency=',spec.get('containerConcurrency'))
+          print('serviceMaxScale=',ann.get('run.googleapis.com/maxScale'))
+          print('revisionMinScale=',tann.get('autoscaling.knative.dev/minScale'))
+          print('revisionMaxScale=',tann.get('autoscaling.knative.dev/maxScale'))
+          PY
+      - name: Read request saturation window
+        shell: bash
+        run: |
+          set -euo pipefail
           gcloud logging read \
-            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T10:05:00Z" AND timestamp<="2026-08-17T10:13:00Z" AND httpRequest.requestUrl:"/api/connections/test"' \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T10:00:00Z" AND timestamp<="2026-08-17T10:13:30Z" AND logName:"run.googleapis.com%2Frequests"' \
             --project="$PROJECT_ID" --bucket=_Default --location=global --view=_Default \
-            --limit=50 --order=asc \
-            --format='table(timestamp,resource.labels.revision_name,httpRequest.requestMethod,httpRequest.status,httpRequest.latency,trace)' || true
-          echo '=== APP LOGS rate / connection / routing / vertex ==='
+            --limit=1000 --order=asc --format=json > /tmp/requests.json || true
+          python3 - <<'PY'
+          import json,collections,urllib.parse,re
+          data=json.load(open('/tmp/requests.json')) if __import__('os').path.getsize('/tmp/requests.json') else []
+          counts=collections.Counter(); lat=[]; rows=[]
+          def secs(v):
+              if not v:return 0.0
+              m=re.match(r'([0-9.]+)s$',str(v)); return float(m.group(1)) if m else 0.0
+          for e in data:
+              h=e.get('httpRequest') or {}
+              u=h.get('requestUrl','')
+              try:path=urllib.parse.urlsplit(u).path
+              except:path=u
+              st=h.get('status'); l=h.get('latency')
+              counts[(path,st)]+=1
+              s=secs(l)
+              if s>=1: lat.append((s,e.get('timestamp'),path,st,l,e.get('trace')))
+              rows.append((e.get('timestamp'),path,st,l,e.get('severity'),e.get('trace')))
+          print('=== request count by path/status ===')
+          for (path,st),n in counts.most_common(): print(n,st,path)
+          print('=== slow requests >=1s ===')
+          for x in sorted(lat,reverse=True)[:80]: print(*x)
+          print('=== failures /api/connections/test or no-instance statuses ===')
+          for r in rows:
+              if r[1]=='/api/connections/test' or r[2] in (429,500,503): print(*r)
+          PY
+      - name: Read platform and app saturation logs
+        shell: bash
+        run: |
+          set -euo pipefail
           gcloud logging read \
-            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T10:05:00Z" AND timestamp<="2026-08-17T10:13:00Z"' \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T10:00:00Z" AND timestamp<="2026-08-17T10:13:30Z"' \
             --project="$PROJECT_ID" --bucket=_Default --location=global --view=_Default \
-            --limit=300 --order=asc --format=json > /tmp/logs.json || true
+            --limit=1000 --order=asc --format=json > /tmp/all.json || true
           python3 - <<'PY'
           import json,re
-          data=json.load(open('/tmp/logs.json')) if __import__('os').path.getsize('/tmp/logs.json') else []
-          pat=re.compile(r'rate|exceed|resource_exhausted|quota|connection|routing|vertex|aiplatform|429|503',re.I)
+          data=json.load(open('/tmp/all.json')) if __import__('os').path.getsize('/tmp/all.json') else []
+          pat=re.compile(r'no available instance|starting new instance|startup|container|memory|oom|rate exceeded|resource_exhausted|quota|Vertex Polling|Video Start|Recovery|polling',re.I)
           for e in data:
-              text=' '.join(str(e.get(k,'')) for k in ('textPayload','jsonPayload','protoPayload'))
-              http=e.get('httpRequest') or {}
-              if pat.search(text) or '/api/connections/test' in str(http.get('requestUrl','')):
-                  print(json.dumps({'timestamp':e.get('timestamp'),'revision':(e.get('resource') or {}).get('labels',{}).get('revision_name'),'severity':e.get('severity'),'httpStatus':http.get('status'),'latency':http.get('latency'),'trace':e.get('trace'),'textPayload':e.get('textPayload'),'jsonPayload':e.get('jsonPayload')},ensure_ascii=False)[:8000])
+              t=str(e.get('textPayload') or e.get('jsonPayload') or '')
+              if pat.search(t):
+                  print(e.get('timestamp'),e.get('severity'),(e.get('resource') or {}).get('labels',{}).get('revision_name'),t[:4000])
           PY
