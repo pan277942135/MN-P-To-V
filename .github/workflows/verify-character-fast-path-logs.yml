@@ -1,0 +1,78 @@
+name: Verify Character Fast Path UAT Logs
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  SERVICE: zaojing-m2-uat
+  REVISION: zaojing-m2-uat-00020-7dp
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DIAG_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DIAG_SA }}
+          create_credentials_file: true
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+      - name: Verify fixed revision request logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud logging read \
+            "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$SERVICE\" AND resource.labels.revision_name=\"$REVISION\" AND timestamp>=\"2026-08-17T10:24:39Z\"" \
+            --project="$PROJECT_ID" --bucket=_Default --location=global --view=_Default \
+            --limit=500 --order=asc --format=json > /tmp/logs.json
+          python3 - <<'PY'
+          import json,urllib.parse,re
+          data=json.load(open('/tmp/logs.json'))
+          refs=[]; connections=[]; exhausted=[]
+          def sec(v):
+              m=re.match(r'([0-9.]+)s$',str(v or ''))
+              return float(m.group(1)) if m else None
+          for e in data:
+              h=e.get('httpRequest') or {}
+              url=str(h.get('requestUrl') or '')
+              path=urllib.parse.urlsplit(url).path if url else ''
+              row=(e.get('timestamp'),h.get('status'),h.get('latency'),path,e.get('trace'))
+              text=str(e.get('textPayload') or '')
+              if 'no available instance' in text.lower(): exhausted.append(row+(text,))
+              if '/api/characters/' in path and '/reference/' in path: refs.append(row)
+              if path == '/api/connections/test': connections.append(row)
+          print(f'reference log count={len(refs)}')
+          for r in refs: print('REF',r)
+          print(f'connection log count={len(connections)}')
+          for r in connections: print('CONNECTION',r)
+          if exhausted:
+              raise SystemExit(f'no-available-instance observed on fixed revision: {exhausted[:10]}')
+          if len(refs) < 12:
+              raise SystemExit(f'expected >=12 reference request logs, got {len(refs)}')
+          if not connections:
+              raise SystemExit('connection test log not ingested')
+          if any(r[1] != 200 for r in refs):
+              raise SystemExit(f'non-200 ref log: {[r for r in refs if r[1] != 200]}')
+          if any(r[1] != 200 for r in connections):
+              raise SystemExit(f'non-200 connection log: {[r for r in connections if r[1] != 200]}')
+          lat=[sec(r[2]) for r in refs]
+          lat=[x for x in lat if x is not None]
+          print(f'reference latency min={min(lat):.3f}s max={max(lat):.3f}s')
+          if max(lat) >= 15:
+              raise SystemExit(f'reference log latency gate failed: {max(lat):.3f}s')
+          print('PASS: fixed revision has all-200 reference reads, connection-test 200, and no Cloud Run admission exhaustion.')
+          PY
