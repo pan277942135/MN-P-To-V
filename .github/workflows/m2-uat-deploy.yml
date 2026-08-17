@@ -1,6 +1,9 @@
 name: M2 UAT Deploy
 
 on:
+  push:
+    branches:
+      - ci/stage-cert-main-46da7e8
   workflow_dispatch:
     inputs:
       source_ref:
@@ -30,10 +33,10 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Checkout frozen M2 source
+      - name: Checkout certified main source
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref }}
+          ref: '46da7e8e6c90442ab7236b4f850bb5956a689bec'
 
       - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v3
