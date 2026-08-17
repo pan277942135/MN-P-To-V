@@ -113,7 +113,7 @@ export class IdentityLockService {
 
   /**
    * 2. Determine whether the uploaded picture is already the target character.
-   * DIRECT_CHARACTER_IMAGE skips rebuild only; master-based identity QA is still mandatory.
+   * DIRECT_CHARACTER_IMAGE skips rebuild only; master-based identity QA still runs as diagnostic evidence.
    */
   static determineIdentitySourceMode(input: DetermineModeInput): IdentitySourceMode {
     if (input.imageIsTargetCharacter === true) {
@@ -195,10 +195,10 @@ export class IdentityLockService {
   }
 
   /**
-   * 4. First Frame Identity Gate.
-   * PASS = all strict thresholds met.
-   * REVIEW = no severe defect, but one or more strict thresholds are borderline.
-   * FAIL = missing evidence, critical issue, severe identity loss, or severe preservation/anatomy failure.
+   * 4. First Frame Identity QA.
+   * The QA report is always retained for diagnostics. When
+   * FIRST_FRAME_IDENTITY_QA_BLOCKING=false, PASS/REVIEW/FAIL no longer blocks
+   * Veo submission; this is intentionally an advisory-only pre-provider check.
    */
   static async evaluateIdentityGate(input: QaInput): Promise<IdentityGateResult> {
     let report: FirstFrameQaReport;
@@ -317,8 +317,15 @@ export class IdentityLockService {
       requiresManualApproval = true;
     }
 
-    const canStartVeo =
-      status === 'pass' || (status === 'review' && Boolean(input.manualApproved));
+    const blockingEnabled = process.env.FIRST_FRAME_IDENTITY_QA_BLOCKING !== 'false';
+    const strictGateAllowsVeo = status === 'pass' || (status === 'review' && Boolean(input.manualApproved));
+    const canStartVeo = blockingEnabled ? strictGateAllowsVeo : true;
+
+    if (!blockingEnabled && status !== 'pass') {
+      console.warn(
+        `[Identity QA Advisory] pre-provider identity QA=${status} score=${report.identityScore}; Veo submission allowed because FIRST_FRAME_IDENTITY_QA_BLOCKING=false.`
+      );
+    }
 
     report = { ...report, pass: strictPass };
 
@@ -327,7 +334,7 @@ export class IdentityLockService {
       identityQaReport: report,
       identityQaScore: report.identityScore,
       identityCriticalIssues: criticalIssues,
-      requiresManualApproval,
+      requiresManualApproval: blockingEnabled ? requiresManualApproval : false,
       canStartVeo,
     };
   }
