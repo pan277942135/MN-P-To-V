@@ -23,6 +23,7 @@ env:
   VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
   VEO_MODEL_ID: veo-3.1-fast-generate-001
   FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  FIRST_FRAME_IDENTITY_QA_BLOCKING: 'false'
 
 jobs:
   deploy-uat:
@@ -80,7 +81,7 @@ jobs:
             --concurrency=8 \
             --min-instances=0 \
             --max-instances=4 \
-            --set-env-vars="NODE_ENV=production,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_MODEL_ID=$VEO_MODEL_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID" \
+            --set-env-vars="NODE_ENV=production,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_MODEL_ID=$VEO_MODEL_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,FIRST_FRAME_IDENTITY_QA_BLOCKING=$FIRST_FRAME_IDENTITY_QA_BLOCKING" \
             --quiet
 
           gcloud run services add-iam-policy-binding "$SERVICE" \
@@ -125,6 +126,7 @@ jobs:
             echo "- Cloud Run service: \`$SERVICE\`"
             echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
             echo "- Private service URL: ${{ steps.deploy.outputs.service_url }}"
+            echo "- First-frame identity QA blocking: \`$FIRST_FRAME_IDENTITY_QA_BLOCKING\`"
             echo ''
-            echo 'Open it through an authenticated Cloud Run proxy; do not make the service public.'
+            echo 'Open the fixed Cloud Run URL through IAP; do not make the service public.'
           } >> "$GITHUB_STEP_SUMMARY"
