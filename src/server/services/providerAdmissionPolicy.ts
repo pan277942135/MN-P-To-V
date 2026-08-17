@@ -11,7 +11,6 @@ const BLOCKING_STATUSES = new Set<TaskStatus>([
   'polling_timeout',
   'generation_succeeded',
   'artifact_persisting',
-  'artifact_persisted',
   'submission_outcome_unknown',
 ]);
 
@@ -29,16 +28,29 @@ export function buildProviderAdmissionScopeKey(projectId?: string | null): strin
 /**
  * True means a second *different* video task must not be allowed to submit Veo yet.
  *
- * qa_pending is special: QA itself may still decide an automatic provider regeneration.
- * We keep the slot until QA reaches the explicit human-review state. A REVIEW task no
- * longer consumes or may automatically consume provider capacity, so a new task may run.
+ * The provider slot protects the window in which a Veo submission may still be active or
+ * ambiguous. Once a valid MP4 has been durably persisted to the authoritative GCS bucket,
+ * that provider generation is finished. Post-video QA, re-QA, and human review operate on
+ * the existing artifact and must not keep Veo capacity locked.
  */
 export function isProviderAdmissionBlockingTask(
   task: Partial<ServerVideoTaskRecord> | null | undefined
 ): boolean {
   if (!task?.taskId && !task?.id) return false;
 
+  const hasDurableVideoArtifact =
+    task.artifactPersisted === true &&
+    Boolean(task.outputBucket) &&
+    Boolean(task.outputObjectPath) &&
+    Boolean(task.videoUri);
+
+  if (hasDurableVideoArtifact) {
+    return false;
+  }
+
   if (task.status === 'qa_pending') {
+    // QA without a durable artifact is an inconsistent/fail-closed state. Keep the slot
+    // unless the task has explicitly reached human review, which cannot auto-submit Veo.
     return task.identityQaStatus !== 'review';
   }
 
