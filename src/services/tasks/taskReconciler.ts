@@ -80,15 +80,27 @@ export async function reconcileTasksWithServer(connectionId?: string): Promise<G
       const serverMatch = serverTasksMap.get(localTask.id);
 
       if (serverMatch) {
-        // Server status overrides local status
+        // Server status and persisted-artifact evidence override stale browser transport state.
         const serverStatus = serverMatch.status;
+        const hasServerArtifact = Boolean(
+          serverMatch.artifactPersisted &&
+          serverMatch.outputBucket &&
+          serverMatch.outputObjectPath
+        );
+        const serverArtifactUrl = hasServerArtifact ? `/api/videos/stream/${localTask.id}` : '';
+
         if (serverStatus === 'completed') {
-          const effectiveVideoUrl = serverMatch.videoDataUrl || localTask.resultVideoUrl;
+          const effectiveVideoUrl = serverMatch.videoDataUrl || serverArtifactUrl || localTask.resultVideoUrl;
           if (effectiveVideoUrl) {
             localTask.status = 'completed';
             localTask.progressStage = '生成与质检全部完成';
             localTask.progressPercent = 100;
             localTask.resultVideoUrl = effectiveVideoUrl;
+            // A browser/network error is no longer authoritative once the server proves
+            // that a durable MP4 exists. It must not suppress the download button.
+            localTask.error = undefined;
+            (localTask as any).failureReason = undefined;
+            (localTask as any).retryMode = undefined;
           } else {
             const isRai = serverMatch.failureReason === 'output_rai_filtered' || serverMatch.failureReason === 'input_safety_blocked';
             localTask.status = 'failed';
@@ -105,7 +117,7 @@ export async function reconcileTasksWithServer(connectionId?: string): Promise<G
                 : '云端任务已完成，但视频文件尚未成功持久化，正在恢复已有产物。',
               technicalMessageRedacted: isRai
                 ? 'Server reported RAI safety filter'
-                : 'Server status completed but videoDataUrl is missing',
+                : 'Server status completed but no persisted artifact evidence is available',
               httpStatus: 400,
               retryable: !isRai,
               recommendedAction: isRai
@@ -113,15 +125,35 @@ export async function reconcileTasksWithServer(connectionId?: string): Promise<G
                 : '点击【恢复产物】或重新拉取视频',
             };
           }
+        } else if (serverStatus === 'qa_pending') {
+          // Generation is already finished when an authoritative MP4 is persisted. Keep
+          // QA as a separate review state and make the existing video downloadable.
+          localTask.status = 'qa_pending';
+          localTask.progressStage = hasServerArtifact
+            ? '视频已生成并持久化，身份质检待复核'
+            : '视频身份质检处理中';
+          localTask.progressPercent = hasServerArtifact ? 95 : Math.max(localTask.progressPercent || 0, 90);
+          if (serverArtifactUrl) {
+            localTask.resultVideoUrl = serverMatch.videoDataUrl || serverArtifactUrl;
+          }
+          // Clear stale browser/network failures. Detailed QA status will be refreshed by
+          // the per-task /api/videos/status request immediately after reconciliation.
+          localTask.error = undefined;
+          (localTask as any).failureReason = undefined;
+          (localTask as any).retryMode = undefined;
+          if (serverMatch.identityQaStatus) {
+            localTask.identityQaStatus = serverMatch.identityQaStatus;
+          }
         } else if (serverStatus === 'failed') {
           localTask.status = 'failed';
           localTask.progressStage = '视频生成失败';
-          if (serverMatch.error || serverMatch.structuredError) {
-            localTask.error = serverMatch.structuredError || {
+          const serverError = serverMatch.error || serverMatch.structuredError || serverMatch.upstreamErrorMessage;
+          if (serverError) {
+            localTask.error = typeof serverError === 'object' ? serverError : {
               code: 'SERVER_FAILED',
               stage: 'polling',
-              messageChinese: serverMatch.error || '视频生成失败',
-              technicalMessageRedacted: serverMatch.error || '云端渲染失败',
+              messageChinese: serverError || '视频生成失败',
+              technicalMessageRedacted: serverError || '云端渲染失败',
               httpStatus: 500,
               retryable: true,
               recommendedAction: '在下方点击【一键重试】',
