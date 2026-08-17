@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { Storage } from '@google-cloud/storage';
 import type { IdentitySpec } from '../../types';
 import { gcsArtifactStore } from '../storage/gcsArtifactStore';
 import {
@@ -33,6 +34,9 @@ export interface HydratedDurableCharacter {
   evidenceSource: 'firestore';
 }
 
+const CHARACTER_REFERENCE_DOWNLOAD_TIMEOUT_MS = 10_000;
+const characterReferenceStorage = new Storage();
+
 function safeExtension(mimeType: string): string {
   if (mimeType === 'image/png') return 'png';
   if (mimeType === 'image/webp') return 'webp';
@@ -50,6 +54,29 @@ export class DurableCharacterService {
 
   public async getMetadata(id: string): Promise<DurableCharacterRecord | null> {
     return firestoreCharacterRepository.getCharacter(id);
+  }
+
+  private async fetchReferenceImageBuffer(ref: DurableCharacterReference): Promise<Buffer> {
+    // Character masters are JPEG/PNG/WebP image artifacts. They must never pass
+    // through the generic video artifact downloader, whose MP4 signature checks and
+    // video-oriented backoff previously held image requests open for ~2 minutes.
+    if (gcsArtifactStore.useMock || process.env.NODE_ENV === 'test') {
+      return gcsArtifactStore.fetchArtifactBuffer(ref.outputBucket, ref.outputObjectPath);
+    }
+
+    try {
+      const file = characterReferenceStorage.bucket(ref.outputBucket).file(ref.outputObjectPath);
+      const [bytes] = await file.download({ timeout: CHARACTER_REFERENCE_DOWNLOAD_TIMEOUT_MS } as any);
+      const buffer = Buffer.from(bytes);
+      if (buffer.length === 0) {
+        throw new Error('downloaded reference image is empty');
+      }
+      return buffer;
+    } catch (err: any) {
+      throw new Error(
+        `[DurableCharacterService] Character reference fast-path download failed for ${ref.id}: ${err?.message || String(err)}`
+      );
+    }
   }
 
   public async save(params: {
@@ -142,18 +169,16 @@ export class DurableCharacterService {
 
   public async hydrate(record: DurableCharacterRecord): Promise<HydratedDurableCharacter> {
     const refs = [...(record.referenceImages || [])].sort((a, b) => a.sortOrder - b.sortOrder);
-    const hydratedRefs = [] as HydratedDurableCharacter['referenceImages'];
-    for (const ref of refs) {
-      const buffer = await gcsArtifactStore.fetchArtifactBuffer(ref.outputBucket, ref.outputObjectPath);
-      hydratedRefs.push({
+    const hydratedRefs = await Promise.all(
+      refs.map(async (ref) => ({
         id: ref.id,
-        buffer,
+        buffer: await this.fetchReferenceImageBuffer(ref),
         mimeType: ref.mimeType || 'image/jpeg',
         width: ref.width || 1080,
         height: ref.height || 1080,
         angle: ref.angle,
-      });
-    }
+      }))
+    );
     return {
       id: record.id,
       name: record.name,
@@ -177,7 +202,8 @@ export class DurableCharacterService {
     if (!record) return null;
     const ref = record.referenceImages.find((item) => item.id === referenceId);
     if (!ref) return null;
-    const buffer = await gcsArtifactStore.fetchArtifactBuffer(ref.outputBucket, ref.outputObjectPath);
+
+    const buffer = await this.fetchReferenceImageBuffer(ref);
     return { buffer, mimeType: ref.mimeType || 'image/jpeg' };
   }
 
