@@ -35,6 +35,39 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
+      - name: Resolve private UAT service URL
+        id: service
+        shell: bash
+        run: |
+          set -euo pipefail
+          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+          echo "UAT revision: $REVISION"
+
+      - name: Mint authenticated Cloud Run ID token
+        uses: google-github-actions/auth@v3
+        id: invoke_auth
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DIAG_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.service.outputs.service_url }}
+          id_token_include_email: true
+
+      - name: Read recent durable task diagnostics through UAT API
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.service.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          echo '=== DURABLE TASK DIAGNOSTICS: newest first ==='
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/list?limit=30" \
+            | jq '{storageAuthority, tasks: [.tasks[] | {taskId, createdAt, updatedAt, status, failureReason, retryMode, externalOperationName, settings, error}]}'
+
       - name: Read recent Cloud Run application logs
         shell: bash
         run: |
