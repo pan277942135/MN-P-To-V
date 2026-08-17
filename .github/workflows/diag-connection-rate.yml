@@ -1,0 +1,58 @@
+name: Diagnose Connection Rate Exceeded
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  SERVICE: zaojing-m2-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DIAG_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DIAG_SA }}
+          create_credentials_file: true
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+      - name: Read connection-test logs around 18:09 +08
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== REQUEST LOGS /api/connections/test ==='
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T10:05:00Z" AND timestamp<="2026-08-17T10:13:00Z" AND httpRequest.requestUrl:"/api/connections/test"' \
+            --project="$PROJECT_ID" --bucket=_Default --location=global --view=_Default \
+            --limit=50 --order=asc \
+            --format='table(timestamp,resource.labels.revision_name,httpRequest.requestMethod,httpRequest.status,httpRequest.latency,trace)' || true
+          echo '=== APP LOGS rate / connection / routing / vertex ==='
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T10:05:00Z" AND timestamp<="2026-08-17T10:13:00Z"' \
+            --project="$PROJECT_ID" --bucket=_Default --location=global --view=_Default \
+            --limit=300 --order=asc --format=json > /tmp/logs.json || true
+          python3 - <<'PY'
+          import json,re
+          data=json.load(open('/tmp/logs.json')) if __import__('os').path.getsize('/tmp/logs.json') else []
+          pat=re.compile(r'rate|exceed|resource_exhausted|quota|connection|routing|vertex|aiplatform|429|503',re.I)
+          for e in data:
+              text=' '.join(str(e.get(k,'')) for k in ('textPayload','jsonPayload','protoPayload'))
+              http=e.get('httpRequest') or {}
+              if pat.search(text) or '/api/connections/test' in str(http.get('requestUrl','')):
+                  print(json.dumps({'timestamp':e.get('timestamp'),'revision':(e.get('resource') or {}).get('labels',{}).get('revision_name'),'severity':e.get('severity'),'httpStatus':http.get('status'),'latency':http.get('latency'),'trace':e.get('trace'),'textPayload':e.get('textPayload'),'jsonPayload':e.get('jsonPayload')},ensure_ascii=False)[:8000])
+          PY
