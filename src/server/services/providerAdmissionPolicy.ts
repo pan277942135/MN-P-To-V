@@ -11,6 +11,7 @@ const BLOCKING_STATUSES = new Set<TaskStatus>([
   'polling_timeout',
   'generation_succeeded',
   'artifact_persisting',
+  'artifact_persisted',
   'submission_outcome_unknown',
 ]);
 
