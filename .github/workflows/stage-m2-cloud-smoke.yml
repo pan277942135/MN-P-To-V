@@ -1,0 +1,101 @@
+name: Stage M2 Cloud Smoke
+
+on:
+  push:
+    branches:
+      - 'stage/m2-cloud-smoke-20260817'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  SERVICE: zaojing-m2-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  cloud-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Resolve deployed service
+        id: service
+        shell: bash
+        run: |
+          set -euo pipefail
+          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+
+      - name: Create invoker token
+        uses: google-github-actions/auth@v3
+        id: invoke_auth
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.service.outputs.service_url }}
+          id_token_include_email: true
+
+      - name: Read-only cloud smoke checks
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.service.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          AUTH=( -H "Authorization: Bearer $ID_TOKEN" )
+
+          curl -fsS "${AUTH[@]}" "$SERVICE_URL/api/health" -o health.json
+          jq -e '.status == "ok"' health.json >/dev/null
+
+          curl -fsS "${AUTH[@]}" "$SERVICE_URL/api/system/environment" -o environment.json
+          jq -e '.environment == "cloud_run"' environment.json >/dev/null
+
+          curl -fsS "${AUTH[@]}" "$SERVICE_URL/api/characters/list" -o characters.json
+          jq -e 'has("characters")' characters.json >/dev/null
+
+          curl -fsS "${AUTH[@]}" "$SERVICE_URL/api/videos/list" -o videos.json
+          jq -e 'type == "object"' videos.json >/dev/null
+
+          curl -fsS "${AUTH[@]}" "$SERVICE_URL/api/videos/audit" -o audit.json
+          jq -e 'type == "object"' audit.json >/dev/null
+
+          curl -fsS "${AUTH[@]}" "$SERVICE_URL/" -o index.html
+          grep -q '<div id="root"></div>' index.html
+
+          echo "health=ok"
+          echo "environment=cloud_run"
+          echo "characters_endpoint=ok"
+          echo "videos_list_endpoint=ok"
+          echo "audit_endpoint=ok"
+          echo "frontend_root=ok"
+
+      - name: Publish smoke summary
+        shell: bash
+        run: |
+          {
+            echo '## Stage M2 cloud smoke passed'
+            echo ''
+            echo "- Revision: \`${{ steps.service.outputs.revision }}\`"
+            echo "- Private service URL: ${{ steps.service.outputs.service_url }}"
+            echo '- Checks: health / Cloud Run environment / durable character list / task list / audit / frontend root.'
+          } >> "$GITHUB_STEP_SUMMARY"
