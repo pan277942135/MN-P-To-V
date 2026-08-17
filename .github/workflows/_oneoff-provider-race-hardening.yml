@@ -7,6 +7,9 @@ on:
 permissions:
   contents: write
 
+env:
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+
 jobs:
   harden:
     if: github.head_ref == 'fix/state-machine-provider-race-hardening'
