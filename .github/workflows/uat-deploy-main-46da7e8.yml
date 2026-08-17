@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - uat-deploy-main-46da7e8-20260817
+    paths:
+      - .github/workflows/uat-deploy-main-46da7e8.yml
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 env:
@@ -21,6 +23,7 @@ env:
   VEO_MODEL_ID: veo-3.1-fast-generate-001
   FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
   SOURCE_REF: 46da7e8e6c90442ab7236b4f850bb5956a689bec
+  DEPLOY_BRANCH: uat-deploy-main-46da7e8-20260817
 
 jobs:
   deploy-uat:
@@ -130,3 +133,29 @@ jobs:
             echo "- Revision: `${{ steps.deploy.outputs.revision }}`"
             echo "- Private service URL: ${{ steps.deploy.outputs.service_url }}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Persist deployment metadata on isolated branch
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          REVISION: ${{ steps.deploy.outputs.revision }}
+          SOURCE_SHA: ${{ steps.image.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$DEPLOY_BRANCH"
+          git checkout -B "$DEPLOY_BRANCH" "origin/$DEPLOY_BRANCH"
+          cat > uat-deployment-46da7e8.json <<EOF
+          {
+            "sourceCommit": "$SOURCE_SHA",
+            "cloudRunService": "$SERVICE",
+            "region": "$REGION",
+            "revision": "$REVISION",
+            "serviceUrl": "$SERVICE_URL",
+            "healthCheck": "passed"
+          }
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add uat-deployment-46da7e8.json
+          git commit -m "chore(uat): record deployed 46da7e8 metadata [skip ci]"
+          git push origin "HEAD:$DEPLOY_BRANCH"
