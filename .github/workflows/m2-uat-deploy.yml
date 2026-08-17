@@ -77,9 +77,9 @@ jobs:
             --cpu=1 \
             --memory=2Gi \
             --timeout=900 \
-            --concurrency=1 \
+            --concurrency=8 \
             --min-instances=0 \
-            --max-instances=2 \
+            --max-instances=4 \
             --set-env-vars="NODE_ENV=production,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_MODEL_ID=$VEO_MODEL_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID" \
             --quiet
 
