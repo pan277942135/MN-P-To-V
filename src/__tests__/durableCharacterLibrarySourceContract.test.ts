@@ -31,6 +31,15 @@ describe('durable character library contract', () => {
     expect(durableRepoSource).not.toContain('buffer: Buffer');
   });
 
+  it('uses a bounded image-specific GCS fast path for browser master-image reads', () => {
+    expect(durableServiceSource).toContain("import { Storage } from '@google-cloud/storage'");
+    expect(durableServiceSource).toContain('CHARACTER_REFERENCE_DOWNLOAD_TIMEOUT_MS = 10_000');
+    expect(durableServiceSource).toContain('characterReferenceStorage.bucket(ref.outputBucket).file(ref.outputObjectPath)');
+    expect(durableServiceSource).toContain('file.download({ timeout: CHARACTER_REFERENCE_DOWNLOAD_TIMEOUT_MS } as any)');
+    expect(durableServiceSource).toContain("gcsArtifactStore.useMock || process.env.NODE_ENV === 'test'");
+    expect(durableServiceSource).toContain('Never route JPEG/PNG bytes through the generic video artifact downloader');
+  });
+
   it('hydrates durable character masters before prompt suggestion and Veo start', () => {
     const hydrateMatches = serverSource.match(/durableCharacterService\.getHydrated\(characterId\)/g) || [];
     expect(hydrateMatches.length).toBeGreaterThanOrEqual(2);
