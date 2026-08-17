@@ -1,0 +1,8 @@
+{
+  "sourceCommit": "46da7e8e6c90442ab7236b4f850bb5956a689bec",
+  "cloudRunService": "zaojing-m2-uat",
+  "region": "us-central1",
+  "revision": "zaojing-m2-uat-00015-qvk",
+  "serviceUrl": "https://zaojing-m2-uat-i7lns3auvq-uc.a.run.app",
+  "healthCheck": "passed"
+}
