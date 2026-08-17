@@ -14,6 +14,7 @@ env:
   SERVICE: zaojing-m2-uat
   WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
   DIAG_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  SINCE: '2026-08-17T06:45:00Z'
 
 jobs:
   diagnose:
@@ -34,6 +35,30 @@ jobs:
         uses: google-github-actions/setup-gcloud@v3
         with:
           project_id: ${{ env.PROJECT_ID }}
+
+      - name: Temporarily grant Logging Viewer
+        id: grant_logging
+        shell: bash
+        continue-on-error: true
+        run: |
+          set +e
+          echo '=== TEMP IAM GRANT: roles/logging.viewer ==='
+          OUT="$(gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+            --member="serviceAccount:$DIAG_SA" \
+            --role="roles/logging.viewer" \
+            --condition=None \
+            --quiet 2>&1)"
+          RC=$?
+          printf '%s\n' "$OUT"
+          if [ "$RC" -eq 0 ]; then
+            echo 'granted=true' >> "$GITHUB_OUTPUT"
+            echo 'Temporary logging.viewer grant succeeded.'
+            sleep 8
+          else
+            echo 'granted=false' >> "$GITHUB_OUTPUT"
+            echo "Temporary logging.viewer grant failed with rc=$RC."
+          fi
+          exit "$RC"
 
       - name: Resolve private UAT service URL
         id: service
@@ -65,44 +90,54 @@ jobs:
         run: |
           set -euo pipefail
           echo '=== DURABLE TASK DIAGNOSTICS: newest first ==='
-          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/list?limit=30" \
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/videos/list?limit=40" \
             | jq '{storageAuthority, tasks: [.tasks[] | {taskId, createdAt, updatedAt, status, failureReason, retryMode, externalOperationName, settings, error}]}'
 
       - name: Read recent Cloud Run application logs
         shell: bash
         run: |
-          set -euo pipefail
-          echo '=== APP LOGS: last 60m, newest first ==='
+          set +e
+          echo "=== APP LOGS: since $SINCE, newest first ==="
           gcloud logging read \
-            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T06:15:00Z"' \
+            "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$SERVICE\" AND timestamp>=\"$SINCE\"" \
             --project="$PROJECT_ID" \
-            --limit=300 \
+            --limit=500 \
             --order=desc \
-            --format='table(timestamp,severity,resource.labels.revision_name,textPayload,jsonPayload.message,jsonPayload.error,jsonPayload.status,jsonPayload.httpStatus,jsonPayload.failureReason,jsonPayload.googleStatus)' \
-            || true
+            --format='table(timestamp,severity,resource.labels.revision_name,textPayload,jsonPayload.message,jsonPayload.error,jsonPayload.status,jsonPayload.httpStatus,jsonPayload.upstreamHttpStatus,jsonPayload.failureReason,jsonPayload.googleStatus,jsonPayload.retryMode,trace)'
 
       - name: Read likely Veo and retry lines
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           echo '=== FILTERED VEO / RETRY / RATE / FAILURE LINES ==='
           gcloud logging read \
-            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T06:15:00Z" AND (textPayload:"Rate exceeded" OR textPayload:"RESOURCE_EXHAUSTED" OR textPayload:"[Retry]" OR textPayload:"Veo" OR textPayload:"Video Start" OR textPayload:"generation_failed" OR jsonPayload.message:"Rate exceeded" OR jsonPayload.googleStatus="RESOURCE_EXHAUSTED")' \
+            "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$SERVICE\" AND timestamp>=\"$SINCE\" AND (textPayload:\"Rate exceeded\" OR textPayload:\"RESOURCE_EXHAUSTED\" OR textPayload:\"[Retry]\" OR textPayload:\"retry\" OR textPayload:\"Veo\" OR textPayload:\"Video Start\" OR textPayload:\"generation_failed\" OR jsonPayload.message:\"Rate exceeded\" OR jsonPayload.message:\"RESOURCE_EXHAUSTED\" OR jsonPayload.googleStatus=\"RESOURCE_EXHAUSTED\")" \
             --project="$PROJECT_ID" \
-            --limit=200 \
+            --limit=300 \
             --order=asc \
-            --format='value(timestamp,severity,resource.labels.revision_name,textPayload,jsonPayload.message,jsonPayload.error,jsonPayload.status,jsonPayload.httpStatus,jsonPayload.upstreamHttpStatus,jsonPayload.failureReason,jsonPayload.googleStatus,jsonPayload.retryMode)' \
-            || true
+            --format='value(timestamp,severity,resource.labels.revision_name,textPayload,jsonPayload.message,jsonPayload.error,jsonPayload.status,jsonPayload.httpStatus,jsonPayload.upstreamHttpStatus,jsonPayload.failureReason,jsonPayload.googleStatus,jsonPayload.retryMode,trace)'
 
       - name: Read HTTP request failures
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           echo '=== CLOUD RUN REQUESTS status>=400 ==='
           gcloud logging read \
-            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T06:15:00Z" AND httpRequest.status>=400' \
+            "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$SERVICE\" AND timestamp>=\"$SINCE\" AND httpRequest.status>=400" \
             --project="$PROJECT_ID" \
-            --limit=100 \
+            --limit=200 \
             --order=asc \
-            --format='table(timestamp,resource.labels.revision_name,httpRequest.requestMethod,httpRequest.requestUrl,httpRequest.status,httpRequest.latency,trace)' \
-            || true
+            --format='table(timestamp,resource.labels.revision_name,httpRequest.requestMethod,httpRequest.requestUrl,httpRequest.status,httpRequest.latency,trace)'
+
+      - name: Revoke temporary Logging Viewer
+        if: always() && steps.grant_logging.outputs.granted == 'true'
+        shell: bash
+        run: |
+          set +e
+          echo '=== TEMP IAM REVOKE: roles/logging.viewer ==='
+          gcloud projects remove-iam-policy-binding "$PROJECT_ID" \
+            --member="serviceAccount:$DIAG_SA" \
+            --role="roles/logging.viewer" \
+            --condition=None \
+            --quiet
+          echo 'Temporary logging.viewer grant removed.'
