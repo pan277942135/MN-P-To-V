@@ -1,0 +1,75 @@
+name: Diagnose Cloud Run Veo Failure
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  SERVICE: zaojing-m2-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DIAG_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DIAG_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Read recent Cloud Run application logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== APP LOGS: last 60m, newest first ==='
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T06:15:00Z"' \
+            --project="$PROJECT_ID" \
+            --limit=300 \
+            --order=desc \
+            --format='table(timestamp,severity,resource.labels.revision_name,textPayload,jsonPayload.message,jsonPayload.error,jsonPayload.status,jsonPayload.httpStatus,jsonPayload.failureReason,jsonPayload.googleStatus)' \
+            || true
+
+      - name: Read likely Veo and retry lines
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== FILTERED VEO / RETRY / RATE / FAILURE LINES ==='
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T06:15:00Z" AND (textPayload:"Rate exceeded" OR textPayload:"RESOURCE_EXHAUSTED" OR textPayload:"[Retry]" OR textPayload:"Veo" OR textPayload:"Video Start" OR textPayload:"generation_failed" OR jsonPayload.message:"Rate exceeded" OR jsonPayload.googleStatus="RESOURCE_EXHAUSTED")' \
+            --project="$PROJECT_ID" \
+            --limit=200 \
+            --order=asc \
+            --format='value(timestamp,severity,resource.labels.revision_name,textPayload,jsonPayload.message,jsonPayload.error,jsonPayload.status,jsonPayload.httpStatus,jsonPayload.upstreamHttpStatus,jsonPayload.failureReason,jsonPayload.googleStatus,jsonPayload.retryMode)' \
+            || true
+
+      - name: Read HTTP request failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== CLOUD RUN REQUESTS status>=400 ==='
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T06:15:00Z" AND httpRequest.status>=400' \
+            --project="$PROJECT_ID" \
+            --limit=100 \
+            --order=asc \
+            --format='table(timestamp,resource.labels.revision_name,httpRequest.requestMethod,httpRequest.requestUrl,httpRequest.status,httpRequest.latency,trace)' \
+            || true
