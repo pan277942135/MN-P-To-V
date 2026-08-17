@@ -52,11 +52,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
-          REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
-          CONCURRENCY="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(spec.template.spec.containerConcurrency)')"
-          MIN_SCALE="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(spec.template.metadata.annotations.autoscaling.knative.dev/minScale)')"
-          MAX_SCALE="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(spec.template.metadata.annotations.autoscaling.knative.dev/maxScale)')"
+          DESC="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format=json)"
+          SERVICE_URL="$(jq -r '.status.url' <<<"$DESC")"
+          REVISION="$(jq -r '.status.latestReadyRevisionName' <<<"$DESC")"
+          CONCURRENCY="$(jq -r '.spec.template.spec.containerConcurrency // empty' <<<"$DESC")"
+          MIN_SCALE="$(jq -r '.spec.template.metadata.annotations["autoscaling.knative.dev/minScale"] // empty' <<<"$DESC")"
+          MAX_SCALE="$(jq -r '.spec.template.metadata.annotations["autoscaling.knative.dev/maxScale"] // empty' <<<"$DESC")"
           echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
           echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
           echo "Effective revision: $REVISION"
