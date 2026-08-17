@@ -1,0 +1,106 @@
+name: Diagnose Live Task State Once
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/diag-live-task-state-once.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  SERVICE: zaojing-m2-uat
+  DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DIAG_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DIAG_SA }}
+          create_credentials_file: true
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+      - name: Read authoritative Firestore task state
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOKEN="$(gcloud auth print-access-token)"
+          BASE="https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/${DATABASE_ID}/documents"
+          curl -fsS -H "Authorization: Bearer $TOKEN" "${BASE}/video_tasks?pageSize=100" > /tmp/tasks.json || echo '{"documents":[]}' > /tmp/tasks.json
+          curl -fsS -H "Authorization: Bearer $TOKEN" "${BASE}/video_provider_admission?pageSize=20" > /tmp/admission.json || echo '{"documents":[]}' > /tmp/admission.json
+          python3 - <<'PY'
+          import json, os, re
+          def val(v):
+              if not isinstance(v, dict): return None
+              for k in ('stringValue','integerValue','doubleValue','booleanValue','timestampValue'):
+                  if k in v:
+                      x=v[k]
+                      if k=='integerValue':
+                          try:return int(x)
+                          except:return x
+                      return x
+              if 'mapValue' in v:
+                  return {k:val(x) for k,x in (v['mapValue'].get('fields') or {}).items()}
+              if 'arrayValue' in v:
+                  return [val(x) for x in (v['arrayValue'].get('values') or [])]
+              return None
+          def docs(path):
+              data=json.load(open(path))
+              out=[]
+              for d in data.get('documents',[]):
+                  f={k:val(v) for k,v in (d.get('fields') or {}).items()}
+                  f['_doc']=d.get('name','').split('/')[-1]
+                  out.append(f)
+              return out
+          tasks=docs('/tmp/tasks.json')
+          tasks.sort(key=lambda x:int(x.get('createdAt') or 0), reverse=True)
+          print('=== RECENT VIDEO TASKS ===')
+          keep=['_doc','taskId','status','createdAt','updatedAt','submissionState','externalOperationName','operationName','artifactPersisted','outputBucket','outputObjectPath','videoUri','videoDataUrl','identityQaStatus','failureReason','retryMode','error']
+          for t in tasks[:20]:
+              row={k:t.get(k) for k in keep if t.get(k) not in (None,'',False,[])}
+              # Redact verbose error text; keep only compact shape.
+              if isinstance(row.get('error'),dict):
+                  e=row['error']; row['error']={k:e.get(k) for k in ('code','stage','failureReason','retryMode','messageChinese') if e.get(k)}
+              elif isinstance(row.get('error'),str):
+                  row['error']=row['error'][:180]
+              print(json.dumps(row,ensure_ascii=False,sort_keys=True))
+          print('=== PROVIDER ADMISSION ===')
+          for a in docs('/tmp/admission.json'):
+              print(json.dumps({k:a.get(k) for k in ('_doc','scopeKey','taskId','projectId','acquiredAt','updatedAt') if a.get(k) not in (None,'')},ensure_ascii=False,sort_keys=True))
+          PY
+      - name: Read task-related Cloud Run logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-m2-uat" AND timestamp>="2026-08-17T14:00:00Z"' \
+            --project="$PROJECT_ID" --bucket=_Default --location=global --view=_Default \
+            --limit=500 --order=asc --format=json > /tmp/logs.json || echo '[]' > /tmp/logs.json
+          python3 - <<'PY'
+          import json, re, urllib.parse
+          data=json.load(open('/tmp/logs.json'))
+          print('=== RELEVANT LOGS 14:00Z+ ===')
+          for e in data:
+              h=e.get('httpRequest') or {}
+              url=str(h.get('requestUrl') or '')
+              path=urllib.parse.urlsplit(url).path if url else ''
+              txt=str(e.get('textPayload') or '')
+              msg=str((e.get('jsonPayload') or {}).get('message') or '')
+              combined=txt+' '+msg
+              if ('/api/videos/' in path or re.search(r'task_|ProviderAdmission|Video Start|Video Poll|GCS|artifact|operation',combined,re.I)):
+                  if len(combined)>500: combined=combined[:500]+'…'
+                  print(e.get('timestamp'), 'HTTP',h.get('status'),h.get('latency'),path,combined.replace('\n',' '))
+          PY
