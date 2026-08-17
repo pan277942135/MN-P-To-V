@@ -1,0 +1,131 @@
+name: Apply Cloud Run Capacity Hotfix
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  SERVICE: zaojing-m2-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Apply capacity settings to existing UAT service
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run services update "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --concurrency=8 \
+            --min=0 \
+            --max=4 \
+            --quiet
+
+      - name: Verify effective Cloud Run capacity
+        id: service
+        shell: bash
+        run: |
+          set -euo pipefail
+          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          CONCURRENCY="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(spec.template.spec.containerConcurrency)')"
+          MIN_SCALE="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(spec.template.metadata.annotations.autoscaling.knative.dev/minScale)')"
+          MAX_SCALE="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(spec.template.metadata.annotations.autoscaling.knative.dev/maxScale)')"
+          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+          echo "Effective revision: $REVISION"
+          echo "Effective capacity: concurrency=$CONCURRENCY min=$MIN_SCALE max=$MAX_SCALE"
+          test "$CONCURRENCY" = "8"
+          test "$MIN_SCALE" = "0"
+          test "$MAX_SCALE" = "4"
+
+      - name: Mint authenticated Cloud Run ID token
+        uses: google-github-actions/auth@v3
+        id: invoke_auth
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.service.outputs.service_url }}
+          id_token_include_email: true
+
+      - name: Authenticated health check
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.service.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/health"
+
+      - name: Burst admission probe
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.service.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          rm -f /tmp/codes.txt
+          for i in $(seq 1 24); do
+            (
+              if [ $((i % 2)) -eq 0 ]; then
+                URL="$SERVICE_URL/api/health"
+              else
+                URL="$SERVICE_URL/api/videos/list?limit=1"
+              fi
+              CODE="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ID_TOKEN" "$URL" || true)"
+              echo "$CODE" >> /tmp/codes.txt
+            ) &
+          done
+          wait
+          sort /tmp/codes.txt | uniq -c
+          if grep -qx '429' /tmp/codes.txt; then
+            echo 'Cloud Run admission still returned HTTP 429 during burst probe.' >&2
+            exit 1
+          fi
+          if grep -Evq '^(200|204)$' /tmp/codes.txt; then
+            echo 'Unexpected non-success response during burst probe:' >&2
+            sort /tmp/codes.txt | uniq -c >&2
+            exit 1
+          fi
+          test "$(wc -l < /tmp/codes.txt)" -eq 24
+
+      - name: Publish hotfix summary
+        shell: bash
+        run: |
+          {
+            echo '## Cloud Run capacity hotfix applied'
+            echo ''
+            echo '- concurrency: 8'
+            echo '- min instances: 0'
+            echo '- max instances: 4'
+            echo "- revision: `${{ steps.service.outputs.revision }}`"
+            echo '- burst probe: 24 authenticated concurrent requests, no HTTP 429'
+          } >> "$GITHUB_STEP_SUMMARY"
