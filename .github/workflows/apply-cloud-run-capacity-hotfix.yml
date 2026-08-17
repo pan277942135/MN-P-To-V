@@ -35,7 +35,7 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
-      - name: Apply capacity settings to existing UAT service
+      - name: Apply revision capacity settings to existing UAT service
         shell: bash
         run: |
           set -euo pipefail
@@ -43,8 +43,8 @@ jobs:
             --project="$PROJECT_ID" \
             --region="$REGION" \
             --concurrency=8 \
-            --min=0 \
-            --max=4 \
+            --min-instances=0 \
+            --max-instances=4 \
             --quiet
 
       - name: Verify effective Cloud Run capacity
@@ -56,12 +56,12 @@ jobs:
           SERVICE_URL="$(jq -r '.status.url' <<<"$DESC")"
           REVISION="$(jq -r '.status.latestReadyRevisionName' <<<"$DESC")"
           CONCURRENCY="$(jq -r '.spec.template.spec.containerConcurrency // empty' <<<"$DESC")"
-          MIN_SCALE="$(jq -r '.spec.template.metadata.annotations["autoscaling.knative.dev/minScale"] // empty' <<<"$DESC")"
+          MIN_SCALE="$(jq -r '.spec.template.metadata.annotations["autoscaling.knative.dev/minScale"] // "0"' <<<"$DESC")"
           MAX_SCALE="$(jq -r '.spec.template.metadata.annotations["autoscaling.knative.dev/maxScale"] // empty' <<<"$DESC")"
           echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
           echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
           echo "Effective revision: $REVISION"
-          echo "Effective capacity: concurrency=$CONCURRENCY min=$MIN_SCALE max=$MAX_SCALE"
+          echo "Effective revision capacity: concurrency=$CONCURRENCY min=$MIN_SCALE max=$MAX_SCALE"
           test "$CONCURRENCY" = "8"
           test "$MIN_SCALE" = "0"
           test "$MAX_SCALE" = "4"
@@ -124,9 +124,9 @@ jobs:
           {
             echo '## Cloud Run capacity hotfix applied'
             echo ''
-            echo '- concurrency: 8'
-            echo '- min instances: 0'
-            echo '- max instances: 4'
+            echo '- revision concurrency: 8'
+            echo '- revision min instances: 0'
+            echo '- revision max instances: 4'
             echo "- revision: `${{ steps.service.outputs.revision }}`"
             echo '- burst probe: 24 authenticated concurrent requests, no HTTP 429'
           } >> "$GITHUB_STEP_SUMMARY"
