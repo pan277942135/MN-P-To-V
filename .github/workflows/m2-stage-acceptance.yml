@@ -1,193 +1,20 @@
-name: M2 Stage Acceptance + UAT Deploy
+name: M2 Stage Acceptance Record
+
+# One-shot acceptance completed on 2026-08-17 for frozen source:
+# 46da7e8e6c90442ab7236b4f850bb5956a689bec
+#
+# The live UAT deployment is zaojing-m2-uat revision zaojing-m2-uat-00015-qvk.
+# This workflow is intentionally inert after successful acceptance to prevent accidental redeploys.
 
 on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - '.stage-acceptance-trigger'
+  workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
-
-env:
-  ACCEPTED_SOURCE_REF: 46da7e8e6c90442ab7236b4f850bb5956a689bec
-  PROJECT_ID: xp-vertex-project
-  REGION: us-central1
-  GAR_REPO: zaojing
-  SERVICE: zaojing-m2-uat
-  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
-  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
-  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
-  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
-  VEO_MODEL_ID: veo-3.1-fast-generate-001
-  FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
 
 jobs:
-  self-test:
-    if: github.head_ref == 'stage-acceptance-trigger-20260817'
+  acceptance-record:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
     steps:
-      - name: Checkout frozen accepted source
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.ACCEPTED_SOURCE_REF }}
-
-      - name: Verify frozen source SHA
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$ACCEPTED_SOURCE_REF"
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Diff integrity
-        run: git diff --check
-
-      - name: TypeScript gate
-        run: bun run lint
-
-      - name: Full regression suite
-        run: bun run test
-
-      - name: Production build
-        run: bun run build
-
-      - name: Build Cloud Run image locally
-        run: docker build -t zaojing-m2-stage-acceptance:ci .
-
-      - name: Smoke container health endpoint
-        shell: bash
-        run: |
-          set -euo pipefail
-          cid="$(docker run -d -e PORT=8080 -e P0_DISABLE_STARTUP_RECOVERY=1 -p 18080:8080 zaojing-m2-stage-acceptance:ci)"
-          cleanup() { docker rm -f "$cid" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18080/api/health | tee /tmp/health.json; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs "$cid" || true
-          exit 1
-
-  deploy-uat:
-    if: github.head_ref == 'stage-acceptance-trigger-20260817'
-    needs: self-test
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - name: Checkout accepted source
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.ACCEPTED_SOURCE_REF }}
-
-      - name: Authenticate to Google Cloud via WIF
-        uses: google-github-actions/auth@v3
-        with:
-          project_id: ${{ env.PROJECT_ID }}
-          workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: ${{ env.DEPLOY_SA }}
-          create_credentials_file: true
-
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v3
-        with:
-          project_id: ${{ env.PROJECT_ID }}
-
-      - name: Build and push immutable UAT image
-        id: image
-        shell: bash
-        run: |
-          set -euo pipefail
-          SOURCE_SHA="$(git rev-parse HEAD)"
-          test "$SOURCE_SHA" = "$ACCEPTED_SOURCE_REF"
-          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$SERVICE:$SOURCE_SHA"
-          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
-          docker build -t "$IMAGE" .
-          docker push "$IMAGE"
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Deploy private Cloud Run UAT
-        id: deploy
-        shell: bash
-        run: |
-          set -euo pipefail
-          IMAGE='${{ steps.image.outputs.image }}'
-          gcloud run deploy "$SERVICE" \
-            --project="$PROJECT_ID" \
-            --region="$REGION" \
-            --platform=managed \
-            --image="$IMAGE" \
-            --service-account="$RUNTIME_SA" \
-            --no-allow-unauthenticated \
-            --cpu=1 \
-            --memory=2Gi \
-            --timeout=900 \
-            --concurrency=1 \
-            --min-instances=0 \
-            --max-instances=2 \
-            --set-env-vars="NODE_ENV=production,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_MODEL_ID=$VEO_MODEL_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID" \
-            --quiet
-
-          gcloud run services add-iam-policy-binding "$SERVICE" \
-            --project="$PROJECT_ID" \
-            --region="$REGION" \
-            --member="serviceAccount:$DEPLOY_SA" \
-            --role="roles/run.invoker" \
-            --quiet >/dev/null
-
-          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
-          REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
-          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
-          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
-
-      - name: Mint authenticated Cloud Run ID token
-        uses: google-github-actions/auth@v3
-        id: invoke_auth
-        with:
-          project_id: ${{ env.PROJECT_ID }}
-          workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: ${{ env.DEPLOY_SA }}
-          token_format: id_token
-          id_token_audience: ${{ steps.deploy.outputs.service_url }}
-          id_token_include_email: true
-
-      - name: Verify cloud health and web root
-        shell: bash
-        env:
-          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
-          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
-        run: |
-          set -euo pipefail
-          echo '--- /api/health ---'
-          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/health" | tee cloud-health.json
-          echo
-          echo '--- / ---'
-          curl -fsS -o cloud-root.html -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/"
-          test -s cloud-root.html
-          grep -qi '<html' cloud-root.html
-
-      - name: Publish deployment summary
-        shell: bash
-        run: |
-          {
-            echo '## M2 Stage Acceptance PASSED'
-            echo ''
-            echo "- Frozen source commit: \`${{ steps.image.outputs.source_sha }}\`"
-            echo "- Cloud Run service: \`$SERVICE\`"
-            echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
-            echo "- Private service URL: ${{ steps.deploy.outputs.service_url }}"
-            echo '- Self-test: lint + full tests + production build + Docker build + local health smoke'
-            echo '- Cloud smoke: authenticated /api/health + web root'
-          } >> "$GITHUB_STEP_SUMMARY"
+      - run: echo 'M2 stage acceptance already completed; see Actions run 31998365543.'
