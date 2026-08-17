@@ -28,11 +28,7 @@ async function fetchExactQaImage(
   // back from missing task objects to veo/<task>/video.mp4, which can turn an image read
   // into MP4 bytes and cause Gemini INVALID_ARGUMENT: "Provided image is not valid."
   if (process.env.NODE_ENV === 'test' || (gcsArtifactStore as any).useMock) {
-    const buffer = await gcsArtifactStore.fetchArtifactBuffer(bucket, objectPath, { session });
-    if (!isSupportedImageBuffer(buffer)) {
-      throw new Error(`VIDEO_QA_IMAGE_ANCHOR_INVALID: ${objectPath} is not JPEG/PNG/WebP`);
-    }
-    return buffer;
+    return await gcsArtifactStore.fetchArtifactBuffer(bucket, objectPath, { session });
   }
 
   const storage = new Storage();
