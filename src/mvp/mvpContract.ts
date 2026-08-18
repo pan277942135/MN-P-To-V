@@ -1,3 +1,4 @@
+// MVP_SIMPLE v0.1 contract: artifact-only completion, no identity QA gate.
 export const MVP_PROVIDER = 'vertex' as const;
 export const MVP_VIDEO_MODEL = 'veo-3.1-fast-generate-001' as const;
 export const MVP_ALLOWED_DURATIONS = [4, 6, 8] as const;
