@@ -1,0 +1,101 @@
+name: TEMP MVP QA Contract Migration
+
+on:
+  push:
+    branches:
+      - fix/mvp-identity-qa-score-contract
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    if: ${{ !contains(github.event.head_commit.message, 'chore: apply runtime QA contract patch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/mvp-identity-qa-score-contract
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Apply exact runtime patches
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          server_path = Path('mvp-server-v02.ts')
+          text = server_path.read_text()
+
+          old = """function publicTask(task: MvpVideoTask) {\n  return {"""
+          new = """function publicTask(task: MvpVideoTask) {\n  const currentIdentityReport =\n    (task.providerAttempt || 1) > 1 && ['RETRYING', 'GENERATING', 'QUALITY_CHECKING'].includes(task.status)\n      ? null\n      : task.identityReport || null;\n  return {"""
+          assert text.count(old) == 1, 'publicTask anchor changed'
+          text = text.replace(old, new)
+
+          old = """    identityReport: task.identityReport || null,\n    firstAttemptIdentityReport: task.firstAttemptIdentityReport || null,"""
+          new = """    identityReport: currentIdentityReport,\n    firstAttemptIdentityReport: task.firstAttemptIdentityReport || null,"""
+          assert text.count(old) == 1, 'public identity report anchor changed'
+          text = text.replace(old, new)
+
+          old = """      : code === 'IDENTITY_INPUT_UNSAFE'\n        ? '保持脸部清晰可见，降低转头、遮挡和大幅镜头动作后重新提交。'\n        : '填写有效视频 Prompt。',"""
+          new = """      : code === 'IDENTITY_INPUT_UNSAFE'\n        ? '按具体校验提示修正输入图尺寸或比例；动作风险由 Identity Safe 自动收敛，不再作为图片硬拒绝条件。'\n        : '填写有效视频 Prompt。',"""
+          assert text.count(old) == 1, 'input error anchor changed'
+          text = text.replace(old, new)
+
+          old = """  } catch (error: any) {\n    const message = redactSecrets(error?.message || String(error));\n    return await updateTask(task.taskId, {\n      status: 'FAILED', stage: 'identity_qa',\n      error: { code: 'IDENTITY_QA_UNAVAILABLE', stage: 'identity_qa', message, retryable: true, recommendedAction: '身份 QA 本身失败，保留当前视频但不得标记 COMPLETED；修复 QA 后重新质检。', technicalMessage: message },\n    });\n  }\n\n  const reportPatch"""
+          new = """  } catch (error: any) {\n    const message = redactSecrets(error?.message || String(error));\n    const evidenceConflict = message.includes('IDENTITY_QA_EVIDENCE_CONFLICT');\n    return await updateTask(task.taskId, {\n      status: 'FAILED', stage: 'identity_qa',\n      error: evidenceConflict\n        ? {\n            code: 'IDENTITY_QA_EVIDENCE_CONFLICT',\n            stage: 'identity_qa',\n            message: '身份 QA 分值与结构化/文字证据冲突，当前视频已保留，禁止触发 Veo 重生成。',\n            retryable: true,\n            recommendedAction: '对当前同一视频重新执行身份 QA；该问题属于 QA 契约错误，不应消耗 Provider attempt。',\n            technicalMessage: message,\n          }\n        : { code: 'IDENTITY_QA_UNAVAILABLE', stage: 'identity_qa', message, retryable: true, recommendedAction: '身份 QA 本身失败，保留当前视频但不得标记 COMPLETED；修复 QA 后重新质检。', technicalMessage: message },\n    });\n  }\n\n  const reportPatch"""
+          assert text.count(old) == 1, 'identity QA catch anchor changed'
+          text = text.replace(old, new)
+
+          old = """      providerStorageUri: providerStorageUri(task.taskId, 2),\n      operationName: null,\n      error: null,"""
+          new = """      providerStorageUri: providerStorageUri(task.taskId, 2),\n      operationName: null,\n      identityReport: null,\n      error: null,"""
+          assert text.count(old) == 1, 'retry reset anchor changed'
+          text = text.replace(old, new)
+          server_path.write_text(text)
+
+          contract_path = Path('src/mvp/mvpContract.ts')
+          contract = contract_path.read_text()
+          old = """  | 'IDENTITY_QA_UNAVAILABLE'\n  | 'IDENTITY_DRIFT'"""
+          new = """  | 'IDENTITY_QA_UNAVAILABLE'\n  | 'IDENTITY_QA_EVIDENCE_CONFLICT'\n  | 'IDENTITY_DRIFT'"""
+          assert contract.count(old) == 1, 'MvpErrorCode anchor changed'
+          contract_path.write_text(contract.replace(old, new))
+
+          test_path = Path('src/__tests__/mvpIdentityQaRuntimeContract.test.ts')
+          test_path.write_text("""import { describe, expect, it } from 'vitest';\nimport { readFileSync } from 'node:fs';\n\nconst server = readFileSync('mvp-server-v02.ts', 'utf8');\nconst contract = readFileSync('src/mvp/mvpContract.ts', 'utf8');\n\ndescribe('MVP identity QA runtime contract', () => {\n  it('does not publish attempt-1 QA as the current report while attempt 2 is active', () => {\n    expect(server).toContain(\"['RETRYING', 'GENERATING', 'QUALITY_CHECKING'].includes(task.status)\");\n    expect(server).toContain('identityReport: currentIdentityReport');\n    expect(server).toContain('identityReport: null');\n    expect(server).toContain('firstAttemptIdentityReport: task.firstAttemptIdentityReport || null');\n  });\n\n  it('routes QA evidence conflicts to same-artifact re-QA semantics instead of provider retry', () => {\n    expect(contract).toContain(\"'IDENTITY_QA_EVIDENCE_CONFLICT'\");\n    expect(server).toContain(\"message.includes('IDENTITY_QA_EVIDENCE_CONFLICT')\");\n    expect(server).toContain('禁止触发 Veo 重生成');\n    expect(server).toContain('不应消耗 Provider attempt');\n  });\n\n  it('does not tell users to fix face pose for a dimension/aspect-only input block', () => {\n    expect(server).toContain('动作风险由 Identity Safe 自动收敛，不再作为图片硬拒绝条件');\n    expect(server).not.toContain('保持脸部清晰可见，降低转头、遮挡和大幅镜头动作后重新提交。');\n  });\n});\n""")
+          PY
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Targeted regression tests
+        run: bunx vitest run src/__tests__/mvpIdentitySafe.test.ts src/__tests__/mvpIdentityQaRuntimeContract.test.ts
+
+      - name: Typecheck
+        run: bun run lint
+
+      - name: Full regression suite
+        env:
+          VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+        run: bun run test
+
+      - name: Build current MVP image
+        run: docker build -f Dockerfile.mvp -t zaojing-mvp-qa-contract:check .
+
+      - name: Commit only after all checks pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add mvp-server-v02.ts src/mvp/mvpContract.ts src/__tests__/mvpIdentityQaRuntimeContract.test.ts
+          if git diff --cached --quiet; then
+            echo 'No patch required.'
+            exit 0
+          fi
+          git commit -m 'chore: apply runtime QA contract patch'
+          git push origin HEAD:fix/mvp-identity-qa-score-contract
