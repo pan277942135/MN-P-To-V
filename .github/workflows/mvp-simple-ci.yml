@@ -6,15 +6,18 @@ on:
       - agent/mvp-simple-verifiable
       - agent/mvp-simple-verifiable-v2
       - agent/identity-safe-v02
+      - agent/mvp-network-deadline-hardening
   pull_request:
     paths:
       - 'mvp-server.ts'
       - 'mvp-server-v02.ts'
+      - 'mvp-server-v021.ts'
       - 'identity-benchmark-runner.ts'
       - 'Dockerfile.mvp'
       - 'src/mvp/**'
       - 'src/__tests__/mvpSimpleContract.test.ts'
       - 'src/__tests__/mvpIdentitySafe.test.ts'
+      - 'src/__tests__/mvpNetworkDeadlineHardening.test.ts'
       - '.github/workflows/mvp-simple-*.yml'
       - '.github/workflows/identity-safe-real-benchmark.yml'
       - '.github/identity-safe-benchmark-v02.trigger'
@@ -45,14 +48,17 @@ jobs:
       - name: Identity Safe v0.2 tests and 24-case benchmark contract
         run: bunx vitest run src/__tests__/mvpIdentitySafe.test.ts
 
+      - name: Network/deadline hardening tests
+        run: bunx vitest run src/__tests__/mvpNetworkDeadlineHardening.test.ts
+
       - name: Existing regression suite
         env:
           VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
         run: bun run test
 
-      - name: Build standalone Identity Safe MVP server
+      - name: Build standalone Identity Safe v0.2.1 server
         run: |
-          bunx esbuild mvp-server-v02.ts \
+          bunx esbuild mvp-server-v021.ts \
             --bundle \
             --platform=node \
             --format=cjs \
@@ -91,8 +97,13 @@ jobs:
             if curl -fsS http://127.0.0.1:18080/api/mvp/health >/tmp/mvp-health.json; then
               cat /tmp/mvp-health.json
               grep -q 'MVP_IDENTITY_SAFE_V02' /tmp/mvp-health.json
+              curl -fsS http://127.0.0.1:18080/api/mvp/client-health >/tmp/mvp-client-health.json
+              grep -q 'identity-safe-v0.2.1-network-hardening' /tmp/mvp-client-health.json
+              grep -q '"networkRecovery":true' /tmp/mvp-client-health.json
               curl -fsS http://127.0.0.1:18080/ >/tmp/mvp-index.html
-              grep -q 'Identity Safe v0.2' /tmp/mvp-index.html
+              grep -q 'Identity Safe v0.2.1' /tmp/mvp-index.html
+              grep -q 'NETWORK_RECOVERING' /tmp/mvp-index.html
+              grep -q '/api/mvp/videos/lookup' /tmp/mvp-index.html
               curl -fsS http://127.0.0.1:18080/api/mvp/benchmark/catalog >/tmp/mvp-benchmark.json
               grep -q 'IDSAFE-24' /tmp/mvp-benchmark.json
               docker exec "$cid" test -s /app/dist/identity-benchmark-runner.cjs

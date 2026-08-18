@@ -54,6 +54,7 @@ export interface MvpStructuredError {
   retryable: boolean;
   recommendedAction: string;
   providerHttpStatus?: number | null;
+  providerCode?: number | null;
   providerStatus?: string | null;
   technicalMessage?: string | null;
 }
@@ -133,6 +134,25 @@ export function assertIdentitySafeCompletion(task: Partial<MvpVideoTask>): void 
   }
 }
 
+function unwrapProviderMessage(input: unknown): string {
+  let value = String(input || '').trim();
+  if (!value) return 'Video generation failed.';
+
+  for (let i = 0; i < 3; i++) {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) break;
+    try {
+      const parsed: any = JSON.parse(trimmed);
+      const nested = parsed?.message ?? parsed?.error?.message;
+      if (typeof nested !== 'string' || !nested.trim() || nested.trim() === value) break;
+      value = nested.trim();
+    } catch {
+      break;
+    }
+  }
+  return value;
+}
+
 export function normalizeProviderFailureReason(input: {
   failureReason?: string | null;
   message?: string | null;
@@ -140,9 +160,20 @@ export function normalizeProviderFailureReason(input: {
   providerStatus?: string | null;
 }): MvpStructuredError {
   const failureReason = String(input.failureReason || '').toLowerCase();
-  const message = String(input.message || 'Video generation failed.');
-  const providerStatus = input.providerStatus || null;
-  const httpStatus = input.httpStatus ?? null;
+  const originalMessage = String(input.message || 'Video generation failed.');
+  const message = unwrapProviderMessage(originalMessage);
+  const rawNumericCode = input.httpStatus ?? null;
+  const providerCode = typeof rawNumericCode === 'number' && (rawNumericCode < 100 || rawNumericCode > 599)
+    ? rawNumericCode
+    : null;
+  const httpStatus = typeof rawNumericCode === 'number' && rawNumericCode >= 100 && rawNumericCode <= 599
+    ? rawNumericCode
+    : null;
+  const suppliedProviderStatus = input.providerStatus || null;
+  const deadlineExceeded =
+    failureReason === 'polling_timeout' ||
+    suppliedProviderStatus === 'DEADLINE_EXCEEDED' ||
+    /\bdeadline[_ ]exceeded\b|\brequest timed out\b|\bgeneration timed out\b|\boperation timed out\b/i.test(message);
 
   if (failureReason === 'output_rai_filtered' || /safety|rai_media_filtered/i.test(message)) {
     return {
@@ -152,7 +183,23 @@ export function normalizeProviderFailureReason(input: {
       retryable: false,
       recommendedAction: '调整输入图片或 Prompt 后创建新任务。',
       providerHttpStatus: httpStatus,
-      providerStatus,
+      providerCode,
+      providerStatus: suppliedProviderStatus,
+      technicalMessage: originalMessage !== message ? originalMessage : null,
+    };
+  }
+
+  if (deadlineExceeded) {
+    return {
+      code: 'GENERATION_TIMEOUT',
+      stage: 'generation',
+      message,
+      retryable: true,
+      recommendedAction: 'Vertex 已明确结束当前 Operation 且未产出视频。可直接重新生成创建新任务；不要继续轮询旧 Operation。',
+      providerHttpStatus: httpStatus,
+      providerCode,
+      providerStatus: suppliedProviderStatus || 'DEADLINE_EXCEEDED',
+      technicalMessage: originalMessage !== message ? originalMessage : null,
     };
   }
 
@@ -164,7 +211,8 @@ export function normalizeProviderFailureReason(input: {
       retryable: true,
       recommendedAction: '确认当前任务无可恢复产物后再创建新任务。',
       providerHttpStatus: httpStatus,
-      providerStatus,
+      providerCode,
+      providerStatus: suppliedProviderStatus,
     };
   }
 
@@ -176,7 +224,8 @@ export function normalizeProviderFailureReason(input: {
       retryable: true,
       recommendedAction: '先重试产物恢复；不要直接重复提交 Veo。',
       providerHttpStatus: httpStatus,
-      providerStatus,
+      providerCode,
+      providerStatus: suppliedProviderStatus,
     };
   }
 
@@ -188,11 +237,12 @@ export function normalizeProviderFailureReason(input: {
       retryable: true,
       recommendedAction: '当前产物不是有效视频；确认无其他可恢复产物后重新生成。',
       providerHttpStatus: httpStatus,
-      providerStatus,
+      providerCode,
+      providerStatus: suppliedProviderStatus,
     };
   }
 
-  if (failureReason === 'quota_or_rate_limited' || httpStatus === 429 || providerStatus === 'RESOURCE_EXHAUSTED') {
+  if (failureReason === 'quota_or_rate_limited' || httpStatus === 429 || suppliedProviderStatus === 'RESOURCE_EXHAUSTED') {
     return {
       code: 'RATE_LIMITED',
       stage: 'submit',
@@ -200,7 +250,8 @@ export function normalizeProviderFailureReason(input: {
       retryable: true,
       recommendedAction: '稍后创建新任务，或检查 Vertex AI 配额与容量。',
       providerHttpStatus: httpStatus,
-      providerStatus,
+      providerCode,
+      providerStatus: suppliedProviderStatus,
     };
   }
 
@@ -211,6 +262,8 @@ export function normalizeProviderFailureReason(input: {
     retryable: true,
     recommendedAction: '查看技术错误；若 Provider 已明确失败，可创建新任务。',
     providerHttpStatus: httpStatus,
-    providerStatus,
+    providerCode,
+    providerStatus: suppliedProviderStatus,
+    technicalMessage: originalMessage !== message ? originalMessage : null,
   };
 }

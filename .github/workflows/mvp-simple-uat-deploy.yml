@@ -7,10 +7,12 @@ on:
     paths:
       - 'mvp-server.ts'
       - 'mvp-server-v02.ts'
+      - 'mvp-server-v021.ts'
       - 'Dockerfile.mvp'
       - 'src/mvp/**'
       - 'src/__tests__/mvpSimpleContract.test.ts'
       - 'src/__tests__/mvpIdentitySafe.test.ts'
+      - 'src/__tests__/mvpNetworkDeadlineHardening.test.ts'
       - 'MVP_SIMPLE_ACCEPTANCE.md'
       - '.github/workflows/mvp-simple-uat-deploy.yml'
   workflow_dispatch:
@@ -123,7 +125,7 @@ jobs:
           id_token_audience: ${{ steps.deploy.outputs.service_url }}
           id_token_include_email: true
 
-      - name: Verify Identity Safe health and full readiness before browser gate
+      - name: Verify Identity Safe v0.2.1 health and full readiness before browser gate
         id: verify
         shell: bash
         env:
@@ -134,6 +136,10 @@ jobs:
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/health" | tee health.json
           grep -q '"mode":"MVP_IDENTITY_SAFE_V02"' health.json
           grep -q '"identityQaModel":"gemini-2.5-flash"' health.json
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/client-health" | tee client-health.json
+          grep -q 'identity-safe-v0.2.1-network-hardening' client-health.json
+          grep -q '"networkRecovery":true' client-health.json
+          grep -q '"idempotencyLookup":true' client-health.json
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/readiness" | tee readiness.json
           grep -q '"ready":true' readiness.json
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/benchmark/catalog" | tee benchmark.json
@@ -188,7 +194,7 @@ jobs:
         shell: bash
         run: |
           {
-            echo '## MVP Identity Safe v0.2 UAT ready'
+            echo '## MVP Identity Safe v0.2.1 UAT ready'
             echo ''
             echo "- Source commit: \`${{ steps.image.outputs.source_sha }}\`"
             echo "- Cloud Run service: \`$SERVICE\`"
@@ -198,10 +204,12 @@ jobs:
             echo "- IAP enabled: \`${{ steps.iap.outputs.enabled }}\`"
             echo "- Video model: \`$VEO_MODEL_ID\`"
             echo "- Identity QA model: \`$IDENTITY_QA_MODEL\`"
+            echo "- Client network recovery: \`true\`"
+            echo "- Idempotency lookup: \`true\`"
             echo "- Runtime auth: ADC / \`$RUNTIME_SA\`"
             echo "- Benchmark catalog: 24 cases"
             echo ''
-            echo 'Completion now requires verified MP4 + passing identity QA; a drifted first attempt may trigger exactly one conservative provider retry.'
+            echo 'Transport interruptions no longer map to FAILED; the browser recovers the same durable task by idempotency key. Vertex Deadline exceeded is normalized to GENERATION_TIMEOUT.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish durable deployment evidence
@@ -219,9 +227,10 @@ jobs:
         run: |
           set -euo pipefail
           READINESS="$(cat readiness.json 2>/dev/null || echo '{"ready":false,"evidence":"readiness unavailable"}')"
+          CLIENT_HEALTH="$(cat client-health.json 2>/dev/null || echo '{"networkRecovery":false,"evidence":"client health unavailable"}')"
           IAP_LOG="$(tail -80 iap.log 2>/dev/null || echo 'iap.log unavailable')"
           BODY=$(cat <<EOF
-          ### MVP Identity Safe v0.2 UAT deployment evidence
+          ### MVP Identity Safe v0.2.1 UAT deployment evidence
           - Job status: \`$JOB_STATUS\`
           - Source SHA: \`${SOURCE_SHA:-unavailable}\`
           - Cloud Run service: \`$SERVICE\`
@@ -231,8 +240,14 @@ jobs:
           - IAP enabled: \`${IAP_ENABLED:-false}\`
           - Provider/model: \`Vertex AI / $VEO_MODEL_ID\`
           - Identity QA: \`Vertex AI / $IDENTITY_QA_MODEL\`
+          - Network hardening: \`idempotency lookup + transport recovery\`
           - Benchmark catalog: \`24 cases\`
           - Readiness step: \`${VERIFY_OUTCOME:-not_run}\`
+
+          Client health:
+          \`\`\`json
+          $CLIENT_HEALTH
+          \`\`\`
 
           Readiness:
           \`\`\`json
