@@ -13,7 +13,12 @@ function sha256(input: string): string {
   return crypto.createHash('sha256').update(input).digest('hex');
 }
 
+function isRetryQaPending(status: unknown, providerAttempt: unknown): boolean {
+  return Number(providerAttempt || 1) > 1 && ['RETRYING', 'GENERATING', 'QUALITY_CHECKING'].includes(String(status || ''));
+}
+
 function publicTask(task: MvpVideoTask) {
+  const currentIdentityReport = isRetryQaPending(task.status, task.providerAttempt) ? null : task.identityReport || null;
   return {
     taskId: task.taskId,
     status: task.status,
@@ -32,7 +37,7 @@ function publicTask(task: MvpVideoTask) {
     retryReason: task.retryReason || null,
     operationNamePresent: Boolean(task.operationName),
     pollAttempt: task.pollAttempt,
-    identityReport: task.identityReport || null,
+    identityReport: currentIdentityReport,
     firstAttemptIdentityReport: task.firstAttemptIdentityReport || null,
     artifactPersisted: task.artifactPersisted,
     artifactVerified: task.artifactVerified,
@@ -187,6 +192,17 @@ $('recover').onclick=async()=>{if(!taskId)return;$('recover').disabled=true;try{
 export async function createMvpAppV021() {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
+
+  app.use((_req, res, next) => {
+    const originalJson = res.json.bind(res);
+    res.json = ((body: any) => {
+      if (body && typeof body === 'object' && body.taskId && isRetryQaPending(body.status, body.providerAttempt)) {
+        return originalJson({ ...body, identityReport: null });
+      }
+      return originalJson(body);
+    }) as typeof res.json;
+    next();
+  });
 
   app.get('/', (_req, res) => res.type('html').send(renderMvpPage()));
   app.get('/api/mvp/client-health', (_req, res) => res.json({
