@@ -1,12 +1,21 @@
 name: MVP Simple UAT Deploy
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'mvp-server.ts'
+      - 'Dockerfile.mvp'
+      - 'src/mvp/**'
+      - 'src/__tests__/mvpSimpleContract.test.ts'
+      - 'MVP_SIMPLE_ACCEPTANCE.md'
   workflow_dispatch:
     inputs:
       source_ref:
         description: 'Git ref to deploy'
         required: true
-        default: 'agent/mvp-simple-verifiable'
+        default: 'main'
 
 permissions:
   contents: read
@@ -32,7 +41,7 @@ jobs:
       - name: Checkout requested source
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.sha }}
 
       - name: Authenticate to Google Cloud via WIF
         uses: google-github-actions/auth@v3
