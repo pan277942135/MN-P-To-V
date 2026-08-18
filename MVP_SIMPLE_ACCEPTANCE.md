@@ -163,17 +163,13 @@ Provider `done=true` 本身绝不等于成功。
 
 ## 部署
 
-在 GitHub Actions 手动运行：
+`MVP Simple UAT Deploy` 在 MVP_SIMPLE 文件合入 `main` 时自动部署，同时保留手动 `workflow_dispatch`。
 
-`MVP Simple UAT Deploy`
-
-默认部署：
-
-`agent/mvp-simple-verifiable`
+部署目标固定为独立 Cloud Run 服务 `zaojing-mvp-simple-uat`，不修改原 M2 UAT 服务。
 
 部署成功必须经过 `/api/mvp/health` 和 `/api/mvp/readiness` 两道检查。
 
-不修改原 M2 UAT Cloud Run 服务。
+每次部署结束后，GitHub Actions 会把 Source SHA、Cloud Run revision、私有 Service URL 和 readiness JSON 发布到 Issue #47 `MVP_SIMPLE UAT deployment evidence`，作为可追溯运行态证据。
 
 ## 第一轮人工真实验收
 
@@ -215,4 +211,4 @@ Provider `done=true` 本身绝不等于成功。
 
 ## CI 状态说明
 
-`MVP Simple CI` 与 `MVP Simple UAT Deploy` 已作为独立 CI 基础设施进入默认分支；本 PR 的后续同步提交会触发真实 PR 验证。只有 CI 通过后才进入独立 UAT 部署，不以“代码已提交”代替“版本已验证”。
+`MVP Simple CI` 已验证 Typecheck、MVP contract tests、现有完整回归、独立 server build、Docker build 和容器 smoke。只有 CI 全绿后才允许进入独立 UAT 部署，不以“代码已提交”代替“版本已验证”。
