@@ -38,7 +38,7 @@ describe('MVP Identity Safe v0.2', () => {
     expect(IDENTITY_STABILITY_BENCHMARK_V1.filter((item) => item.durationSeconds === 8)).toHaveLength(8);
   });
 
-  it('rejects too-small images and high-risk identity prompt motion', async () => {
+  it('rejects too-small images and reports high-risk identity prompt motion', async () => {
     const tiny = await sharp({ create: { width: 320, height: 480, channels: 3, background: '#fff' } }).jpeg().toBuffer();
     const checked = await validateIdentitySafeInput({
       imageBuffer: tiny,
@@ -57,6 +57,21 @@ describe('MVP Identity Safe v0.2', () => {
     });
     expect(checked.pass).toBe(true);
     expect(checked.issues).toEqual([]);
+  });
+
+  it('treats high-risk prompt motion as advisory when the identity frame itself is valid', async () => {
+    const image = await sharp({ create: { width: 864, height: 1536, channels: 3, background: '#fff' } }).jpeg().toBuffer();
+    const prompt = 'Camera orbits around her while she quickly turns around and briefly covers her face.';
+    const checked = await validateIdentitySafeInput({ imageBuffer: image, prompt });
+
+    expect(checked.pass).toBe(true);
+    expect(checked.issues.map((item) => item.code)).toContain('PROMPT_IDENTITY_RISK');
+    expect(checked.issues.find((item) => item.code === 'PROMPT_IDENTITY_RISK')?.message).toContain('不阻断提交');
+
+    const effectivePrompt = buildIdentitySafePrompt(prompt, false);
+    expect(effectivePrompt).toContain('No face occlusion, no large head turns');
+    expect(effectivePrompt).toContain('Camera is locked or near-locked');
+    expect(effectivePrompt).toContain('identity preservation takes priority');
   });
 
   it('adds a fixed identity-safe block and a stronger conservative retry block', () => {
