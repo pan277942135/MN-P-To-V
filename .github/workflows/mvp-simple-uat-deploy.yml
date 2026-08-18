@@ -10,6 +10,7 @@ on:
       - 'src/mvp/**'
       - 'src/__tests__/mvpSimpleContract.test.ts'
       - 'MVP_SIMPLE_ACCEPTANCE.md'
+      - '.github/workflows/mvp-simple-uat-deploy.yml'
   workflow_dispatch:
     inputs:
       source_ref:
@@ -85,6 +86,7 @@ jobs:
             --image="$IMAGE" \
             --service-account="$RUNTIME_SA" \
             --no-allow-unauthenticated \
+            --no-iap \
             --cpu=1 \
             --memory=2Gi \
             --timeout=300 \
@@ -106,7 +108,7 @@ jobs:
           echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
           echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
 
-      - name: Mint Cloud Run ID token
+      - name: Mint Cloud Run ID token for pre-IAP readiness
         uses: google-github-actions/auth@v3
         id: invoke_auth
         with:
@@ -117,7 +119,7 @@ jobs:
           id_token_audience: ${{ steps.deploy.outputs.service_url }}
           id_token_include_email: true
 
-      - name: Verify health and full readiness
+      - name: Verify health and full readiness before browser gate
         id: verify
         shell: bash
         env:
@@ -129,6 +131,36 @@ jobs:
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/readiness" | tee readiness.json
           grep -q '"ready":true' readiness.json
 
+      - name: Enable direct IAP browser access
+        id: iap
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+          gcloud beta services identity create \
+            --service=iap.googleapis.com \
+            --project="$PROJECT_ID" \
+            --quiet >/dev/null
+
+          IAP_AGENT="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
+          gcloud run services add-iam-policy-binding "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --member="serviceAccount:$IAP_AGENT" \
+            --role="roles/run.invoker" \
+            --quiet >/dev/null
+
+          gcloud run services update "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --iap \
+            --quiet
+
+          DESCRIPTION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION")"
+          printf '%s\n' "$DESCRIPTION" | tee service-description.txt
+          printf '%s\n' "$DESCRIPTION" | grep -qi 'Iap Enabled: true'
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
       - name: Deployment summary
         if: success()
         shell: bash
@@ -139,13 +171,15 @@ jobs:
             echo "- Source commit: \`${{ steps.image.outputs.source_sha }}\`"
             echo "- Cloud Run service: \`$SERVICE\`"
             echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
-            echo "- Private service URL: ${{ steps.deploy.outputs.service_url }}"
+            echo "- Fixed UAT URL: ${{ steps.deploy.outputs.service_url }}"
+            echo "- Browser access: direct Cloud Run IAP / Google sign-in"
+            echo "- IAP enabled: \`${{ steps.iap.outputs.enabled }}\`"
             echo "- Provider: Vertex AI"
             echo "- Model: \`$VEO_MODEL_ID\`"
             echo "- Runtime auth: ADC / \`$RUNTIME_SA\`"
             echo "- Output bucket: \`$VEO_OUTPUT_BUCKET\`"
             echo ''
-            echo 'This service is isolated from the existing M2 UAT service.'
+            echo 'No Cloud Shell proxy or Web Preview is required for UAT access.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish durable deployment evidence
@@ -158,6 +192,8 @@ jobs:
           SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
           REVISION: ${{ steps.deploy.outputs.revision }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+          IAP_OUTCOME: ${{ steps.iap.outcome }}
+          IAP_ENABLED: ${{ steps.iap.outputs.enabled }}
         run: |
           set -euo pipefail
           if [ -f readiness.json ]; then
@@ -171,7 +207,10 @@ jobs:
           - Source SHA: \`${SOURCE_SHA:-unavailable}\`
           - Cloud Run service: \`$SERVICE\`
           - Revision: \`${REVISION:-unavailable}\`
-          - Service URL: ${SERVICE_URL:-unavailable}
+          - Fixed UAT URL: ${SERVICE_URL:-unavailable}
+          - Browser access: \`direct Cloud Run IAP / Google sign-in\`
+          - IAP step: \`${IAP_OUTCOME:-not_run}\`
+          - IAP enabled: \`${IAP_ENABLED:-false}\`
           - Provider/model: \`Vertex AI / $VEO_MODEL_ID\`
           - Runtime auth: \`ADC / $RUNTIME_SA\`
           - Readiness step: \`${VERIFY_OUTCOME:-not_run}\`
