@@ -34,6 +34,8 @@ const auth = new GoogleAuth({ scopes: [CLOUD_PLATFORM_SCOPE] });
 const storage = new Storage();
 
 interface ReferenceSource {
+  source: 'character_library' | 'mvp_manually_confirmed_input' | 'legacy_m2_qa_reference';
+  sourceId: string;
   characterId: string;
   characterName: string;
   bucket: string;
@@ -55,6 +57,12 @@ interface RealBenchmarkCaseResult {
 }
 
 function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function normalizedName(value: unknown): string { return String(value || '').toLowerCase().replace(/[\s_-]+/g, ''); }
+function isMeiNing(value: unknown): boolean {
+  const raw = String(value || '');
+  const normalized = normalizedName(value);
+  return raw.includes('梅凝') || normalized.includes('meining');
+}
 
 async function getAccessToken(): Promise<string> {
   const client = await auth.getClient();
@@ -143,6 +151,145 @@ async function exactDownload(bucket: string, objectPath: string): Promise<Buffer
   return Buffer.from(bytes);
 }
 
+function parseGcsLocation(defaultBucket: string, value: string): { bucket: string; objectPath: string } {
+  const raw = String(value || '').trim();
+  if (raw.startsWith('gs://')) {
+    const without = raw.slice(5);
+    const slash = without.indexOf('/');
+    if (slash <= 0) throw new Error(`Invalid GCS URI: ${raw}`);
+    return { bucket: without.slice(0, slash), objectPath: without.slice(slash + 1) };
+  }
+  return { bucket: defaultBucket, objectPath: raw.replace(/^\/+/, '') };
+}
+
+async function loadReference(params: Omit<ReferenceSource, 'imageBuffer'>): Promise<ReferenceSource | null> {
+  try {
+    if (!params.bucket || !params.objectPath) return null;
+    const location = parseGcsLocation(params.bucket, params.objectPath);
+    const imageBuffer = await exactDownload(location.bucket, location.objectPath);
+    if (imageBuffer.length < 1000) return null;
+    return { ...params, bucket: location.bucket, objectPath: location.objectPath, imageBuffer };
+  } catch (error: any) {
+    console.warn(`[Benchmark] reference candidate unavailable source=${params.source} id=${params.sourceId}: ${redactSecrets(error?.message || String(error))}`);
+    return null;
+  }
+}
+
+async function findCharacterLibraryReference(db: any): Promise<ReferenceSource | null> {
+  const snapshot = await db.collection('characters').get();
+  const matches: any[] = [];
+  snapshot.forEach((doc: any) => {
+    const data: any = doc.data();
+    if (isMeiNing(data?.name)) matches.push({ id: doc.id, ...data });
+  });
+  matches.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+  for (const character of matches) {
+    const refs = Array.isArray(character.referenceImages) ? [...character.referenceImages] : [];
+    refs.sort((a: any, b: any) => {
+      const frontA = /front|frontal|正脸/i.test(String(a?.angle || '')) ? 0 : 1;
+      const frontB = /front|frontal|正脸/i.test(String(b?.angle || '')) ? 0 : 1;
+      return frontA - frontB || Number(a?.sortOrder || 0) - Number(b?.sortOrder || 0);
+    });
+    for (const ref of refs) {
+      if (!ref?.outputBucket || !ref?.outputObjectPath) continue;
+      const loaded = await loadReference({
+        source: 'character_library',
+        sourceId: character.id,
+        characterId: character.id,
+        characterName: String(character.name || '梅凝'),
+        bucket: String(ref.outputBucket),
+        objectPath: String(ref.outputObjectPath),
+        mimeType: String(ref.mimeType || 'image/jpeg'),
+      });
+      if (loaded) return loaded;
+    }
+  }
+  return null;
+}
+
+async function findMvpConfirmedInputReference(db: any): Promise<ReferenceSource | null> {
+  let snapshot: any;
+  try {
+    snapshot = await db.collection('mvp_video_tasks').orderBy('createdAt', 'desc').limit(100).get();
+  } catch {
+    snapshot = await db.collection('mvp_video_tasks').limit(100).get();
+  }
+  const candidates: any[] = [];
+  snapshot.forEach((doc: any) => {
+    const data = doc.data() as any;
+    if (data?.identitySafeMode === true && data?.inputBucket && data?.inputObjectPath) {
+      candidates.push({ id: doc.id, ...data });
+    }
+  });
+  candidates.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  for (const task of candidates) {
+    const loaded = await loadReference({
+      source: 'mvp_manually_confirmed_input',
+      sourceId: task.id,
+      characterId: 'mvp-manually-confirmed-meining',
+      characterName: '梅凝 (MVP 人工确认输入)',
+      bucket: String(task.inputBucket),
+      objectPath: String(task.inputObjectPath),
+      mimeType: String(task.inputMimeType || 'image/jpeg'),
+    });
+    if (loaded) return loaded;
+  }
+  return null;
+}
+
+async function findLegacyM2Reference(db: any): Promise<ReferenceSource | null> {
+  let snapshot: any;
+  try {
+    snapshot = await db.collection('video_tasks').orderBy('updatedAt', 'desc').limit(200).get();
+  } catch {
+    snapshot = await db.collection('video_tasks').limit(200).get();
+  }
+  const candidates: any[] = [];
+  snapshot.forEach((doc: any) => {
+    const data = doc.data() as any;
+    const explicitMeiNing = isMeiNing(data?.characterName) || isMeiNing(data?.characterDescription);
+    if (!explicitMeiNing) return;
+    const approvedFirstFrame = String(data?.qaApprovedFirstFrameObjectPath || '');
+    const masterPaths = Array.isArray(data?.qaMasterImageObjectPaths) ? data.qaMasterImageObjectPaths.filter(Boolean) : [];
+    if (!approvedFirstFrame && !masterPaths.length) return;
+    candidates.push({ id: doc.id, ...data, _approvedFirstFrame: approvedFirstFrame, _masterPaths: masterPaths });
+  });
+  candidates.sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0));
+
+  for (const task of candidates) {
+    const paths = [task._approvedFirstFrame, ...task._masterPaths].filter(Boolean);
+    for (const path of paths) {
+      const loaded = await loadReference({
+        source: 'legacy_m2_qa_reference',
+        sourceId: task.id,
+        characterId: String(task.characterId || 'legacy-meining'),
+        characterName: String(task.characterName || '梅凝'),
+        bucket: String(task.outputBucket || OUTPUT_BUCKET),
+        objectPath: String(path),
+        mimeType: String(task.qaApprovedFirstFrameMimeType || task.qaMasterImageMimeTypes?.[0] || 'image/jpeg'),
+      });
+      if (loaded) return loaded;
+    }
+  }
+  return null;
+}
+
+async function findMeiNingReference(): Promise<ReferenceSource> {
+  const db = getFirestoreInstance();
+  if (!db) throw new Error('BENCHMARK_REFERENCE_NOT_FOUND: Firestore unavailable.');
+
+  const characterReference = await findCharacterLibraryReference(db);
+  if (characterReference) return characterReference;
+
+  const mvpReference = await findMvpConfirmedInputReference(db);
+  if (mvpReference) return mvpReference;
+
+  const legacyReference = await findLegacyM2Reference(db);
+  if (legacyReference) return legacyReference;
+
+  throw new Error('BENCHMARK_REFERENCE_NOT_FOUND: no durable MeiNing reference found in characters, mvp_video_tasks, or explicitly named legacy video_tasks.');
+}
+
 async function fetchVideo(caseItem: IdentityBenchmarkCase, attempt: number, operation: any): Promise<Buffer> {
   if (operation?.error) throw new ProviderError(redactSecrets(JSON.stringify(operation.error)), operation.error?.code || null, operation.error?.status || null);
   const body = operation.response || operation;
@@ -155,12 +302,9 @@ async function fetchVideo(caseItem: IdentityBenchmarkCase, attempt: number, oper
   }
   if (extracted.uri) {
     if (extracted.uri.startsWith('gs://')) {
-      const without = extracted.uri.slice(5);
-      const slash = without.indexOf('/');
-      if (slash > 0) {
-        const buffer = await exactDownload(without.slice(0, slash), without.slice(slash + 1));
-        if (VideoGenerator.isMp4Valid(buffer)) return buffer;
-      }
+      const location = parseGcsLocation(OUTPUT_BUCKET, extracted.uri);
+      const buffer = await exactDownload(location.bucket, location.objectPath);
+      if (VideoGenerator.isMp4Valid(buffer)) return buffer;
     }
     const token = await getAccessToken();
     const buffer = await VideoGenerator.fetchGcsVideoBuffer(extracted.uri, token);
@@ -225,42 +369,6 @@ async function runCase(caseItem: IdentityBenchmarkCase, reference: ReferenceSour
   }
 }
 
-async function findMeiNingReference(): Promise<ReferenceSource> {
-  const db = getFirestoreInstance();
-  if (!db) throw new Error('BENCHMARK_REFERENCE_NOT_FOUND: Firestore unavailable.');
-  const snapshot = await db.collection('characters').get();
-  const matches: any[] = [];
-  snapshot.forEach((doc) => {
-    const data: any = doc.data();
-    const rawName = String(data?.name || '');
-    const normalized = rawName.toLowerCase().replace(/[\s_-]+/g, '');
-    if (rawName.includes('梅凝') || normalized.includes('meining')) {
-      matches.push({ id: doc.id, ...data });
-    }
-  });
-  if (!matches.length) throw new Error('BENCHMARK_REFERENCE_NOT_FOUND: no durable character named 梅凝/MeiNing.');
-  matches.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
-  const character = matches[0];
-  const refs = Array.isArray(character.referenceImages) ? [...character.referenceImages] : [];
-  refs.sort((a: any, b: any) => {
-    const frontA = /front|frontal|正脸/i.test(String(a?.angle || '')) ? 0 : 1;
-    const frontB = /front|frontal|正脸/i.test(String(b?.angle || '')) ? 0 : 1;
-    return frontA - frontB || Number(a?.sortOrder || 0) - Number(b?.sortOrder || 0);
-  });
-  const ref = refs.find((item: any) => item?.outputBucket && item?.outputObjectPath);
-  if (!ref) throw new Error(`BENCHMARK_REFERENCE_NOT_FOUND: ${character.name} has no durable GCS reference.`);
-  const imageBuffer = await exactDownload(String(ref.outputBucket), String(ref.outputObjectPath));
-  if (imageBuffer.length < 1000) throw new Error('BENCHMARK_REFERENCE_NOT_FOUND: durable reference is empty.');
-  return {
-    characterId: character.id,
-    characterName: String(character.name),
-    bucket: String(ref.outputBucket),
-    objectPath: String(ref.outputObjectPath),
-    mimeType: String(ref.mimeType || 'image/jpeg'),
-    imageBuffer,
-  };
-}
-
 async function mapWithConcurrency<T, R>(items: readonly T[], concurrency: number, worker: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
   let cursor = 0;
@@ -290,15 +398,33 @@ function groupedSummary(results: RealBenchmarkCaseResult[]) {
 }
 
 async function persistResult(payload: any) {
-  const json = Buffer.from(JSON.stringify(payload, null, 2));
+  const cleanPayload = JSON.parse(JSON.stringify(payload));
+  const json = Buffer.from(JSON.stringify(cleanPayload, null, 2));
   const runPath = `benchmarks/${BENCHMARK_VERSION}/results/${RUN_ID}.json`;
   const latestPath = `benchmarks/${BENCHMARK_VERSION}/latest.json`;
   await storage.bucket(OUTPUT_BUCKET).file(runPath).save(json, { resumable: false, metadata: { contentType: 'application/json' } });
   await storage.bucket(OUTPUT_BUCKET).file(latestPath).save(json, { resumable: false, metadata: { contentType: 'application/json' } });
   const db = getFirestoreInstance();
   if (db) {
-    await db.collection('mvp_identity_benchmarks').doc(RUN_ID).set(payload, { merge: false });
-    await db.collection('mvp_identity_benchmarks').doc('latest').set({ ...payload, runId: RUN_ID }, { merge: false });
+    const summaryDoc = {
+      benchmarkVersion: cleanPayload.benchmarkVersion,
+      identitySafeVersion: cleanPayload.identitySafeVersion,
+      runId: cleanPayload.runId,
+      sourceSha: cleanPayload.sourceSha,
+      projectId: cleanPayload.projectId,
+      region: cleanPayload.region,
+      videoModel: cleanPayload.videoModel,
+      identityQaModel: cleanPayload.identityQaModel,
+      reference: cleanPayload.reference,
+      totalCases: cleanPayload.totalCases,
+      providerFailedCases: cleanPayload.providerFailedCases,
+      grouped: cleanPayload.grouped,
+      summary: cleanPayload.summary,
+      completedAt: cleanPayload.completedAt,
+      resultUri: `gs://${OUTPUT_BUCKET}/${runPath}`,
+    };
+    await db.collection('mvp_identity_benchmarks').doc(RUN_ID).set(summaryDoc, { merge: false });
+    await db.collection('mvp_identity_benchmarks').doc('latest').set(summaryDoc, { merge: false });
   }
   return { runPath, latestPath };
 }
@@ -307,7 +433,7 @@ async function main() {
   if (!OUTPUT_BUCKET) throw new Error('VEO_OUTPUT_BUCKET is required.');
   console.log(`[Benchmark] runId=${RUN_ID} project=${PROJECT_ID} region=${REGION} database=${FIRESTORE_DATABASE_ID || 'default'} concurrency=${CONCURRENCY}`);
   const reference = await findMeiNingReference();
-  console.log(`[Benchmark] reference=${reference.characterName} (${reference.characterId}) gs://${reference.bucket}/${reference.objectPath}`);
+  console.log(`[Benchmark] referenceSource=${reference.source} sourceId=${reference.sourceId} character=${reference.characterName} (${reference.characterId}) gs://${reference.bucket}/${reference.objectPath}`);
   const results = await mapWithConcurrency(IDENTITY_STABILITY_BENCHMARK_V1, CONCURRENCY, (item) => runCase(item, reference));
   const eligible: IdentityBenchmarkResult[] = results
     .filter((item): item is RealBenchmarkCaseResult & { firstAttemptReport: MvpIdentityQaReport; finalReport: MvpIdentityQaReport } => Boolean(item.firstAttemptReport && item.finalReport))
@@ -322,7 +448,15 @@ async function main() {
     region: REGION,
     videoModel: MVP_VIDEO_MODEL,
     identityQaModel: IDENTITY_QA_MODEL,
-    reference: { characterId: reference.characterId, characterName: reference.characterName, bucket: reference.bucket, objectPath: reference.objectPath, mimeType: reference.mimeType },
+    reference: {
+      source: reference.source,
+      sourceId: reference.sourceId,
+      characterId: reference.characterId,
+      characterName: reference.characterName,
+      bucket: reference.bucket,
+      objectPath: reference.objectPath,
+      mimeType: reference.mimeType,
+    },
     startedFromRealReference: true,
     totalCases: IDENTITY_STABILITY_BENCHMARK_V1.length,
     providerFailedCases: results.filter((item) => item.status === 'provider_failed').length,
