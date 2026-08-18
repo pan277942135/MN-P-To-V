@@ -49,9 +49,9 @@ export interface MvpIdentityQaReport {
 }
 
 const HIGH_RISK_PROMPT_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
-  { pattern: /\b(turn\s+around|spin\s+around|rapid\s+head\s+turn|whip\s+pan)\b/i, label: '大幅转身/快速转头' },
-  { pattern: /\b(cover\s+(?:her\s+|the\s+)?face|face\s+fully\s+occluded|hand\s+over\s+face)\b/i, label: '长时间遮挡脸部' },
-  { pattern: /\b(camera\s+orbits?|360\s*degree\s+camera|dramatic\s+camera\s+rotation)\b/i, label: '大幅环绕镜头' },
+  { pattern: /\b(?:turn(?:s|ed|ing)?\s+(?:quickly\s+|rapidly\s+|fully\s+)?around|spin(?:s|ning)?\s+around|rapid\s+head\s+turn|quick\s+head\s+turn|whip\s+pan)\b/i, label: '大幅转身/快速转头' },
+  { pattern: /\b(?:cover(?:s|ed|ing)?\s+(?:her\s+|his\s+|their\s+|the\s+)?face|face\s+(?:is\s+)?fully\s+occluded|hand\s+(?:passes\s+)?over\s+(?:her\s+|his\s+|the\s+)?face)\b/i, label: '长时间遮挡脸部' },
+  { pattern: /\b(?:camera\s+orbits?|360\s*degree\s+camera|dramatic\s+camera\s+rotation)\b/i, label: '大幅环绕镜头' },
   { pattern: /(大幅转头|快速转头|快速转身|转身背对|完全背对镜头|遮住脸|完全遮脸|手掌遮脸|镜头环绕人物|360度环绕)/i, label: '高风险身份动作' },
 ];
 
