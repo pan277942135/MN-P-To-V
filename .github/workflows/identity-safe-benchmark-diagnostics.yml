@@ -1,0 +1,93 @@
+name: Identity Safe Benchmark Diagnostics
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/identity-safe-benchmark-diagnostics.trigger'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  JOB_NAME: zaojing-identity-benchmark-v02
+  STATUS_ISSUE: '53'
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Capture latest Cloud Run Job diagnostics
+        id: diag
+        shell: bash
+        run: |
+          set +e
+          {
+            echo '=== JOB DESCRIBE ==='
+            gcloud run jobs describe "$JOB_NAME" --project="$PROJECT_ID" --region="$REGION" --format=yaml
+            echo
+            echo '=== EXECUTIONS ==='
+            gcloud run jobs executions list --job="$JOB_NAME" --project="$PROJECT_ID" --region="$REGION" --sort-by='~createTime' --limit=5 --format='table(metadata.name,status.conditions[0].type,status.conditions[0].status,status.conditions[0].message,createTime,completionTime)'
+            echo
+            LATEST="$(gcloud run jobs executions list --job="$JOB_NAME" --project="$PROJECT_ID" --region="$REGION" --sort-by='~createTime' --limit=1 --format='value(metadata.name)' 2>/dev/null)"
+            echo "LATEST_EXECUTION=$LATEST"
+            if [ -n "$LATEST" ]; then
+              echo
+              echo '=== LATEST EXECUTION DESCRIBE ==='
+              gcloud run jobs executions describe "$LATEST" --project="$PROJECT_ID" --region="$REGION" --format=yaml
+              echo
+              echo '=== LATEST EXECUTION TASKS ==='
+              gcloud run jobs executions tasks list --execution="$LATEST" --project="$PROJECT_ID" --region="$REGION" --succeeded --format=yaml
+            fi
+            echo
+            echo '=== JOB LOGS (last 250, chronological) ==='
+            gcloud run jobs logs read "$JOB_NAME" --project="$PROJECT_ID" --region="$REGION" --freshness=6h --order=asc --limit=250
+          } 2>&1 | tee /tmp/benchmark-diagnostics.txt
+          exit 0
+
+      - name: Publish diagnostics to benchmark issue
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DIAG="$(tail -500 /tmp/benchmark-diagnostics.txt 2>/dev/null || echo 'diagnostics unavailable')"
+          BODY=$(cat <<EOF
+          ### Identity Safe benchmark diagnostics
+          Read-only diagnostics for the failed real benchmark. No Veo generation was submitted by this workflow.
+
+          \`\`\`text
+          $DIAG
+          \`\`\`
+          EOF
+          )
+          jq -n --arg body "$BODY" '{body:$body}' > /tmp/comment.json
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${STATUS_ISSUE}/comments" \
+            --data-binary @/tmp/comment.json
