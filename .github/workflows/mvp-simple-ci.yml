@@ -36,6 +36,8 @@ jobs:
         run: bunx vitest run src/__tests__/mvpSimpleContract.test.ts
 
       - name: Existing regression suite
+        env:
+          VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
         run: bun run test
 
       - name: Build standalone MVP server
