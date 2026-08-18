@@ -83,13 +83,14 @@ export async function validateIdentitySafeInput(params: {
     if (item.pattern.test(params.prompt)) {
       issues.push({
         code: 'PROMPT_IDENTITY_RISK',
-        message: `Identity Safe Mode 暂不接受“${item.label}”类动作；请改为轻微、连续、无遮挡动作。`,
+        message: `检测到“${item.label}”类高风险身份动作；Identity Safe 将自动收敛为轻微、连续、无遮挡动作，不阻断提交。`,
       });
       break;
     }
   }
 
-  return { pass: issues.length === 0, width, height, issues };
+  const blockingIssues = issues.filter((issue) => issue.code !== 'PROMPT_IDENTITY_RISK');
+  return { pass: blockingIssues.length === 0, width, height, issues };
 }
 
 export function buildIdentitySafePrompt(userPrompt: string, conservativeRetry = false): string {
