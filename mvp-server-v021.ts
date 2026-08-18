@@ -17,9 +17,44 @@ function isRetryQaPending(status: unknown, providerAttempt: unknown): boolean {
   return Number(providerAttempt || 1) > 1 && ['RETRYING', 'GENERATING', 'QUALITY_CHECKING'].includes(String(status || ''));
 }
 
+function isSafeToClearPersistedRetryQa(status: unknown, providerAttempt: unknown): boolean {
+  return Number(providerAttempt || 1) > 1 && ['RETRYING', 'GENERATING'].includes(String(status || ''));
+}
+
+function sanitizeTaskBody(body: any): any {
+  if (!body || typeof body !== 'object') return body;
+  let sanitized = body;
+  if (body.taskId && isRetryQaPending(body.status, body.providerAttempt)) {
+    sanitized = { ...sanitized, identityReport: null };
+  }
+  if (sanitized.error?.code === 'IDENTITY_INPUT_UNSAFE') {
+    sanitized = {
+      ...sanitized,
+      error: {
+        ...sanitized.error,
+        recommendedAction: '按具体校验提示修正输入图尺寸或比例；动作风险由 Identity Safe 自动收敛，不需要因为转头、遮挡或运镜提示重新上传图片。',
+      },
+    };
+  }
+  return sanitized;
+}
+
+async function clearPersistedStaleRetryQa(taskId: string): Promise<void> {
+  const db = getFirestoreInstance();
+  if (!db) return;
+  const ref = db.collection(TASK_COLLECTION).doc(taskId);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return;
+    const current = snap.data() as MvpVideoTask;
+    if (!isSafeToClearPersistedRetryQa(current.status, current.providerAttempt) || !current.identityReport) return;
+    tx.update(ref, { identityReport: null, updatedAt: Date.now() });
+  });
+}
+
 function publicTask(task: MvpVideoTask) {
   const currentIdentityReport = isRetryQaPending(task.status, task.providerAttempt) ? null : task.identityReport || null;
-  return {
+  return sanitizeTaskBody({
     taskId: task.taskId,
     status: task.status,
     stage: task.stage,
@@ -48,7 +83,7 @@ function publicTask(task: MvpVideoTask) {
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     completedAt: task.completedAt || null,
-  };
+  });
 }
 
 function renderMvpPage(): string {
@@ -196,10 +231,12 @@ export async function createMvpAppV021() {
   app.use((_req, res, next) => {
     const originalJson = res.json.bind(res);
     res.json = ((body: any) => {
-      if (body && typeof body === 'object' && body.taskId && isRetryQaPending(body.status, body.providerAttempt)) {
-        return originalJson({ ...body, identityReport: null });
+      if (body?.taskId && body.identityReport && isSafeToClearPersistedRetryQa(body.status, body.providerAttempt)) {
+        void clearPersistedStaleRetryQa(String(body.taskId)).catch((error) => {
+          console.warn('[MVP_IDENTITY_SAFE_V021] stale retry QA cleanup failed:', String((error as any)?.message || error));
+        });
       }
-      return originalJson(body);
+      return originalJson(sanitizeTaskBody(body));
     }) as typeof res.json;
     next();
   });
