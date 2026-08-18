@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
   id-token: write
 
 env:
@@ -26,6 +27,7 @@ env:
   REGION: us-central1
   GAR_REPO: zaojing
   SERVICE: zaojing-mvp-simple-uat
+  STATUS_ISSUE: '47'
   WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
   DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
   RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
@@ -116,6 +118,7 @@ jobs:
           id_token_include_email: true
 
       - name: Verify health and full readiness
+        id: verify
         shell: bash
         env:
           SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
@@ -127,6 +130,7 @@ jobs:
           grep -q '"ready":true' readiness.json
 
       - name: Deployment summary
+        if: success()
         shell: bash
         run: |
           {
@@ -143,3 +147,45 @@ jobs:
             echo ''
             echo 'This service is isolated from the existing M2 UAT service.'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish durable deployment evidence
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+          SOURCE_SHA: ${{ steps.image.outputs.source_sha }}
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          REVISION: ${{ steps.deploy.outputs.revision }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+        run: |
+          set -euo pipefail
+          if [ -f readiness.json ]; then
+            READINESS="$(cat readiness.json)"
+          else
+            READINESS='{"ready":false,"evidence":"readiness.json unavailable because deployment/verification stopped earlier"}'
+          fi
+          BODY=$(cat <<EOF
+          ### MVP_SIMPLE UAT deployment evidence
+          - Job status: \`$JOB_STATUS\`
+          - Source SHA: \`${SOURCE_SHA:-unavailable}\`
+          - Cloud Run service: \`$SERVICE\`
+          - Revision: \`${REVISION:-unavailable}\`
+          - Service URL: ${SERVICE_URL:-unavailable}
+          - Provider/model: \`Vertex AI / $VEO_MODEL_ID\`
+          - Runtime auth: \`ADC / $RUNTIME_SA\`
+          - Readiness step: \`${VERIFY_OUTCOME:-not_run}\`
+
+          \`\`\`json
+          $READINESS
+          \`\`\`
+          EOF
+          )
+          jq -n --arg body "$BODY" '{body:$body}' > /tmp/issue-comment.json
+          curl -fsS \
+            -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${STATUS_ISSUE}/comments" \
+            --data-binary @/tmp/issue-comment.json
