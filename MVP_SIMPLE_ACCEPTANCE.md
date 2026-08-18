@@ -1,229 +1,233 @@
-# 造境 MVP_SIMPLE 可验证版
+# 造境 MVP Identity Safe v0.2 可验证版
 
 ## 冻结目标
 
-生产主通道固定为：
+生产主通道保持：
 
 `Cloud Run → Runtime ADC → Vertex AI → veo-3.1-fast-generate-001 → GCS`
 
-本版本只验证一件事：
+v0.2 在已经稳定“图片 + Prompt → 视频”的基础上增加一个硬目标：
 
-> 给定一张已经人工确认是梅凝的图片和一段用户 Prompt，系统能够生成并返回真实可播放的视频；如果不能，必须明确报告失败阶段和原因。
+> 给定一张已经人工确认是梅凝的清晰图片和一段低身份风险 Prompt，系统不仅要稳定生成真实可播放视频，还必须自动检查视频中人物是否持续为同一身份；检测到身份漂移时最多自动进行一次保守重试，重试后仍不通过则明确失败，绝不把换脸视频标记为成功。
 
-## 明确不在本版本范围
+## 本版本范围
 
-- 角色库选择
-- 梅凝母板上传
-- IdentitySpec
-- 首帧生成
-- First Frame Identity QA
-- Video Identity QA
+### P0-01 — Identity Stability Benchmark
+
+固定 `identity-stability-benchmark-v1`，共 24 条真实生成 Case：
+
+- 4 秒：8 条
+- 6 秒：8 条
+- 8 秒：8 条
+- 覆盖 `micro_expression` / `hair_motion` / `upper_body` / `environment_motion`
+
+API：`GET /api/mvp/benchmark/catalog`
+
+### P0-02 — Identity Safe Mode 输入约束
+
+Identity Safe 默认开启。当前硬约束：
+
+- JPG / PNG / WebP
+- 短边至少 512px
+- 长边至少 768px
+- 极端宽高比拒绝
+- 暂不接受大幅转头、快速转身、长时间遮脸、360°/大幅环绕镜头等高身份漂移动作
+
+不满足时返回 `IDENTITY_INPUT_UNSAFE`，不得调用 Veo。
+
+### P0-03 — 固定 Identity Safe Prompt
+
+用户 Prompt 不被语义重写，但服务端固定追加身份约束层：
+
+- 上传图是精确身份锚点和首帧外观参考
+- 保持同一成年人物的脸型、眼鼻唇、下颌、肤色、发型、发际线和年龄感
+- 禁止换人、替脸、身份 morphing、自动正脸化和姿势归一
+- 镜头固定或近固定
+- 身份保持优先级高于冲突动作
+
+身份漂移后的唯一一次重试会追加更严格的 `CONSERVATIVE IDENTITY RETRY`：无转头、无转身、无手遮脸、无镜头移动，仅保留呼吸/眨眼/极轻表情。
+
+### P0-04 — 真实视频抽帧 + 身份相似度 QA
+
+视频完成后必须经过真实 `ffmpeg` 抽帧，再由 Vertex AI `gemini-2.5-flash` 对上传身份锚点与每个真实视频帧做身份连续性检查。
+
+QA 至少输出：
+
+- 每帧 `faceSimilarityScore`
+- `faceVisible`
+- `differentPersonDetected`
+- 平均相似度
+- 最低帧相似度
+- temporal consistency
+- 可判断脸部帧比例
+- 最差帧时间戳
+- `pass / review / fail`
+
+当前 full-pass 阈值：
+
+- mean ≥ 90
+- minimum frame ≥ 84
+- temporal ≥ 88
+- visible frame ratio ≥ 0.75
+- `differentPersonDetected = false`
+
+QA 失败或抽帧不足均 fail-closed，不允许 `COMPLETED`。
+
+### P0-05 — 身份错误码与报告
+
+新增：
+
+- `IDENTITY_INPUT_UNSAFE`
+- `IDENTITY_QA_UNAVAILABLE`
+- `IDENTITY_DRIFT`
+- `IDENTITY_RETRY_FAILED`
+
+任务持久化：
+
+- `identityReport`
+- `firstAttemptIdentityReport`
+- `providerAttempt`
+- `identityRetryCount`
+- `retryReason`
+
+### P0-06 — 一次保守自动重试
+
+只有第一次真实生成已经成功拿到 MP4、但身份 QA 未通过时，允许自动提交一次新的 Veo Operation。
+
+硬限制：
+
+- Provider attempt 最多 2 次
+- `identityRetryCount` 最多 1
+- 第二次仍漂移 → `FAILED / IDENTITY_DRIFT`
+- 第二次提交本身失败 → `IDENTITY_RETRY_FAILED`
+- `SUBMISSION_OUTCOME_UNKNOWN` 不得自动重提
+- recovery 接口只恢复当前 attempt 的 GCS 产物，永远不得触发新的 Veo 提交
+
+失败 attempt 的 MP4 保存在 task 专属 audit path，便于后续分析。
+
+### P0-07 — 是否进入首帧身份增强
+
+不预设一定需要首帧增强。必须先跑至少 20 条真实 benchmark，再按数据决定。
+
+推荐进入首帧增强的任一条件：
+
+- post-retry pass rate < 90%；或
+- early identity drift rate ≥ 20%。
+
+不足 20 条真实数据时，结论固定为 `BENCHMARK_INCOMPLETE`。
+
+## 明确仍不在 v0.2 主链路范围
+
+- 将梅凝母板直接作为多图输入送给 Veo
+- 首帧自动重绘/换脸
+- LoRA / 专用身份保持模型
 - Human Review
-- 自动身份修复
-- PromptCompiler / Prompt 自动改写
-- 自动重新生成视频
 - 多 Provider 路由
+- 自动进行第二次以上的视频重试
 
-这些能力保留在原 M2 工程，不参与 MVP_SIMPLE 成功判定。
+这些能力只有在 P0-07 数据触发后才考虑进入下一阶段。
 
 ## 可验证服务
 
-入口文件：`mvp-server.ts`
+- v0.1 回归入口：`mvp-server.ts`
+- v0.2 UAT 入口：`mvp-server-v02.ts`
+- 容器：`Dockerfile.mvp`
+- Cloud Run UAT：`zaojing-mvp-simple-uat`
+- 固定 UAT 地址：`https://zaojing-mvp-simple-uat-i7lns3auvq-uc.a.run.app/`
+- Firestore task collection：`mvp_video_tasks`
+- idempotency collection：`mvp_video_idempotency`
 
-容器文件：`Dockerfile.mvp`
+GCS task 结构：
 
-Cloud Run UAT 服务：`zaojing-mvp-simple-uat`
-
-固定 UAT 地址：`https://zaojing-mvp-simple-uat-i7lns3auvq-uc.a.run.app/`
-
-任务元数据：Firestore collection `mvp_video_tasks`
-
-幂等映射：Firestore collection `mvp_video_idempotency`
-
-Provider 原始输出前缀：`gs://$VEO_OUTPUT_BUCKET/veo/<taskId>/provider/`
-
-验证后的标准视频：`gs://$VEO_OUTPUT_BUCKET/veo/<taskId>/video.mp4`
+- 身份锚点：`veo/<taskId>/input/reference.<ext>`
+- Attempt 1：`veo/<taskId>/provider/attempt-1/`
+- Attempt 2：`veo/<taskId>/provider/attempt-2/`
+- QA 未通过的审计视频：`veo/<taskId>/attempts/attempt-<n>.mp4`
+- 最终通过视频：`veo/<taskId>/video.mp4`
 
 ## UAT 访问契约（冻结）
 
-人工验收只使用固定 Cloud Run UAT 地址，通过 Cloud Run 原生 IAP / Google 登录直接访问。
+人工验收只使用固定 Cloud Run UAT 地址，通过 Cloud Run IAP / Google 登录直接访问。
 
-- UAT 服务保持非公开匿名访问。
-- Cloud Run 服务必须显示 `Iap Enabled: true`。
-- 有权限的测试账号在浏览器打开固定 UAT 地址后直接完成 Google 登录并进入应用。
-- **不使用 `gcloud run services proxy`。**
-- **不使用 Cloud Shell Web Preview。**
-- **不把本地代理、Cloud Shell 端口或临时 Preview URL 作为 UAT 验收入口。**
+- 不公开匿名访问
+- 不使用 `gcloud run services proxy`
+- 不使用 Cloud Shell Web Preview
+- 不使用临时端口/Preview URL
 
-后续所有 MVP 人工验证、回归和视频生成测试均沿用此访问契约。
-
-## API
-
-### `GET /api/mvp/health`
-
-只证明服务进程存活，并返回当前固定 provider/model/project/region。
-
-### `GET /api/mvp/readiness`
-
-必须同时验证：
-
-- Runtime ADC 可取 Access Token
-- Firestore 可读取
-- GCS 可访问
-- Vertex `veo-3.1-fast-generate-001:predictLongRunning` 路由存在
-
-只有全部通过才返回 `ready=true`。
-
-### `POST /api/mvp/videos/start`
-
-`multipart/form-data`：
-
-- `image`: JPG/PNG/WebP，最大 20MB
-- `prompt`: 原始用户 Prompt，服务端不改写
-- `durationSeconds`: 4 / 6 / 8
-- Header `x-idempotency-key`: 推荐 UUID；相同 key 永远返回同一 task，不重复提交 Provider
-
-成功提交后返回 `GENERATING + taskId`。
-
-### `GET /api/mvp/videos/:taskId`
-
-读取 Firestore durable task，并轮询已有 `operationName`。
-
-绝不因为浏览器刷新而重新提交 Veo。
-
-### `POST /api/mvp/videos/:taskId/recover`
-
-仅扫描当前 task 专属 Provider GCS 前缀，尝试找回唯一有效 MP4。
-
-该接口 **不会重新提交 Veo**，用于处理 `SUBMISSION_OUTCOME_UNKNOWN`。
-
-### `GET /api/mvp/videos/:taskId/stream`
-
-只允许读取已经达到 `COMPLETED` 且通过 artifact-only invariant 的 GCS 标准视频。
-
-支持 Range 和下载。
-
-## 状态
-
-主状态只有：
+## 状态机
 
 - `PREPARING`
 - `SUBMITTING`
 - `GENERATING`
 - `SAVING`
+- `QUALITY_CHECKING`
+- `RETRYING`
 - `COMPLETED`
 - `FAILED`
 - `SUBMISSION_OUTCOME_UNKNOWN`
 
-`SUBMISSION_OUTCOME_UNKNOWN` 是特殊保护态，不允许自动重新提交 Provider。
+## v0.2 成功条件：0 假成功
 
-## 成功条件：0 假成功
+Identity Safe 任务只有同时满足以下条件才能 `COMPLETED`：
 
-`COMPLETED` 必须同时满足：
+1. Provider 已有真实视频产物；
+2. MP4 有效；
+3. 真实视频完成抽帧；
+4. 身份 QA `gateStatus = pass` 且 `pass = true`；
+5. 最终视频持久化到标准 GCS path；
+6. GCS exact-read 成功；
+7. `artifactPersisted = true`；
+8. `artifactVerified = true`；
+9. `sizeBytes >= 1000`；
+10. content type 为 video。
 
-- `artifactPersisted = true`
-- `artifactVerified = true`
-- `outputBucket` 存在
-- `outputObjectPath` 存在
-- `videoUri` 存在
-- `sizeBytes >= 1000`
-- `contentType` 为 video
-- 标准 GCS 对象被精确下载回服务端
-- 回读字节通过 MP4 `ftyp/moov/mdat` 验证
+`Provider done=true`、`Veo 生成成功`、`有 MP4` 都单独不足以判定成功。
 
-Provider `done=true` 本身绝不等于成功。
+## CI 硬门槛
 
-## 提交重试策略
+PR 合并前 `MVP Simple CI` 必须全部通过：
 
-仅对明确的 HTTP 429 / `RESOURCE_EXHAUSTED` 做最多 2 次有限退避重试。
+- TypeScript typecheck
+- v0.1 artifact-only contract tests
+- v0.2 Identity Safe tests
+- 24-case benchmark contract tests
+- 现有完整 regression suite
+- v0.2 standalone server build
+- Docker build
+- 容器 smoke
+- `/api/mvp/health` 返回 `MVP_IDENTITY_SAFE_V02`
+- `/api/mvp/benchmark/catalog` 能看到 `IDSAFE-24`
 
-以下情况不自动重复提交：
+## UAT 部署硬门槛
 
-- 网络中断
-- 客户端超时
-- HTTP 5xx
-- 已进入 Provider 调用但没有拿到 Operation Name
+部署到 `zaojing-mvp-simple-uat` 后必须证明：
 
-上述情况进入 `SUBMISSION_OUTCOME_UNKNOWN`，防止重复扣费。
+- `/api/mvp/health` mode = `MVP_IDENTITY_SAFE_V02`
+- `identityQaModel = gemini-2.5-flash`
+- `/api/mvp/readiness` = `ready:true`
+- 24-case benchmark catalog 可读
+- 固定 UAT URL 保持不变
+- IAP 访问层保持开启
 
-## 失败输出
+每次部署证据继续写入 GitHub Issue #47。
 
-所有终态失败应尽量提供：
+## Benchmark 验收指标
 
-- `error.code`
-- `error.stage`
-- `error.message`
-- `error.retryable`
-- `error.recommendedAction`
-- `error.providerHttpStatus`（如有）
-- `error.providerStatus`（如有）
+真实 24 Case 最终报告至少记录：
 
-核心错误码：
+- first-attempt identity pass rate
+- post-retry identity pass rate
+- retry count
+- final `IDENTITY_DRIFT` count
+- early drift rate
+- 4s / 6s / 8s 分组结果
+- P0-07 first-frame-enhancement decision
 
-- `INPUT_IMAGE_INVALID`
-- `PROMPT_INVALID`
-- `AUTH_FAILED`
-- `REQUEST_REJECTED`
-- `SAFETY_REJECTED`
-- `RATE_LIMITED`
-- `GENERATION_FAILED`
-- `GENERATION_TIMEOUT`
-- `OUTPUT_MISSING`
-- `OUTPUT_DOWNLOAD_FAILED`
-- `OUTPUT_INVALID`
-- `OUTPUT_PERSIST_FAILED`
-- `SUBMISSION_OUTCOME_UNKNOWN`
-- `STORAGE_CONFIG_INVALID`
-- `INTERNAL_ERROR`
-
-## 部署
-
-`MVP Simple UAT Deploy` 在 MVP_SIMPLE 文件合入 `main` 时自动部署，同时保留手动 `workflow_dispatch`。
-
-部署目标固定为独立 Cloud Run 服务 `zaojing-mvp-simple-uat`，不修改原 M2 UAT 服务。
-
-部署流程先用服务账号验证 `/api/mvp/health` 和 `/api/mvp/readiness`，随后启用 Cloud Run 原生 IAP，并验证 `Iap Enabled: true`。
-
-每次部署结束后，GitHub Actions 会把 Source SHA、Cloud Run revision、固定 UAT URL、IAP 状态和 readiness JSON 发布到 Issue #47 `MVP_SIMPLE UAT deployment evidence`，作为可追溯运行态证据。
-
-## 第一轮人工真实验收
-
-建议固定一张已人工确认的梅凝图片，先减少变量，再运行 20 个真实任务。
-
-| Case | 输入 | 预期 |
-|---|---|---|
-| 01-05 | 同一 JPG + 5 条正常 Prompt，4s | 成功则全部为可播放 MP4；失败必须有明确 code/stage |
-| 06-10 | 同一 JPG + 5 条正常 Prompt，6s | 同上 |
-| 11-15 | 同一 JPG + 5 条正常 Prompt，8s | 同上 |
-| 16 | PNG | 可提交并产出或明确 Provider 失败 |
-| 17 | WebP | 可提交并产出或明确 Provider 失败 |
-| 18 | 空 Prompt | 本地 400 `PROMPT_INVALID`，不得调用 Veo |
-| 19 | 非图片文件 | 本地 400 `INPUT_IMAGE_INVALID`，不得调用 Veo |
-| 20 | 同一个 `x-idempotency-key` 连续提交两次 | 必须返回同一个 taskId，不得创建第二次 Provider Operation |
-
-另外主动验证：
-
-1. 生成过程中刷新浏览器：继续轮询同一个 task。
-2. 完成后刷新浏览器：视频仍可从 GCS 播放/下载。
-3. 人为提供错误 IAM：必须显示 `AUTH_FAILED`。
-4. 触发 429：有限退避后显示 `RATE_LIMITED`，不得无限重试。
-5. Provider `done=true` 但无视频：必须失败，绝不能 `COMPLETED`。
-6. `SUBMISSION_OUTCOME_UNKNOWN`：只允许恢复 GCS，不自动重新提交。
-
-## MVP 通过门槛
-
-工程正确性硬门槛：
+工程正确性硬门槛仍然是：
 
 - 假成功：0
 - 无原因失败：0
-- 成功任务有效 MP4：100%
-- 成功任务 GCS 可回读：100%
-- 同一 idempotency key 重复 Provider 提交：0
-- `SUBMISSION_OUTCOME_UNKNOWN` 自动重新提交：0
-- 失败任务有 code/stage/message：100%
-
-模型稳定性作为独立指标记录，不与工程正确性混淆。建议首轮目标：20 个正常生成 Case 中至少 18 个获得有效视频；若低于该水平，再基于真实失败分布决定是否调整配额、Prompt 或模型策略。
-
-## CI 状态说明
-
-`MVP Simple CI` 已验证 Typecheck、MVP contract tests、现有完整回归、独立 server build、Docker build 和容器 smoke。只有 CI 全绿后才允许进入独立 UAT 部署，不以“代码已提交”代替“版本已验证”。
+- 身份 QA 未通过但 `COMPLETED`：0
+- 同一 task 身份自动重试 >1：0
+- recovery 导致 Provider 重提：0
+- 成功任务最终 MP4/GCS exact-read：100%
