@@ -25,6 +25,7 @@ permissions:
 
 env:
   PROJECT_ID: xp-vertex-project
+  PROJECT_NUMBER: '89614354864'
   REGION: us-central1
   GAR_REPO: zaojing
   SERVICE: zaojing-mvp-simple-uat
@@ -135,31 +136,46 @@ jobs:
         id: iap
         shell: bash
         run: |
-          set -euo pipefail
-          PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-          gcloud beta services identity create \
-            --service=iap.googleapis.com \
-            --project="$PROJECT_ID" \
-            --quiet >/dev/null
-
+          set -uo pipefail
+          : > iap.log
           IAP_AGENT="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
+
+          echo '[iap] grant existing IAP service agent Cloud Run Invoker' | tee -a iap.log
           gcloud run services add-iam-policy-binding "$SERVICE" \
             --project="$PROJECT_ID" \
             --region="$REGION" \
             --member="serviceAccount:$IAP_AGENT" \
             --role="roles/run.invoker" \
-            --quiet >/dev/null
+            --quiet 2>&1 | tee -a iap.log
+          STATUS=${PIPESTATUS[0]}
+          if [ "$STATUS" -ne 0 ]; then
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            exit "$STATUS"
+          fi
 
+          echo '[iap] enable direct Cloud Run IAP' | tee -a iap.log
           gcloud run services update "$SERVICE" \
             --project="$PROJECT_ID" \
             --region="$REGION" \
             --iap \
-            --quiet
+            --quiet 2>&1 | tee -a iap.log
+          STATUS=${PIPESTATUS[0]}
+          if [ "$STATUS" -ne 0 ]; then
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            exit "$STATUS"
+          fi
 
-          DESCRIPTION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION")"
-          printf '%s\n' "$DESCRIPTION" | tee service-description.txt
-          printf '%s\n' "$DESCRIPTION" | grep -qi 'Iap Enabled: true'
-          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          echo '[iap] verify Cloud Run reports Iap Enabled: true' | tee -a iap.log
+          gcloud run services describe "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" 2>&1 | tee service-description.txt | tee -a iap.log
+          STATUS=${PIPESTATUS[0]}
+          if [ "$STATUS" -ne 0 ] || ! grep -qi 'Iap Enabled: true' service-description.txt; then
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo 'enabled=true' >> "$GITHUB_OUTPUT"
 
       - name: Deployment summary
         if: success()
@@ -201,6 +217,11 @@ jobs:
           else
             READINESS='{"ready":false,"evidence":"readiness.json unavailable because deployment/verification stopped earlier"}'
           fi
+          if [ -f iap.log ]; then
+            IAP_LOG="$(tail -80 iap.log)"
+          else
+            IAP_LOG='iap.log unavailable'
+          fi
           BODY=$(cat <<EOF
           ### MVP_SIMPLE UAT deployment evidence
           - Job status: \`$JOB_STATUS\`
@@ -215,8 +236,14 @@ jobs:
           - Runtime auth: \`ADC / $RUNTIME_SA\`
           - Readiness step: \`${VERIFY_OUTCOME:-not_run}\`
 
+          Readiness:
           \`\`\`json
           $READINESS
+          \`\`\`
+
+          IAP diagnostics:
+          \`\`\`text
+          $IAP_LOG
           \`\`\`
           EOF
           )
