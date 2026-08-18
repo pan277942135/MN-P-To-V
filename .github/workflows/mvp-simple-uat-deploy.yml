@@ -6,9 +6,11 @@ on:
       - main
     paths:
       - 'mvp-server.ts'
+      - 'mvp-server-v02.ts'
       - 'Dockerfile.mvp'
       - 'src/mvp/**'
       - 'src/__tests__/mvpSimpleContract.test.ts'
+      - 'src/__tests__/mvpIdentitySafe.test.ts'
       - 'MVP_SIMPLE_ACCEPTANCE.md'
       - '.github/workflows/mvp-simple-uat-deploy.yml'
   workflow_dispatch:
@@ -36,11 +38,12 @@ env:
   VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
   FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
   VEO_MODEL_ID: veo-3.1-fast-generate-001
+  IDENTITY_QA_MODEL: gemini-2.5-flash
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - name: Checkout requested source
         uses: actions/checkout@v4
@@ -60,7 +63,7 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
-      - name: Build and push immutable MVP image
+      - name: Build and push immutable Identity Safe MVP image
         id: image
         shell: bash
         run: |
@@ -73,7 +76,7 @@ jobs:
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy isolated private Cloud Run service
+      - name: Deploy isolated private Cloud Run UAT
         id: deploy
         shell: bash
         run: |
@@ -88,13 +91,13 @@ jobs:
             --service-account="$RUNTIME_SA" \
             --no-allow-unauthenticated \
             --no-iap \
-            --cpu=1 \
-            --memory=2Gi \
-            --timeout=300 \
+            --cpu=2 \
+            --memory=3Gi \
+            --timeout=900 \
             --concurrency=4 \
             --min-instances=0 \
-            --max-instances=1 \
-            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA" \
+            --max-instances=2 \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA" \
             --quiet
 
           gcloud run services add-iam-policy-binding "$SERVICE" \
@@ -120,7 +123,7 @@ jobs:
           id_token_audience: ${{ steps.deploy.outputs.service_url }}
           id_token_include_email: true
 
-      - name: Verify health and full readiness before browser gate
+      - name: Verify Identity Safe health and full readiness before browser gate
         id: verify
         shell: bash
         env:
@@ -129,8 +132,12 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/health" | tee health.json
+          grep -q '"mode":"MVP_IDENTITY_SAFE_V02"' health.json
+          grep -q '"identityQaModel":"gemini-2.5-flash"' health.json
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/readiness" | tee readiness.json
           grep -q '"ready":true' readiness.json
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/benchmark/catalog" | tee benchmark.json
+          grep -q 'IDSAFE-24' benchmark.json
 
       - name: Enable direct IAP browser access
         id: iap
@@ -174,7 +181,6 @@ jobs:
             echo 'enabled=false' >> "$GITHUB_OUTPUT"
             exit 1
           fi
-
           echo 'enabled=true' >> "$GITHUB_OUTPUT"
 
       - name: Deployment summary
@@ -182,7 +188,7 @@ jobs:
         shell: bash
         run: |
           {
-            echo '## MVP_SIMPLE UAT ready'
+            echo '## MVP Identity Safe v0.2 UAT ready'
             echo ''
             echo "- Source commit: \`${{ steps.image.outputs.source_sha }}\`"
             echo "- Cloud Run service: \`$SERVICE\`"
@@ -190,12 +196,12 @@ jobs:
             echo "- Fixed UAT URL: ${{ steps.deploy.outputs.service_url }}"
             echo "- Browser access: direct Cloud Run IAP / Google sign-in"
             echo "- IAP enabled: \`${{ steps.iap.outputs.enabled }}\`"
-            echo "- Provider: Vertex AI"
-            echo "- Model: \`$VEO_MODEL_ID\`"
+            echo "- Video model: \`$VEO_MODEL_ID\`"
+            echo "- Identity QA model: \`$IDENTITY_QA_MODEL\`"
             echo "- Runtime auth: ADC / \`$RUNTIME_SA\`"
-            echo "- Output bucket: \`$VEO_OUTPUT_BUCKET\`"
+            echo "- Benchmark catalog: 24 cases"
             echo ''
-            echo 'No Cloud Shell proxy or Web Preview is required for UAT access.'
+            echo 'Completion now requires verified MP4 + passing identity QA; a drifted first attempt may trigger exactly one conservative provider retry.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish durable deployment evidence
@@ -212,28 +218,20 @@ jobs:
           IAP_ENABLED: ${{ steps.iap.outputs.enabled }}
         run: |
           set -euo pipefail
-          if [ -f readiness.json ]; then
-            READINESS="$(cat readiness.json)"
-          else
-            READINESS='{"ready":false,"evidence":"readiness.json unavailable because deployment/verification stopped earlier"}'
-          fi
-          if [ -f iap.log ]; then
-            IAP_LOG="$(tail -80 iap.log)"
-          else
-            IAP_LOG='iap.log unavailable'
-          fi
+          READINESS="$(cat readiness.json 2>/dev/null || echo '{"ready":false,"evidence":"readiness unavailable"}')"
+          IAP_LOG="$(tail -80 iap.log 2>/dev/null || echo 'iap.log unavailable')"
           BODY=$(cat <<EOF
-          ### MVP_SIMPLE UAT deployment evidence
+          ### MVP Identity Safe v0.2 UAT deployment evidence
           - Job status: \`$JOB_STATUS\`
           - Source SHA: \`${SOURCE_SHA:-unavailable}\`
           - Cloud Run service: \`$SERVICE\`
           - Revision: \`${REVISION:-unavailable}\`
           - Fixed UAT URL: ${SERVICE_URL:-unavailable}
-          - Browser access: \`direct Cloud Run IAP / Google sign-in\`
           - IAP step: \`${IAP_OUTCOME:-not_run}\`
           - IAP enabled: \`${IAP_ENABLED:-false}\`
           - Provider/model: \`Vertex AI / $VEO_MODEL_ID\`
-          - Runtime auth: \`ADC / $RUNTIME_SA\`
+          - Identity QA: \`Vertex AI / $IDENTITY_QA_MODEL\`
+          - Benchmark catalog: \`24 cases\`
           - Readiness step: \`${VERIFY_OUTCOME:-not_run}\`
 
           Readiness:

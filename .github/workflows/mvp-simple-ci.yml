@@ -5,13 +5,19 @@ on:
     branches:
       - agent/mvp-simple-verifiable
       - agent/mvp-simple-verifiable-v2
+      - agent/identity-safe-v02
   pull_request:
     paths:
       - 'mvp-server.ts'
+      - 'mvp-server-v02.ts'
+      - 'identity-benchmark-runner.ts'
       - 'Dockerfile.mvp'
       - 'src/mvp/**'
       - 'src/__tests__/mvpSimpleContract.test.ts'
+      - 'src/__tests__/mvpIdentitySafe.test.ts'
       - '.github/workflows/mvp-simple-*.yml'
+      - '.github/workflows/identity-safe-real-benchmark.yml'
+      - '.github/identity-safe-benchmark-v02.trigger'
 
 permissions:
   contents: read
@@ -19,7 +25,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -33,23 +39,37 @@ jobs:
       - name: Typecheck
         run: bun run lint
 
-      - name: MVP contract tests
+      - name: MVP v0.1 contract tests
         run: bunx vitest run src/__tests__/mvpSimpleContract.test.ts
+
+      - name: Identity Safe v0.2 tests and 24-case benchmark contract
+        run: bunx vitest run src/__tests__/mvpIdentitySafe.test.ts
 
       - name: Existing regression suite
         env:
           VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
         run: bun run test
 
-      - name: Build standalone MVP server
+      - name: Build standalone Identity Safe MVP server
         run: |
-          bunx esbuild mvp-server.ts \
+          bunx esbuild mvp-server-v02.ts \
             --bundle \
             --platform=node \
             --format=cjs \
             --packages=external \
             --sourcemap \
             --outfile=dist/mvp-server.cjs
+
+      - name: Build standalone real benchmark runner
+        run: |
+          bunx esbuild identity-benchmark-runner.ts \
+            --bundle \
+            --platform=node \
+            --format=cjs \
+            --packages=external \
+            --sourcemap \
+            --outfile=dist/identity-benchmark-runner.cjs
+          test -s dist/identity-benchmark-runner.cjs
 
       - name: Build MVP Cloud Run image
         run: docker build -f Dockerfile.mvp -t zaojing-mvp-simple:ci .
@@ -63,14 +83,19 @@ jobs:
             -e VEO_OUTPUT_BUCKET=ai-studio-bucket-89614354864-asia-south1 \
             -e GOOGLE_CLOUD_PROJECT=xp-vertex-project \
             -e VERTEX_LOCATION=us-central1 \
+            -e IDENTITY_QA_MODEL=gemini-2.5-flash \
             -p 18080:8080 zaojing-mvp-simple:ci)"
           cleanup() { docker rm -f "$cid" >/dev/null 2>&1 || true; }
           trap cleanup EXIT
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:18080/api/mvp/health >/tmp/mvp-health.json; then
               cat /tmp/mvp-health.json
+              grep -q 'MVP_IDENTITY_SAFE_V02' /tmp/mvp-health.json
               curl -fsS http://127.0.0.1:18080/ >/tmp/mvp-index.html
-              grep -q '造境 MVP_SIMPLE' /tmp/mvp-index.html
+              grep -q 'Identity Safe v0.2' /tmp/mvp-index.html
+              curl -fsS http://127.0.0.1:18080/api/mvp/benchmark/catalog >/tmp/mvp-benchmark.json
+              grep -q 'IDSAFE-24' /tmp/mvp-benchmark.json
+              docker exec "$cid" test -s /app/dist/identity-benchmark-runner.cjs
               exit 0
             fi
             sleep 1

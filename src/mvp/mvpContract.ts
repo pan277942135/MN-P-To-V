@@ -1,4 +1,5 @@
-// MVP_SIMPLE v0.1 contract: artifact-only completion, no identity QA gate.
+import type { MvpIdentityQaReport } from './identitySafe';
+
 export const MVP_PROVIDER = 'vertex' as const;
 export const MVP_VIDEO_MODEL = 'veo-3.1-fast-generate-001' as const;
 export const MVP_ALLOWED_DURATIONS = [4, 6, 8] as const;
@@ -8,6 +9,8 @@ export type MvpTaskStatus =
   | 'SUBMITTING'
   | 'GENERATING'
   | 'SAVING'
+  | 'QUALITY_CHECKING'
+  | 'RETRYING'
   | 'COMPLETED'
   | 'FAILED'
   | 'SUBMISSION_OUTCOME_UNKNOWN';
@@ -19,12 +22,14 @@ export type MvpFailureStage =
   | 'polling'
   | 'generation'
   | 'output_fetch'
+  | 'identity_qa'
   | 'artifact_persist'
   | 'internal';
 
 export type MvpErrorCode =
   | 'INPUT_IMAGE_INVALID'
   | 'PROMPT_INVALID'
+  | 'IDENTITY_INPUT_UNSAFE'
   | 'AUTH_FAILED'
   | 'REQUEST_REJECTED'
   | 'SAFETY_REJECTED'
@@ -34,6 +39,9 @@ export type MvpErrorCode =
   | 'OUTPUT_MISSING'
   | 'OUTPUT_DOWNLOAD_FAILED'
   | 'OUTPUT_INVALID'
+  | 'IDENTITY_QA_UNAVAILABLE'
+  | 'IDENTITY_DRIFT'
+  | 'IDENTITY_RETRY_FAILED'
   | 'OUTPUT_PERSIST_FAILED'
   | 'SUBMISSION_OUTCOME_UNKNOWN'
   | 'STORAGE_CONFIG_INVALID'
@@ -60,13 +68,23 @@ export interface MvpVideoTask {
   projectId: string;
   region: string;
   prompt: string;
+  effectivePrompt?: string;
+  identitySafeMode?: boolean;
   durationSeconds: number;
   inputMimeType: string;
   inputSha256: string;
   inputSizeBytes: number;
+  inputBucket?: string | null;
+  inputObjectPath?: string | null;
   providerStorageUri: string;
+  providerAttempt?: number;
+  identityRetryCount?: number;
   operationName?: string | null;
   pollAttempt: number;
+  identityQaModel?: string | null;
+  identityReport?: MvpIdentityQaReport | null;
+  firstAttemptIdentityReport?: MvpIdentityQaReport | null;
+  retryReason?: string | null;
   outputBucket?: string | null;
   outputObjectPath?: string | null;
   videoUri?: string | null;
@@ -97,6 +115,20 @@ export function assertArtifactOnlyCompletion(task: Partial<MvpVideoTask>): void 
   if (!isArtifactOnlyCompletionSatisfied(task)) {
     throw new Error(
       'MVP_ARTIFACT_COMPLETION_INVARIANT: COMPLETED requires a verified persisted video artifact.'
+    );
+  }
+}
+
+export function isIdentitySafeCompletionSatisfied(task: Partial<MvpVideoTask>): boolean {
+  if (!isArtifactOnlyCompletionSatisfied(task)) return false;
+  if (task.identitySafeMode !== true) return true;
+  return Boolean(task.identityReport?.pass === true && task.identityReport?.gateStatus === 'pass');
+}
+
+export function assertIdentitySafeCompletion(task: Partial<MvpVideoTask>): void {
+  if (!isIdentitySafeCompletionSatisfied(task)) {
+    throw new Error(
+      'MVP_IDENTITY_COMPLETION_INVARIANT: Identity Safe COMPLETED requires verified video artifact and passing identity QA.'
     );
   }
 }
