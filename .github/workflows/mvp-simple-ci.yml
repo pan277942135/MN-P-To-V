@@ -1,0 +1,76 @@
+name: MVP Simple CI
+
+on:
+  push:
+    branches:
+      - agent/mvp-simple-verifiable
+  pull_request:
+    paths:
+      - 'mvp-server.ts'
+      - 'Dockerfile.mvp'
+      - 'src/mvp/**'
+      - 'src/__tests__/mvpSimpleContract.test.ts'
+      - '.github/workflows/mvp-simple-*.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run lint
+
+      - name: MVP contract tests
+        run: bunx vitest run src/__tests__/mvpSimpleContract.test.ts
+
+      - name: Existing regression suite
+        run: bun run test
+
+      - name: Build standalone MVP server
+        run: |
+          bunx esbuild mvp-server.ts \
+            --bundle \
+            --platform=node \
+            --format=cjs \
+            --packages=external \
+            --sourcemap \
+            --outfile=dist/mvp-server.cjs
+
+      - name: Build MVP Cloud Run image
+        run: docker build -f Dockerfile.mvp -t zaojing-mvp-simple:ci .
+
+      - name: Container smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          cid="$(docker run -d \
+            -e PORT=8080 \
+            -e VEO_OUTPUT_BUCKET=ai-studio-bucket-89614354864-asia-south1 \
+            -e GOOGLE_CLOUD_PROJECT=xp-vertex-project \
+            -e VERTEX_LOCATION=us-central1 \
+            -p 18080:8080 zaojing-mvp-simple:ci)"
+          cleanup() { docker rm -f "$cid" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/api/mvp/health >/tmp/mvp-health.json; then
+              cat /tmp/mvp-health.json
+              curl -fsS http://127.0.0.1:18080/ >/tmp/mvp-index.html
+              grep -q '造境 MVP_SIMPLE' /tmp/mvp-index.html
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$cid" || true
+          exit 1
