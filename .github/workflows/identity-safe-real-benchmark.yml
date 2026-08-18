@@ -1,0 +1,164 @@
+name: Identity Safe v0.2 Real Benchmark
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/identity-safe-benchmark-v02.trigger'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  GAR_REPO: zaojing
+  JOB_NAME: zaojing-identity-benchmark-v02
+  STATUS_ISSUE: '53'
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+  FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  VEO_MODEL_ID: veo-3.1-fast-generate-001
+  IDENTITY_QA_MODEL: gemini-2.5-flash
+
+jobs:
+  real-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout benchmark source
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Build and push immutable benchmark image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$JOB_NAME:$SOURCE_SHA"
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker build -f Dockerfile.mvp -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy isolated benchmark Cloud Run Job
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run jobs deploy "$JOB_NAME" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --image='${{ steps.image.outputs.image }}' \
+            --service-account="$RUNTIME_SA" \
+            --command=node \
+            --args=dist/identity-benchmark-runner.cjs \
+            --cpu=2 \
+            --memory=4Gi \
+            --task-timeout=7200s \
+            --max-retries=0 \
+            --tasks=1 \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,BENCHMARK_CONCURRENCY=2,SOURCE_SHA=${{ steps.image.outputs.source_sha }}" \
+            --quiet
+
+      - name: Execute 24 real Veo benchmark cases
+        id: execute
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run jobs execute "$JOB_NAME" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --task-timeout=7200s \
+            --wait
+
+      - name: Fetch and validate benchmark result
+        id: result
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESULT_URI="gs://$VEO_OUTPUT_BUCKET/benchmarks/identity-stability-benchmark-v1/latest.json"
+          gcloud storage cp "$RESULT_URI" /tmp/identity-benchmark.json
+          cat /tmp/identity-benchmark.json | jq '{runId,totalCases,providerFailedCases,grouped,summary,completedAt}' | tee /tmp/identity-benchmark-summary.json
+          EVALUATED="$(jq -r '.summary.evaluatedCases' /tmp/identity-benchmark.json)"
+          FIRST_PASS="$(jq -r '.summary.firstAttemptPassRate' /tmp/identity-benchmark.json)"
+          FINAL_PASS="$(jq -r '.summary.postRetryPassRate' /tmp/identity-benchmark.json)"
+          EARLY_DRIFT="$(jq -r '.summary.earlyDriftRate' /tmp/identity-benchmark.json)"
+          RECOMMENDED="$(jq -r '.summary.firstFrameEnhancementDecision.recommended' /tmp/identity-benchmark.json)"
+          REASON="$(jq -r '.summary.firstFrameEnhancementDecision.reason' /tmp/identity-benchmark.json)"
+          test "$EVALUATED" -ge 20
+          echo "evaluated=$EVALUATED" >> "$GITHUB_OUTPUT"
+          echo "first_pass=$FIRST_PASS" >> "$GITHUB_OUTPUT"
+          echo "final_pass=$FINAL_PASS" >> "$GITHUB_OUTPUT"
+          echo "early_drift=$EARLY_DRIFT" >> "$GITHUB_OUTPUT"
+          echo "recommended=$RECOMMENDED" >> "$GITHUB_OUTPUT"
+          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+          echo "result_uri=$RESULT_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Publish benchmark evidence
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+          SOURCE_SHA: ${{ steps.image.outputs.source_sha }}
+          RESULT_URI: ${{ steps.result.outputs.result_uri }}
+          EVALUATED: ${{ steps.result.outputs.evaluated }}
+          FIRST_PASS: ${{ steps.result.outputs.first_pass }}
+          FINAL_PASS: ${{ steps.result.outputs.final_pass }}
+          EARLY_DRIFT: ${{ steps.result.outputs.early_drift }}
+          RECOMMENDED: ${{ steps.result.outputs.recommended }}
+          REASON: ${{ steps.result.outputs.reason }}
+        run: |
+          set -euo pipefail
+          if [ -f /tmp/identity-benchmark-summary.json ]; then
+            SUMMARY_JSON="$(cat /tmp/identity-benchmark-summary.json)"
+          else
+            SUMMARY_JSON='{"evidence":"benchmark result unavailable; inspect Cloud Run Job execution logs"}'
+          fi
+          BODY=$(cat <<EOF
+          ### Identity Safe v0.2 real benchmark
+          - Job status: \`$JOB_STATUS\`
+          - Source SHA: \`${SOURCE_SHA:-unavailable}\`
+          - Cloud Run Job: \`$JOB_NAME\`
+          - Real benchmark cases configured: \`24\`
+          - Identity-evaluable cases: \`${EVALUATED:-unavailable}\`
+          - First-attempt pass rate: \`${FIRST_PASS:-unavailable}\`
+          - Post-retry pass rate: \`${FINAL_PASS:-unavailable}\`
+          - Early drift rate: \`${EARLY_DRIFT:-unavailable}\`
+          - P0-07 first-frame enhancement recommended: \`${RECOMMENDED:-unavailable}\`
+          - P0-07 reason: \`${REASON:-unavailable}\`
+          - Result URI: ${RESULT_URI:-unavailable}
+
+          \`\`\`json
+          $SUMMARY_JSON
+          \`\`\`
+          EOF
+          )
+          jq -n --arg body "$BODY" '{body:$body}' > /tmp/benchmark-comment.json
+          curl -fsS \
+            -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${STATUS_ISSUE}/comments" \
+            --data-binary @/tmp/benchmark-comment.json
