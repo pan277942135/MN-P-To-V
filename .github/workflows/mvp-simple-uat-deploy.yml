@@ -1,0 +1,136 @@
+name: MVP Simple UAT Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Git ref to deploy'
+        required: true
+        default: 'agent/mvp-simple-verifiable'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  GAR_REPO: zaojing
+  SERVICE: zaojing-mvp-simple-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+  FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  VEO_MODEL_ID: veo-3.1-fast-generate-001
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout requested source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Build and push immutable MVP image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$SERVICE:$SOURCE_SHA"
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker build -f Dockerfile.mvp -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy isolated private Cloud Run service
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE='${{ steps.image.outputs.image }}'
+          SOURCE_SHA='${{ steps.image.outputs.source_sha }}'
+          gcloud run deploy "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --platform=managed \
+            --image="$IMAGE" \
+            --service-account="$RUNTIME_SA" \
+            --no-allow-unauthenticated \
+            --cpu=1 \
+            --memory=2Gi \
+            --timeout=300 \
+            --concurrency=4 \
+            --min-instances=0 \
+            --max-instances=1 \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA" \
+            --quiet
+
+          gcloud run services add-iam-policy-binding "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --member="serviceAccount:$DEPLOY_SA" \
+            --role="roles/run.invoker" \
+            --quiet >/dev/null
+
+          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+
+      - name: Mint Cloud Run ID token
+        uses: google-github-actions/auth@v3
+        id: invoke_auth
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          token_format: id_token
+          id_token_audience: ${{ steps.deploy.outputs.service_url }}
+          id_token_include_email: true
+
+      - name: Verify health and full readiness
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          ID_TOKEN: ${{ steps.invoke_auth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/health" | tee health.json
+          curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/readiness" | tee readiness.json
+          grep -q '"ready":true' readiness.json
+
+      - name: Deployment summary
+        shell: bash
+        run: |
+          {
+            echo '## MVP_SIMPLE UAT ready'
+            echo ''
+            echo "- Source commit: \`${{ steps.image.outputs.source_sha }}\`"
+            echo "- Cloud Run service: \`$SERVICE\`"
+            echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
+            echo "- Private service URL: ${{ steps.deploy.outputs.service_url }}"
+            echo "- Provider: Vertex AI"
+            echo "- Model: \`$VEO_MODEL_ID\`"
+            echo "- Runtime auth: ADC / \`$RUNTIME_SA\`"
+            echo "- Output bucket: \`$VEO_OUTPUT_BUCKET\`"
+            echo ''
+            echo 'This service is isolated from the existing M2 UAT service.'
+          } >> "$GITHUB_STEP_SUMMARY"
