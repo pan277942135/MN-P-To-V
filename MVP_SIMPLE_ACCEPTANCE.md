@@ -34,6 +34,8 @@
 
 Cloud Run UAT 服务：`zaojing-mvp-simple-uat`
 
+固定 UAT 地址：`https://zaojing-mvp-simple-uat-i7lns3auvq-uc.a.run.app/`
+
 任务元数据：Firestore collection `mvp_video_tasks`
 
 幂等映射：Firestore collection `mvp_video_idempotency`
@@ -41,6 +43,19 @@ Cloud Run UAT 服务：`zaojing-mvp-simple-uat`
 Provider 原始输出前缀：`gs://$VEO_OUTPUT_BUCKET/veo/<taskId>/provider/`
 
 验证后的标准视频：`gs://$VEO_OUTPUT_BUCKET/veo/<taskId>/video.mp4`
+
+## UAT 访问契约（冻结）
+
+人工验收只使用固定 Cloud Run UAT 地址，通过 Cloud Run 原生 IAP / Google 登录直接访问。
+
+- UAT 服务保持非公开匿名访问。
+- Cloud Run 服务必须显示 `Iap Enabled: true`。
+- 有权限的测试账号在浏览器打开固定 UAT 地址后直接完成 Google 登录并进入应用。
+- **不使用 `gcloud run services proxy`。**
+- **不使用 Cloud Shell Web Preview。**
+- **不把本地代理、Cloud Shell 端口或临时 Preview URL 作为 UAT 验收入口。**
+
+后续所有 MVP 人工验证、回归和视频生成测试均沿用此访问契约。
 
 ## API
 
@@ -167,9 +182,9 @@ Provider `done=true` 本身绝不等于成功。
 
 部署目标固定为独立 Cloud Run 服务 `zaojing-mvp-simple-uat`，不修改原 M2 UAT 服务。
 
-部署成功必须经过 `/api/mvp/health` 和 `/api/mvp/readiness` 两道检查。
+部署流程先用服务账号验证 `/api/mvp/health` 和 `/api/mvp/readiness`，随后启用 Cloud Run 原生 IAP，并验证 `Iap Enabled: true`。
 
-每次部署结束后，GitHub Actions 会把 Source SHA、Cloud Run revision、私有 Service URL 和 readiness JSON 发布到 Issue #47 `MVP_SIMPLE UAT deployment evidence`，作为可追溯运行态证据。
+每次部署结束后，GitHub Actions 会把 Source SHA、Cloud Run revision、固定 UAT URL、IAP 状态和 readiness JSON 发布到 Issue #47 `MVP_SIMPLE UAT deployment evidence`，作为可追溯运行态证据。
 
 ## 第一轮人工真实验收
 
