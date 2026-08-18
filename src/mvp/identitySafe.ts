@@ -10,6 +10,7 @@ export const IDENTITY_QA_MIN_TEMPORAL = 88;
 export const IDENTITY_QA_MIN_VISIBLE_RATIO = 0.75;
 
 export type IdentityQaGateStatus = 'pass' | 'review' | 'fail';
+export type IdentityQaSourceScoreScale = '0-100' | 'legacy-1-5-normalized';
 
 export interface IdentitySafeInputIssue {
   code: 'IMAGE_TOO_SMALL' | 'IMAGE_ASPECT_EXTREME' | 'PROMPT_IDENTITY_RISK';
@@ -46,6 +47,8 @@ export interface MvpIdentityQaReport {
   worstFrameTimestamp: number | null;
   frames: IdentityQaFrameAssessment[];
   summary: string;
+  scoreScale?: '0-100';
+  sourceScoreScale?: IdentityQaSourceScoreScale;
 }
 
 const HIGH_RISK_PROMPT_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
@@ -111,6 +114,73 @@ function assertScore(name: string, value: unknown): number {
   return value;
 }
 
+function qaSemanticEvidence(parsed: any): string {
+  const notes = Array.isArray(parsed?.frameAssessments)
+    ? parsed.frameAssessments.map((item: any) => typeof item?.notes === 'string' ? item.notes : '').join(' ')
+    : '';
+  return `${typeof parsed?.summary === 'string' ? parsed.summary : ''} ${notes}`.toLowerCase();
+}
+
+function hasPositiveIdentityEvidence(text: string): boolean {
+  return /perfect(?:ly)?(?:\s+maintain(?:ed)?)?|match(?:es|ed|ing)?\s+(?:the\s+)?reference|same\s+(?:person|identity)|identity[^.]{0,40}(?:maintain|consistent)|face[^.]{0,40}consistent|一致|完全匹配|身份[^。]{0,20}(?:保持|稳定)/i.test(text);
+}
+
+function hasNegativeIdentityEvidence(text: string): boolean {
+  return /different\s+person|identity\s+drift|identity\s+mismatch|face\s+mismatch|inconsistent\s+(?:identity|face)|not\s+(?:the\s+)?same\s+(?:person|identity)|身份漂移|不同的人|身份不一致|人脸不一致|不匹配/i.test(text);
+}
+
+/**
+ * Gemini has historically emitted Identity Safe scores on an undocumented 1–5 scale even
+ * though the downstream gate is 0–100. Normalize only when the entire numeric payload is
+ * 1–5 AND the structured/semantic evidence says the identity is consistently the same.
+ * Ambiguous or contradictory 1–5-like evidence fails closed as a QA contract error so it
+ * can never consume a Veo provider retry.
+ */
+export function normalizeIdentityQaParsedScores(rawParsed: any): {
+  parsed: any;
+  sourceScoreScale: IdentityQaSourceScoreScale;
+} {
+  const parsed = {
+    ...rawParsed,
+    frameAssessments: Array.isArray(rawParsed?.frameAssessments)
+      ? rawParsed.frameAssessments.map((item: any) => ({ ...item }))
+      : rawParsed?.frameAssessments,
+  };
+
+  const frameScores = Array.isArray(parsed.frameAssessments)
+    ? parsed.frameAssessments.map((item: any) => item?.faceSimilarityScore)
+    : [];
+  const allScores = [...frameScores, parsed?.temporalConsistencyScore];
+  const legacyOneToFive =
+    allScores.length > 1 &&
+    allScores.every((score) => Number.isInteger(score) && score >= 1 && score <= 5);
+
+  if (!legacyOneToFive) {
+    return { parsed, sourceScoreScale: '0-100' };
+  }
+
+  const text = qaSemanticEvidence(parsed);
+  const differentPersonDetected = Array.isArray(parsed.frameAssessments)
+    && parsed.frameAssessments.some((item: any) => item?.differentPersonDetected === true);
+  const positiveEvidence = hasPositiveIdentityEvidence(text);
+  const negativeEvidence = hasNegativeIdentityEvidence(text);
+
+  if (differentPersonDetected || negativeEvidence || !positiveEvidence) {
+    throw new Error(
+      'IDENTITY_QA_EVIDENCE_CONFLICT: 1-5-like scores conflict with or lack positive identity evidence; preserve artifact and re-QA without Veo regeneration.',
+    );
+  }
+
+  const normalizeLegacyScore = (score: number) => (score - 1) * 25;
+  parsed.frameAssessments = parsed.frameAssessments.map((item: any) => ({
+    ...item,
+    faceSimilarityScore: normalizeLegacyScore(item.faceSimilarityScore),
+  }));
+  parsed.temporalConsistencyScore = normalizeLegacyScore(parsed.temporalConsistencyScore);
+
+  return { parsed, sourceScoreScale: 'legacy-1-5-normalized' };
+}
+
 export async function qaVideoIdentityAgainstInput(params: {
   projectId: string;
   location: string;
@@ -145,7 +215,7 @@ export async function qaVideoIdentityAgainstInput(params: {
   });
 
   parts.push({
-    text: `You are a strict identity-continuity QA system for image-to-video generation.\nCompare every VIDEO_FRAME independently against REFERENCE_IMAGE.\nfaceSimilarityScore must evaluate identity only: facial geometry, eye spacing/shape, nose, lips, jawline, hairline, hairstyle and stable age cues. Ignore harmless lighting, expression and small pose changes.\nSet differentPersonDetected=true whenever the visible face is plausibly a different person, not merely a lower-quality rendering.\nSet faceVisible=false when identity cannot be judged because the face is too small, blurred, turned away or occluded.\nDo not average away a bad frame. Return one assessment for every supplied frameIndex 0..${params.frames.length - 1}.\ntemporalConsistencyScore measures whether identity remains the same continuously across the video.\nReturn strict JSON only.`,
+    text: `You are a strict identity-continuity QA system for image-to-video generation.\nCompare every VIDEO_FRAME independently against REFERENCE_IMAGE.\nAll numeric identity scores MUST be integers on a 0–100 scale, where 100 means an exact/fully consistent identity match and 0 means no identity match. NEVER use a 1–5 or 1–10 rating scale.\nfaceSimilarityScore must evaluate identity only: facial geometry, eye spacing/shape, nose, lips, jawline, hairline, hairstyle and stable age cues. Ignore harmless lighting, expression and small pose changes.\nSet differentPersonDetected=true whenever the visible face is plausibly a different person, not merely a lower-quality rendering.\nSet faceVisible=false when identity cannot be judged because the face is too small, blurred, turned away or occluded.\nDo not average away a bad frame. Return one assessment for every supplied frameIndex 0..${params.frames.length - 1}.\ntemporalConsistencyScore uses the same 0–100 scale and measures whether identity remains the same continuously across the video.\nReturn strict JSON only.`,
   });
 
   const response = await ai.models.generateContent({
@@ -164,7 +234,7 @@ export async function qaVideoIdentityAgainstInput(params: {
               type: Type.OBJECT,
               properties: {
                 frameIndex: { type: Type.INTEGER },
-                faceSimilarityScore: { type: Type.INTEGER },
+                faceSimilarityScore: { type: Type.INTEGER, description: 'Identity similarity on a strict 0-100 scale; 100 is exact match.' },
                 faceVisible: { type: Type.BOOLEAN },
                 differentPersonDetected: { type: Type.BOOLEAN },
                 notes: { type: Type.STRING },
@@ -172,7 +242,7 @@ export async function qaVideoIdentityAgainstInput(params: {
               required: ['frameIndex', 'faceSimilarityScore', 'faceVisible', 'differentPersonDetected', 'notes'],
             },
           },
-          temporalConsistencyScore: { type: Type.INTEGER },
+          temporalConsistencyScore: { type: Type.INTEGER, description: 'Temporal identity consistency on a strict 0-100 scale; 100 is fully consistent.' },
           summary: { type: Type.STRING },
         },
         required: ['frameAssessments', 'temporalConsistencyScore', 'summary'],
@@ -180,7 +250,9 @@ export async function qaVideoIdentityAgainstInput(params: {
     },
   });
 
-  const parsed = JSON.parse(response.text?.trim() || '{}');
+  const normalized = normalizeIdentityQaParsedScores(JSON.parse(response.text?.trim() || '{}'));
+  const parsed = normalized.parsed;
+  const sourceScoreScale = normalized.sourceScoreScale;
   if (!Array.isArray(parsed.frameAssessments) || parsed.frameAssessments.length !== params.frames.length) {
     throw new Error('IDENTITY_QA_PARSE_FAILED: frame assessment count mismatch');
   }
@@ -248,6 +320,8 @@ export async function qaVideoIdentityAgainstInput(params: {
     worstFrameTimestamp: worstFrame?.timestampSec ?? null,
     frames,
     summary: typeof parsed.summary === 'string' ? parsed.summary : gateStatus === 'pass' ? '身份连续性通过' : '检测到身份漂移风险',
+    scoreScale: '0-100',
+    sourceScoreScale,
   };
 }
 

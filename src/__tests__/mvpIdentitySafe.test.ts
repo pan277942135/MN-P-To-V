@@ -3,6 +3,7 @@ import sharp from 'sharp';
 import {
   buildIdentitySafePrompt,
   decideFirstFrameEnhancement,
+  normalizeIdentityQaParsedScores,
   shouldRetryIdentity,
   validateIdentitySafeInput,
   type MvpIdentityQaReport,
@@ -72,6 +73,44 @@ describe('MVP Identity Safe v0.2', () => {
     expect(effectivePrompt).toContain('No face occlusion, no large head turns');
     expect(effectivePrompt).toContain('Camera is locked or near-locked');
     expect(effectivePrompt).toContain('identity preservation takes priority');
+  });
+
+  it('normalizes the observed 5/5 perfect-identity fixture before 0-100 gating', () => {
+    const parsed = {
+      frameAssessments: Array.from({ length: 9 }, (_, frameIndex) => ({
+        frameIndex,
+        faceSimilarityScore: 5,
+        faceVisible: true,
+        differentPersonDetected: false,
+        notes: frameIndex < 5
+          ? 'Face matches the reference image perfectly and remains consistent.'
+          : 'Face is consistent with the reference; only a blue tint appears in the hair.',
+      })),
+      temporalConsistencyScore: 5,
+      summary: 'The identity of the person is perfectly maintained across all video frames and matches the reference image.',
+    };
+
+    const normalized = normalizeIdentityQaParsedScores(parsed);
+    expect(normalized.sourceScoreScale).toBe('legacy-1-5-normalized');
+    expect(normalized.parsed.frameAssessments).toHaveLength(9);
+    expect(normalized.parsed.frameAssessments.every((frame: any) => frame.faceSimilarityScore === 100)).toBe(true);
+    expect(normalized.parsed.temporalConsistencyScore).toBe(100);
+  });
+
+  it('fails closed on ambiguous or contradictory 1-5-like QA evidence instead of treating it as identity drift', () => {
+    const contradictory = {
+      frameAssessments: Array.from({ length: 9 }, (_, frameIndex) => ({
+        frameIndex,
+        faceSimilarityScore: 5,
+        faceVisible: true,
+        differentPersonDetected: frameIndex === 4,
+        notes: 'Identity appears inconsistent with the reference.',
+      })),
+      temporalConsistencyScore: 5,
+      summary: 'Possible identity drift and a different person in one frame.',
+    };
+
+    expect(() => normalizeIdentityQaParsedScores(contradictory)).toThrow('IDENTITY_QA_EVIDENCE_CONFLICT');
   });
 
   it('adds a fixed identity-safe block and a stronger conservative retry block', () => {
