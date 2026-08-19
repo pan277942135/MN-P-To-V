@@ -20,7 +20,7 @@ paths:
     post:
       operationId: createIdentitySafeVideo
       summary: Create one Identity Safe video from exactly one image in the ChatGPT conversation.
-      description: Use the user's uploaded JPG, PNG or WebP as the identity and first-frame anchor. Send exactly one conversation image through openaiFileIdRefs. The API downloads the short-lived OpenAI file URL server-side, validates it, and submits the existing Zaojing Identity Safe pipeline. This is a billable Veo operation; ask for user confirmation immediately before calling unless the user explicitly asked to generate now.
+      description: Create an Identity Safe video from one uploaded JPG, PNG, or WebP. ChatGPT supplies the image via openaiFileIdRefs. This is a billable Veo operation.
       x-openai-isConsequential: true
       requestBody:
         required: true
@@ -50,7 +50,7 @@ paths:
       responses:
         '200': { description: Existing idempotent task. }
         '202': { description: Video task accepted and generating. }
-        '400': { description: Invalid prompt, duration or image. }
+        '400': { description: Invalid prompt, duration, or image. }
         '401': { description: Invalid API key. }
   /v1/videos/{taskId}:
     get:
@@ -70,7 +70,7 @@ paths:
     post:
       operationId: recoverIdentitySafeVideoArtifact
       summary: Recover an already-generated provider artifact without submitting another Veo generation.
-      description: Use only when the task is submission-outcome-unknown or an existing provider artifact needs recovery. This operation must never create a new Veo attempt.
+      description: Recover an existing provider artifact only. This operation must never create a new Veo attempt.
       x-openai-isConsequential: false
       parameters:
         - in: path
@@ -82,6 +82,7 @@ paths:
         '401': { description: Invalid API key. }
         '404': { description: No recoverable artifact found. }
 components:
+  schemas: {}
   securitySchemes:
     bearerAuth:
       type: http
