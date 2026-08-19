@@ -14,12 +14,20 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(gateway).toContain('revokedAt');
   });
 
-  it('accepts only short-lived OpenAI-hosted conversation image references', () => {
+  it('accepts only short-lived OpenAI-hosted conversation image download URLs', () => {
     expect(gateway).toContain('openaiFileIdRefs');
     expect(gateway).toContain("host.endsWith('.oaiusercontent.com')");
     expect(gateway).toContain("host.endsWith('.openai.com')");
     expect(gateway).toContain('MAX_IMAGE_BYTES = 20 * 1024 * 1024');
     expect(gateway).toContain("SUPPORTED_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp']");
+  });
+
+  it('diagnoses the observed GPT Actions plain file-id payload without pretending it has a download URL', () => {
+    expect(gateway).toContain('type OpenAIFileRef = string | OpenAIFileRefObject');
+    expect(gateway).toContain("referenceKind: 'string_file_id'");
+    expect(gateway).toContain('fileIdPresent: ref.trim().length > 0');
+    expect(gateway).toContain('downloadLinkPresent: false');
+    expect(gateway).toContain("throw new OpenAIFileBridgeError('OPENAI_FILE_URL_INVALID'");
   });
 
   it('validates downloaded image bytes by magic signature instead of trusting declared MIME', () => {
@@ -43,6 +51,20 @@ describe('ChatGPT Actions gateway contract', () => {
     const preflightBlock = gateway.slice(preflightStart, videoStart);
     expect(preflightBlock).not.toContain("upstream('/api/mvp/videos/start'");
     expect(preflightBlock).toContain('downloadOpenAIImage');
+    expect(preflightBlock).toContain("status: 'PREFLIGHT_OK'");
+    expect(preflightBlock).toContain('providerCalled: false');
+  });
+
+  it('returns handled preflight and file-bridge failures as HTTP 200 action-safe envelopes', () => {
+    expect(gateway).toContain("status: 'FILE_BRIDGE_FAILED'");
+    expect(gateway).toContain('taskCreated: false');
+    expect(gateway).toContain('providerCalled: false');
+    expect(gateway).toContain("stage: 'action_file_bridge'");
+    const preflightStart = gateway.indexOf("app.post('/v1/images/preflight'");
+    const videoStart = gateway.indexOf("app.post('/v1/videos'");
+    const preflightBlock = gateway.slice(preflightStart, videoStart);
+    expect(preflightBlock).toContain('return res.status(200).json');
+    expect(schema).toContain('Handled file-bridge failures return HTTP 200');
   });
 
   it('normalizes forwarded image MIME and filename from detected bytes', () => {
@@ -50,6 +72,19 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(gateway).toContain('mimeType: detectedMime');
     expect(gateway).toContain("new Blob([image.bytes], { type: image.mimeType })");
     expect(gateway).toContain('inputFile: image.diagnostics');
+  });
+
+  it('makes create return an observable action-safe result even when the private upstream returns non-2xx', () => {
+    const videoStart = gateway.indexOf("app.post('/v1/videos'");
+    const getStart = gateway.indexOf("app.get('/v1/videos/:taskId'");
+    const createBlock = gateway.slice(videoStart, getStart);
+    expect(createBlock).toContain('return res.status(200).json');
+    expect(createBlock).toContain('upstreamHttpStatus: response.status');
+    expect(createBlock).toContain('taskCreated: Boolean(body?.taskId)');
+    expect(createBlock).toContain('providerCalled: inferProviderCalled(body)');
+    expect(createBlock).toContain("status: 'UPSTREAM_OUTCOME_UNKNOWN'");
+    expect(createBlock).toContain('Retry createIdentitySafeVideo with the same idempotencyKey only');
+    expect(schema).toContain('Handled request, file-bridge and upstream outcomes return HTTP 200');
   });
 
   it('reuses the existing Identity Safe start/status/recover pipeline instead of bypassing it', () => {
