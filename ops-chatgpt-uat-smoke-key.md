@@ -1,0 +1,1 @@
+Temporary same-repository UAT smoke harness. The workflow emits only an RSA-OAEP encrypted bearer key; the private key is not stored in GitHub. This branch will not be merged and should be deleted after the smoke test.
