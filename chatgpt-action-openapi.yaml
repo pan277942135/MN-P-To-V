@@ -41,12 +41,35 @@ paths:
       responses:
         '200':
           description: Action-safe preflight result. Inspect ok, status, error and diagnostics; no video task or Veo call is created.
+  /v1/videos/resolve:
+    post:
+      operationId: resolveIdentitySafeVideoIntent
+      security: []
+      summary: Resolve a previous create intent from its stable idempotency key without creating or submitting a video.
+      description: Call this immediately after any create client or transport error before retrying create. It only queries the durable idempotency index and never calls Veo.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idempotencyKey]
+              properties:
+                idempotencyKey:
+                  type: string
+                  minLength: 16
+                  maxLength: 200
+                  description: The exact stable idempotency key previously used for the create intent.
+      responses:
+        '200':
+          description: Action-safe durable intent resolution. Returns the existing task when present, INTENT_NOT_FOUND when absent, or RESOLVE_FAILED when lookup is inconclusive.
   /v1/videos:
     post:
       operationId: createIdentitySafeVideo
       security: []
       summary: Create one Identity Safe video from exactly one image in the ChatGPT conversation.
-      description: UAT supports bounded direct ChatGPT calls. Always provide and reuse one stable idempotencyKey for the same intent; handled outcomes return HTTP 200.
+      description: UAT supports bounded direct calls. Generate one stable idempotencyKey per intent; if this action itself has a client/transport error, call resolveIdentitySafeVideoIntent before any create retry.
       x-openai-isConsequential: true
       requestBody:
         required: true
@@ -67,7 +90,7 @@ paths:
                   type: string
                   minLength: 16
                   maxLength: 200
-                  description: Stable random key for one user intent. Generate it once and reuse the exact same value on every retry of that intent.
+                  description: Stable random key for one user intent. Generate it once and reuse the exact same value on every recovery or retry of that intent.
                 openaiFileIdRefs:
                   type: array
                   minItems: 1
