@@ -29,10 +29,28 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(gateway).toContain("/recover`, { method: 'POST' }");
   });
 
-  it('uses service-account JWT authentication for the IAP-protected upstream', () => {
+  it('keeps the signed-JWT IAP authentication path available as a fallback', () => {
     expect(gateway).toContain('iamcredentials.googleapis.com');
     expect(gateway).toContain("aud: UPSTREAM_URL + '/*'");
     expect(gateway).toContain('IAP_SIGN_JWT_FAILED');
+  });
+
+  it('uses a dedicated private Cloud Run IAM upstream for UAT without project IAM mutation', () => {
+    expect(gateway).toContain('ZAOJING_UPSTREAM_AUTH_MODE');
+    expect(gateway).toContain('metadata.google.internal');
+    expect(gateway).toContain("UPSTREAM_AUTH_MODE === 'cloud-run-id-token'");
+    expect(deploy).toContain('CHATGPT_UPSTREAM_SERVICE: zaojing-chatgpt-upstream-uat');
+    expect(deploy).toContain('--no-allow-unauthenticated --no-iap');
+    expect(deploy).toContain('--role="roles/run.invoker"');
+    expect(deploy).toContain('ZAOJING_UPSTREAM_AUTH_MODE=cloud-run-id-token');
+    expect(deploy).not.toContain('roles/iap.httpsResourceAccessor');
+    expect(deploy).not.toContain('roles/iam.serviceAccountTokenCreator');
+  });
+
+  it('makes public gateway health prove authenticated upstream reachability', () => {
+    expect(gateway).toContain("await upstream('/api/mvp/health')");
+    expect(gateway).toContain('upstreamReachable');
+    expect(deploy).toContain("grep -q '\"upstreamReachable\":true' health.json");
   });
 
   it('marks Veo creation consequential and recovery non-consequential', () => {
