@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 const gateway = fs.readFileSync('chatgpt-gateway.ts', 'utf8');
 const schema = fs.readFileSync('chatgpt-action-openapi.yaml', 'utf8');
 const wrapper = fs.readFileSync('mvp-server-v021.ts', 'utf8');
+const deploy = fs.readFileSync('.github/workflows/chatgpt-gateway-uat-deploy.yml', 'utf8');
 
 describe('ChatGPT Actions gateway contract', () => {
   it('requires a hashed, revocable Bearer key for every v1 action', () => {
@@ -47,5 +48,21 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(wrapper).toContain('crypto.randomBytes(32)');
     expect(wrapper).toContain('CHATGPT_KEY_COLLECTION');
     expect(wrapper).toContain('keyHash');
+  });
+
+  it('supports a hash-only UAT bootstrap key without storing plaintext credentials in source', () => {
+    expect(gateway).toContain('ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH');
+    expect(gateway).toContain("purpose: 'chatgpt-actions-v1-bootstrap'");
+    expect(gateway).toContain('await ensureBootstrapApiKey()');
+    expect(deploy).toContain('BOOTSTRAP_KEY_HASH:');
+    expect(deploy).toContain('ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH=$BOOTSTRAP_KEY_HASH');
+    expect(deploy).not.toMatch(/zjg_[A-Za-z0-9_-]{20,}/);
+  });
+
+  it('records gateway UAT deployment evidence and verifies the unauthenticated boundary', () => {
+    expect(deploy).toContain('issues: write');
+    expect(deploy).toContain('ChatGPT Gateway UAT deployment evidence');
+    expect(deploy).toContain("test \"$STATUS\" = '401'");
+    expect(deploy).toContain('bootstrapKeyConfigured');
   });
 });
