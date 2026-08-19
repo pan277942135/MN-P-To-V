@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 const gateway = fs.readFileSync('chatgpt-gateway.ts', 'utf8');
 const schema = fs.readFileSync('chatgpt-action-openapi.yaml', 'utf8');
-const wrapper = fs.readFileSync('mvp-server-v022.ts', 'utf8');
+const wrapper = fs.readFileSync('mvp-server-v021.ts', 'utf8');
 
 describe('ChatGPT Actions gateway contract', () => {
   it('requires a hashed, revocable Bearer key for every v1 action', () => {
@@ -42,11 +42,10 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(schema).toContain('openaiFileIdRefs');
   });
 
-  it('exposes one-time key creation only from the IAP-protected MVP wrapper', () => {
+  it('exposes one-time key creation only from the existing IAP-protected MVP app', () => {
     expect(wrapper).toContain("app.post('/api/mvp/chatgpt/keys'");
     expect(wrapper).toContain('crypto.randomBytes(32)');
     expect(wrapper).toContain('CHATGPT_KEY_COLLECTION');
     expect(wrapper).toContain('keyHash');
-    expect(wrapper).toContain("import { createMvpAppV021 } from './mvp-server-v021'");
   });
 });
