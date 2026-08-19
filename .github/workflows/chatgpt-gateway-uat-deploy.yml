@@ -132,17 +132,26 @@ jobs:
           URL: ${{ steps.deploy.outputs.url }}
         run: |
           set -euo pipefail
-          curl -fsS "$URL/health" | tee health.json
+          HEALTH_STATUS="$(curl -sS -o health.json -w '%{http_code}' "$URL/health" || true)"
+          OPENAPI_STATUS="$(curl -sS -o openapi.yaml -w '%{http_code}' "$URL/openapi.yaml" || true)"
+          UNAUTH_STATUS="$(curl -sS -o unauthorized.json -w '%{http_code}' "$URL/v1/videos/test-task" || true)"
+          echo "health_status=$HEALTH_STATUS" >> "$GITHUB_OUTPUT"
+          echo "openapi_status=$OPENAPI_STATUS" >> "$GITHUB_OUTPUT"
+          echo "unauth_status=$UNAUTH_STATUS" >> "$GITHUB_OUTPUT"
+          echo '[verify] health:'
+          cat health.json || true
+          echo '[verify] unauthorized:'
+          cat unauthorized.json || true
+          test "$HEALTH_STATUS" = '200'
           grep -q '"status":"ok"' health.json
           grep -q 'zaojing-chatgpt-gateway' health.json
           grep -q '"upstreamAuthMode":"cloud-run-id-token"' health.json
           grep -q '"upstreamReachable":true' health.json
           grep -q '"bootstrapKeyConfigured":true' health.json
-          curl -fsS "$URL/openapi.yaml" | tee openapi.yaml
+          test "$OPENAPI_STATUS" = '200'
           grep -q "$URL" openapi.yaml
           grep -q 'openaiFileIdRefs' openapi.yaml
-          STATUS="$(curl -sS -o unauthorized.json -w '%{http_code}' "$URL/v1/videos/test-task")"
-          test "$STATUS" = '401'
+          test "$UNAUTH_STATUS" = '401'
 
       - name: Record deployment evidence
         if: always()
@@ -153,9 +162,14 @@ jobs:
           REVISION: ${{ steps.deploy.outputs.revision }}
           UPSTREAM_URL: ${{ steps.upstream.outputs.url }}
           UPSTREAM_REVISION: ${{ steps.upstream.outputs.revision }}
+          HEALTH_STATUS: ${{ steps.verify.outputs.health_status }}
+          OPENAPI_STATUS: ${{ steps.verify.outputs.openapi_status }}
+          UNAUTH_STATUS: ${{ steps.verify.outputs.unauth_status }}
         run: |
           set -euo pipefail
           STATUS='${{ job.status }}'
+          HEALTH_BODY="$(cat health.json 2>/dev/null || echo unavailable)"
+          UNAUTH_BODY="$(cat unauthorized.json 2>/dev/null || echo unavailable)"
           BODY=$(cat <<EOF
           ### ChatGPT Gateway UAT deployment evidence
           - Job status: \`$STATUS\`
@@ -170,7 +184,17 @@ jobs:
           - Upstream auth: \`Cloud Run IAM ID token\`
           - Bootstrap API-key hash configured: \`true\`
           - Step outcomes: checkout=\`${{ steps.checkout.outcome }}\`, auth=\`${{ steps.auth.outcome }}\`, setup=\`${{ steps.setup.outcome }}\`, upstream_image=\`${{ steps.upstream_image.outcome }}\`, upstream=\`${{ steps.upstream.outcome }}\`, gateway_image=\`${{ steps.gateway_image.outcome }}\`, deploy=\`${{ steps.deploy.outcome }}\`, verify=\`${{ steps.verify.outcome }}\`
-          - Verification: gateway health includes reachable authenticated upstream, generated OpenAPI points at gateway, unauthenticated \`/v1/* -> 401\`.
+          - HTTP verification: health=\`${HEALTH_STATUS:-unknown}\`, openapi=\`${OPENAPI_STATUS:-unknown}\`, unauthenticated_v1=\`${UNAUTH_STATUS:-unknown}\`
+
+          Health body:
+          \`\`\`json
+          $HEALTH_BODY
+          \`\`\`
+
+          Unauthenticated v1 body:
+          \`\`\`json
+          $UNAUTH_BODY
+          \`\`\`
           EOF
           )
           jq -nc --arg body "$BODY" '{body:$body}' > comment.json

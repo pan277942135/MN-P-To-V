@@ -77,10 +77,13 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(deploy).not.toMatch(/zjg_[A-Za-z0-9_-]{20,}/);
   });
 
-  it('records gateway UAT deployment evidence and verifies the unauthenticated boundary', () => {
+  it('records exact gateway UAT verification evidence and verifies the unauthenticated boundary', () => {
     expect(deploy).toContain('issues: write');
     expect(deploy).toContain('ChatGPT Gateway UAT deployment evidence');
-    expect(deploy).toContain("test \"$STATUS\" = '401'");
+    expect(deploy).toContain('HEALTH_STATUS=');
+    expect(deploy).toContain('OPENAPI_STATUS=');
+    expect(deploy).toContain('UNAUTH_STATUS=');
+    expect(deploy).toContain("test \"$UNAUTH_STATUS\" = '401'");
     expect(deploy).toContain('bootstrapKeyConfigured');
   });
 });
