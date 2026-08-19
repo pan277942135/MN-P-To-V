@@ -19,6 +19,7 @@ paths:
   /v1/images/preflight:
     post:
       operationId: preflightIdentityImage
+      security: []
       summary: Verify that one ChatGPT conversation image reaches Zaojing as valid image bytes.
       description: Validate one ChatGPT image reference without creating a task or calling Veo. Handled file-bridge failures return HTTP 200 with ok=false and diagnostics.
       x-openai-isConsequential: false
@@ -40,13 +41,12 @@ paths:
       responses:
         '200':
           description: Action-safe preflight result. Inspect ok, status, error and diagnostics; no video task or Veo call is created.
-        '401':
-          description: Invalid API key.
   /v1/videos:
     post:
       operationId: createIdentitySafeVideo
+      security: []
       summary: Create one Identity Safe video from exactly one image in the ChatGPT conversation.
-      description: Create an Identity Safe video from one uploaded image. Handled request, file-bridge and upstream outcomes return HTTP 200 so ChatGPT can inspect taskId and diagnostics safely.
+      description: UAT supports bounded direct ChatGPT calls. Always provide and reuse one stable idempotencyKey for the same intent; handled outcomes return HTTP 200.
       x-openai-isConsequential: true
       requestBody:
         required: true
@@ -54,7 +54,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [prompt, durationSeconds, openaiFileIdRefs]
+              required: [prompt, durationSeconds, idempotencyKey, openaiFileIdRefs]
               properties:
                 prompt:
                   type: string
@@ -65,7 +65,9 @@ paths:
                   enum: [4, 6, 8]
                 idempotencyKey:
                   type: string
-                  description: Stable key for safely retrying the same create request after a transport failure. Reuse the same value for the same user intent.
+                  minLength: 16
+                  maxLength: 200
+                  description: Stable random key for one user intent. Generate it once and reuse the exact same value on every retry of that intent.
                 openaiFileIdRefs:
                   type: array
                   minItems: 1
@@ -75,12 +77,13 @@ paths:
                   description: Exactly one JPG, PNG or WebP uploaded by the user in this conversation.
       responses:
         '200':
-          description: Action-safe create result. Inspect ok, status, taskId, taskCreated, providerCalled, error, inputFile and upstreamHttpStatus.
-        '401':
-          description: Invalid API key.
+          description: Action-safe create or recovery result. Inspect taskId, taskCreated, providerCalled, error, recoveredBy, inputFile and diagnostics.
+        '429':
+          description: UAT bounded direct-admission limit reached.
   /v1/videos/{taskId}:
     get:
       operationId: getIdentitySafeVideoTask
+      security: []
       summary: Get current generation and Identity QA status for a task.
       parameters:
         - in: path
@@ -90,11 +93,11 @@ paths:
       responses:
         '200': { description: Current task state. }
         '202': { description: Task is still running. }
-        '401': { description: Invalid API key. }
         '404': { description: Task not found. }
   /v1/videos/{taskId}/recover:
     post:
       operationId: recoverIdentitySafeVideoArtifact
+      security: []
       summary: Recover an already-generated provider artifact without submitting another Veo generation.
       description: Recover an existing provider artifact only. This operation must never create a new Veo attempt.
       x-openai-isConsequential: false
@@ -105,7 +108,6 @@ paths:
           schema: { type: string }
       responses:
         '200': { description: Existing artifact recovered or task updated. }
-        '401': { description: Invalid API key. }
         '404': { description: No recoverable artifact found. }
 components:
   schemas: {}
