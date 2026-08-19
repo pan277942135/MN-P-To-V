@@ -1,4 +1,4 @@
-name: TEMP ChatGPT UAT Smoke + Encrypted Key
+name: TEMP ChatGPT UAT Deploy + Smoke + Encrypted Key
 
 on:
   pull_request:
@@ -13,18 +13,23 @@ permissions:
 env:
   PROJECT_ID: xp-vertex-project
   REGION: us-central1
+  GAR_REPO: zaojing
   GATEWAY_SERVICE: zaojing-chatgpt-gateway-uat
   UPSTREAM_SERVICE: zaojing-mvp-simple-uat
   FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
   WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
   DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  MAIN_SHA: 56ca3c871a1c8d9e2b94c1e76bf0243035de0300
 
 jobs:
-  smoke:
+  deploy-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.MAIN_SHA }}
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
         with:
@@ -36,7 +41,42 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
-      - name: Verify gateway deployment and mint encrypted UAT bearer key
+      - name: Grant production gateway runtime permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+            --member="serviceAccount:$RUNTIME_SA" \
+            --role="roles/iap.httpsResourceAccessor" --quiet >/dev/null
+          gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
+            --project="$PROJECT_ID" \
+            --member="serviceAccount:$RUNTIME_SA" \
+            --role="roles/iam.serviceAccountTokenCreator" --quiet >/dev/null
+
+      - name: Build and deploy gateway from merged main
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$GATEWAY_SERVICE:$MAIN_SHA"
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker build -f Dockerfile.chatgpt-gateway -t "$IMAGE" .
+          docker push "$IMAGE"
+          UPSTREAM_URL="$(gcloud run services describe "$UPSTREAM_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          test -n "$UPSTREAM_URL"
+          gcloud run deploy "$GATEWAY_SERVICE" \
+            --project="$PROJECT_ID" --region="$REGION" --platform=managed \
+            --image="$IMAGE" \
+            --service-account="$RUNTIME_SA" \
+            --allow-unauthenticated --no-iap \
+            --cpu=1 --memory=1Gi --timeout=120 --concurrency=20 --min-instances=0 --max-instances=2 \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,ZAOJING_MVP_UPSTREAM_URL=$UPSTREAM_URL" \
+            --quiet
+          GATEWAY_URL="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          test -n "$GATEWAY_URL"
+          gcloud run services update "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" \
+            --update-env-vars="ZAOJING_CHATGPT_PUBLIC_URL=$GATEWAY_URL" --quiet >/dev/null
+
+      - name: Verify gateway and mint encrypted UAT bearer key
         shell: bash
         run: |
           set -euo pipefail
@@ -55,10 +95,22 @@ jobs:
           UNAUTH="$(curl -sS -o /tmp/unauth.json -w '%{http_code}' "$GATEWAY_URL/v1/videos/test-task")"
           test "$UNAUTH" = '401'
 
+          gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
+            --project="$PROJECT_ID" \
+            --member="serviceAccount:$DEPLOY_SA" \
+            --role="roles/iam.serviceAccountTokenCreator" --quiet >/dev/null
+          cleanup() {
+            gcloud iam service-accounts remove-iam-policy-binding "$RUNTIME_SA" \
+              --project="$PROJECT_ID" \
+              --member="serviceAccount:$DEPLOY_SA" \
+              --role="roles/iam.serviceAccountTokenCreator" --quiet >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
           API_KEY="zjg_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
           KEY_HASH="$(printf '%s' "$API_KEY" | sha256sum | awk '{print $1}')"
           CREATED_AT="$(date +%s%3N)"
-          ACCESS_TOKEN="$(gcloud auth print-access-token)"
+          ACCESS_TOKEN="$(gcloud auth print-access-token --impersonate-service-account="$RUNTIME_SA")"
           FIRESTORE_URL="https://firestore.googleapis.com/v1/projects/$PROJECT_ID/databases/$FIRESTORE_DATABASE_ID/documents/mvp_chatgpt_api_keys?documentId=$KEY_HASH"
           cat >/tmp/key-doc.json <<JSON
           {"fields":{"createdAt":{"integerValue":"$CREATED_AT"},"revokedAt":{"nullValue":null},"purpose":{"stringValue":"chatgpt-actions-v1-uat-smoke"}}}
@@ -70,8 +122,11 @@ jobs:
           fi
 
           AUTH_STATUS="$(curl -sS -o /tmp/auth.json -w '%{http_code}' "$GATEWAY_URL/v1/videos/test-task" -H "Authorization: Bearer $API_KEY")"
-          test "$AUTH_STATUS" = '404'
-          grep -q 'TASK_NOT_FOUND\|task_not_found\|null' /tmp/auth.json || true
+          if [ "$AUTH_STATUS" != '404' ]; then
+            echo "Authenticated GET returned HTTP $AUTH_STATUS"
+            cat /tmp/auth.json
+            exit 1
+          fi
           INVALID_CREATE_STATUS="$(curl -sS -o /tmp/invalid-create.json -w '%{http_code}' -X POST "$GATEWAY_URL/v1/videos" -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' --data '{}')"
           test "$INVALID_CREATE_STATUS" = '400'
           grep -q 'prompt_invalid' /tmp/invalid-create.json
