@@ -1,0 +1,97 @@
+name: TEMP ChatGPT UAT Smoke + Encrypted Key
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/tmp-chatgpt-uat-smoke-key.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  GATEWAY_SERVICE: zaojing-chatgpt-gateway-uat
+  UPSTREAM_SERVICE: zaojing-mvp-simple-uat
+  FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Verify gateway deployment and mint encrypted UAT bearer key
+        shell: bash
+        run: |
+          set -euo pipefail
+          GATEWAY_URL="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          GATEWAY_REVISION="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          UPSTREAM_URL="$(gcloud run services describe "$UPSTREAM_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          test -n "$GATEWAY_URL"
+          test -n "$GATEWAY_REVISION"
+          test -n "$UPSTREAM_URL"
+
+          HEALTH="$(curl -fsS "$GATEWAY_URL/health")"
+          echo "$HEALTH" | grep -q 'zaojing-chatgpt-gateway'
+          curl -fsS "$GATEWAY_URL/openapi.yaml" -o /tmp/openapi.yaml
+          grep -q "$GATEWAY_URL" /tmp/openapi.yaml
+          grep -q 'createIdentitySafeVideo' /tmp/openapi.yaml
+          UNAUTH="$(curl -sS -o /tmp/unauth.json -w '%{http_code}' "$GATEWAY_URL/v1/videos/test-task")"
+          test "$UNAUTH" = '401'
+
+          API_KEY="zjg_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+          KEY_HASH="$(printf '%s' "$API_KEY" | sha256sum | awk '{print $1}')"
+          CREATED_AT="$(date +%s%3N)"
+          ACCESS_TOKEN="$(gcloud auth print-access-token)"
+          FIRESTORE_URL="https://firestore.googleapis.com/v1/projects/$PROJECT_ID/databases/$FIRESTORE_DATABASE_ID/documents/mvp_chatgpt_api_keys?documentId=$KEY_HASH"
+          cat >/tmp/key-doc.json <<JSON
+          {"fields":{"createdAt":{"integerValue":"$CREATED_AT"},"revokedAt":{"nullValue":null},"purpose":{"stringValue":"chatgpt-actions-v1-uat-smoke"}}}
+          JSON
+          CREATE_STATUS="$(curl -sS -o /tmp/key-create.json -w '%{http_code}' -X POST "$FIRESTORE_URL" -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json' --data-binary @/tmp/key-doc.json)"
+          if [ "$CREATE_STATUS" != '200' ]; then
+            cat /tmp/key-create.json
+            exit 1
+          fi
+
+          AUTH_STATUS="$(curl -sS -o /tmp/auth.json -w '%{http_code}' "$GATEWAY_URL/v1/videos/test-task" -H "Authorization: Bearer $API_KEY")"
+          test "$AUTH_STATUS" = '404'
+          grep -q 'TASK_NOT_FOUND\|task_not_found\|null' /tmp/auth.json || true
+          INVALID_CREATE_STATUS="$(curl -sS -o /tmp/invalid-create.json -w '%{http_code}' -X POST "$GATEWAY_URL/v1/videos" -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' --data '{}')"
+          test "$INVALID_CREATE_STATUS" = '400'
+          grep -q 'prompt_invalid' /tmp/invalid-create.json
+
+          cat >/tmp/public.pem <<'PEM'
+          -----BEGIN PUBLIC KEY-----
+          MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA6DbnHy4c63Z5/5oViOuR
+          tf6HXA2hG9gcYCCAXjBwylaQgujBHnIDw/wRt3SGJGbvp0cOplaz1VP5xDj98wsJ
+          INZAplfoC1FVRurNf7U1pQBEktdAH/JJjPYnR+w5jiUthEXxjc+MwzMn0fp8BwVV
+          XjfSxDdlnx9h1ZXwDjxhqi0HGZP2YahpToPqbb+iH38p9yVVkxMhf82AKYti3r51
+          nNms5eFy77hGCdUrXSVqZaYbjxiCugZ6Ngf/8R6cBJErohaChe0+AnWG6Yr+rrSz
+          1BdOG9hrMenJ6TjESbyUjalzStKBLOsKSJU0iFOvyImiWLj7KlkhNTlvyjvaCVln
+          3QIDAQAB
+          -----END PUBLIC KEY-----
+          PEM
+          ENCRYPTED_API_KEY="$(printf '%s' "$API_KEY" | openssl pkeyutl -encrypt -pubin -inkey /tmp/public.pem -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 | base64 -w0)"
+
+          echo "GATEWAY_URL=$GATEWAY_URL"
+          echo "GATEWAY_REVISION=$GATEWAY_REVISION"
+          echo "OPENAPI_URL=$GATEWAY_URL/openapi.yaml"
+          echo "UPSTREAM_URL=$UPSTREAM_URL"
+          echo "AUTHENTICATED_GATEWAY_SMOKE=PASS"
+          echo "ENCRYPTED_API_KEY=$ENCRYPTED_API_KEY"
