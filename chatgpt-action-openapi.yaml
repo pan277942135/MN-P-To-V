@@ -20,7 +20,7 @@ paths:
     post:
       operationId: preflightIdentityImage
       summary: Verify that one ChatGPT conversation image reaches Zaojing as valid image bytes.
-      description: Download and validate one ChatGPT image reference without creating a video task or calling Veo. Use this to diagnose the Actions file bridge.
+      description: Validate one ChatGPT image reference without creating a task or calling Veo. Handled file-bridge failures return HTTP 200 with ok=false and diagnostics.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -38,15 +38,15 @@ paths:
                     type: string
                   description: Exactly one JPG, PNG or WebP uploaded by the user in this conversation.
       responses:
-        '200': { description: File bridge delivered valid image bytes. }
-        '400': { description: File reference or downloaded image bytes are invalid. }
-        '401': { description: Invalid API key. }
-        '502': { description: OpenAI file download failed. }
+        '200':
+          description: Action-safe preflight result. Inspect ok, status, error and diagnostics; no video task or Veo call is created.
+        '401':
+          description: Invalid API key.
   /v1/videos:
     post:
       operationId: createIdentitySafeVideo
       summary: Create one Identity Safe video from exactly one image in the ChatGPT conversation.
-      description: Create an Identity Safe video from one uploaded JPG, PNG, or WebP. ChatGPT supplies the image via openaiFileIdRefs. This is a billable Veo operation.
+      description: Create an Identity Safe video from one uploaded image. Handled request, file-bridge and upstream outcomes return HTTP 200 so ChatGPT can inspect taskId and diagnostics safely.
       x-openai-isConsequential: true
       requestBody:
         required: true
@@ -72,13 +72,12 @@ paths:
                   maxItems: 1
                   items:
                     type: string
-                  description: Exactly one JPG, PNG or WebP uploaded by the user in this conversation. ChatGPT supplies runtime file-reference objects including a short-lived download_link.
+                  description: Exactly one JPG, PNG or WebP uploaded by the user in this conversation.
       responses:
-        '200': { description: Existing idempotent task. }
-        '202': { description: Video task accepted and generating. }
-        '400': { description: Invalid prompt, duration, image reference, or downloaded image bytes. }
-        '401': { description: Invalid API key. }
-        '502': { description: OpenAI file download or upstream request failed. }
+        '200':
+          description: Action-safe create result. Inspect ok, status, taskId, taskCreated, providerCalled, error, inputFile and upstreamHttpStatus.
+        '401':
+          description: Invalid API key.
   /v1/videos/{taskId}:
     get:
       operationId: getIdentitySafeVideoTask
