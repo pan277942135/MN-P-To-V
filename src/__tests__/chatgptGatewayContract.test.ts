@@ -7,11 +7,22 @@ const wrapper = fs.readFileSync('mvp-server-v021.ts', 'utf8');
 const deploy = fs.readFileSync('.github/workflows/chatgpt-gateway-uat-deploy.yml', 'utf8');
 
 describe('ChatGPT Actions gateway contract', () => {
-  it('requires a hashed, revocable Bearer key for every v1 action', () => {
-    expect(gateway).toContain("app.use('/v1', authenticateApiKey)");
+  it('keeps hashed Bearer auth as the default while allowing an explicit bounded UAT direct override', () => {
+    expect(gateway).toContain("if (!UAT_DIRECT_MODE) app.use('/v1', authenticateApiKey)");
     expect(gateway).toContain("token.startsWith('zjg_')");
     expect(gateway).toContain("collection(KEY_COLLECTION).doc(sha256(token))");
     expect(gateway).toContain('revokedAt');
+    expect(gateway).toContain('ZAOJING_CHATGPT_UAT_DIRECT');
+    expect(deploy).toContain('ZAOJING_CHATGPT_UAT_DIRECT=true');
+  });
+
+  it('bounds direct UAT creation with a Firestore-backed daily new-intent quota', () => {
+    expect(gateway).toContain('UAT_DIRECT_DAILY_LIMIT');
+    expect(gateway).toContain("UAT_ADMISSION_COLLECTION = 'mvp_chatgpt_uat_admissions'");
+    expect(gateway).toContain("UAT_QUOTA_COLLECTION = 'mvp_chatgpt_uat_daily_quota'");
+    expect(gateway).toContain('admitUatDirectIntent');
+    expect(gateway).toContain("requestRejected('uat_direct_daily_limit_reached'");
+    expect(deploy).toContain("UAT_DIRECT_DAILY_LIMIT: '12'");
   });
 
   it('accepts only short-lived OpenAI-hosted conversation image download URLs', () => {
@@ -74,17 +85,23 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(gateway).toContain('inputFile: image.diagnostics');
   });
 
-  it('makes create return an observable action-safe result even when the private upstream returns non-2xx', () => {
+  it('requires a stable idempotency key in direct UAT mode and recovers durable tasks before resubmission', () => {
+    expect(gateway).toContain("requestRejected('idempotency_key_required_in_uat_direct_mode')");
+    expect(gateway).toContain("upstream('/api/mvp/videos/lookup'");
+    expect(gateway).toContain("recoveredBy: 'idempotency_lookup_before_submit'");
+    expect(gateway).toContain("recoveredBy: 'idempotency_lookup_after_transport_failure'");
+    expect(schema).toContain('required: [prompt, durationSeconds, idempotencyKey, openaiFileIdRefs]');
+  });
+
+  it('makes create return an observable action-safe result even when the private upstream transport fails', () => {
     const videoStart = gateway.indexOf("app.post('/v1/videos'");
     const getStart = gateway.indexOf("app.get('/v1/videos/:taskId'");
     const createBlock = gateway.slice(videoStart, getStart);
     expect(createBlock).toContain('return res.status(200).json');
-    expect(createBlock).toContain('upstreamHttpStatus: response.status');
-    expect(createBlock).toContain('taskCreated: Boolean(body?.taskId)');
-    expect(createBlock).toContain('providerCalled: inferProviderCalled(body)');
     expect(createBlock).toContain("status: 'UPSTREAM_OUTCOME_UNKNOWN'");
+    expect(createBlock).toContain('UPSTREAM_REQUEST_AND_LOOKUP_FAILED');
+    expect(createBlock).toContain('UPSTREAM_REQUEST_FAILED_NO_TASK_FOUND');
     expect(createBlock).toContain('Retry createIdentitySafeVideo with the same idempotencyKey only');
-    expect(schema).toContain('Handled request, file-bridge and upstream outcomes return HTTP 200');
   });
 
   it('reuses the existing Identity Safe start/status/recover pipeline instead of bypassing it', () => {
@@ -112,10 +129,12 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(deploy).not.toContain('roles/iam.serviceAccountTokenCreator');
   });
 
-  it('makes public gateway health prove authenticated upstream reachability', () => {
+  it('makes public gateway health prove authenticated upstream reachability and UAT direct mode', () => {
     expect(gateway).toContain("await upstream('/api/mvp/health')");
     expect(gateway).toContain('upstreamReachable');
+    expect(gateway).toContain('uatDirectMode');
     expect(deploy).toContain("grep -q '\"upstreamReachable\":true' health.json");
+    expect(deploy).toContain("grep -q '\"uatDirectMode\":true' health.json");
   });
 
   it('marks Veo creation consequential and recovery non-consequential', () => {
@@ -140,7 +159,7 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(wrapper).toContain('keyHash');
   });
 
-  it('supports a hash-only UAT bootstrap key without storing plaintext credentials in source', () => {
+  it('supports a hash-only bootstrap key without storing plaintext credentials in source', () => {
     expect(gateway).toContain('ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH');
     expect(gateway).toContain("purpose: 'chatgpt-actions-v1-bootstrap'");
     expect(gateway).toContain('await ensureBootstrapApiKey()');
@@ -149,13 +168,13 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(deploy).not.toMatch(/zjg_[A-Za-z0-9_-]{20,}/);
   });
 
-  it('records exact gateway UAT verification evidence and verifies the unauthenticated boundary', () => {
+  it('records exact gateway UAT evidence and verifies the bounded direct action boundary', () => {
     expect(deploy).toContain('issues: write');
     expect(deploy).toContain('ChatGPT Gateway UAT deployment evidence');
     expect(deploy).toContain('HEALTH_STATUS=');
     expect(deploy).toContain('OPENAPI_STATUS=');
-    expect(deploy).toContain('UNAUTH_STATUS=');
-    expect(deploy).toContain("test \"$UNAUTH_STATUS\" = '401'");
-    expect(deploy).toContain('bootstrapKeyConfigured');
+    expect(deploy).toContain('DIRECT_STATUS=');
+    expect(deploy).toContain("test \"$DIRECT_STATUS\" = '200'");
+    expect(deploy).toContain('uatDirectMode');
   });
 });

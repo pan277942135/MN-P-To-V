@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'chatgpt-gateway.ts'
+      - 'chatgpt-action-openapi.yaml'
       - '.github/workflows/chatgpt-preflight-smoke.yml'
   workflow_dispatch:
 
@@ -39,11 +40,21 @@ jobs:
             .diagnostics.referenceKind == "string_file_id"
           ' preflight.json >/dev/null
 
-      - name: Verify billable video routes remain authenticated
+      - name: Verify bounded direct UAT create reaches action-safe handler without Bearer
         shell: bash
         run: |
           set -euo pipefail
-          STATUS="$(curl -sS -o unauthorized.json -w '%{http_code}' "$GATEWAY_URL/v1/videos/test-task")"
-          cat unauthorized.json
-          test "$STATUS" = '401'
-          jq -e '.error == "invalid_api_key"' unauthorized.json >/dev/null
+          STATUS="$(curl -sS -o direct.json -w '%{http_code}' \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            --data '{"prompt":"uat smoke","durationSeconds":4,"idempotencyKey":"uat-direct-smoke-00000001","openaiFileIdRefs":[]}' \
+            "$GATEWAY_URL/v1/videos")"
+          cat direct.json
+          test "$STATUS" = '200'
+          jq -e '
+            .ok == false and
+            .status == "REQUEST_REJECTED" and
+            .error == "exactly_one_image_required" and
+            .taskCreated == false and
+            .providerCalled == false
+          ' direct.json >/dev/null

@@ -10,7 +10,11 @@ const UPSTREAM_AUTH_MODE = String(process.env.ZAOJING_UPSTREAM_AUTH_MODE || 'iap
 const PUBLIC_URL = String(process.env.ZAOJING_CHATGPT_PUBLIC_URL || '').replace(/\/+$/, '');
 const RUNTIME_SA = String(process.env.RUNTIME_SERVICE_ACCOUNT_EMAIL || '');
 const BOOTSTRAP_KEY_HASH = String(process.env.ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH || '').trim().toLowerCase();
+const UAT_DIRECT_MODE = String(process.env.ZAOJING_CHATGPT_UAT_DIRECT || '').trim().toLowerCase() === 'true';
+const UAT_DIRECT_DAILY_LIMIT = Math.max(1, Math.min(100, Number(process.env.ZAOJING_CHATGPT_UAT_DAILY_LIMIT || 12) || 12));
 const KEY_COLLECTION = 'mvp_chatgpt_api_keys';
+const UAT_ADMISSION_COLLECTION = 'mvp_chatgpt_uat_admissions';
+const UAT_QUOTA_COLLECTION = 'mvp_chatgpt_uat_daily_quota';
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const SUPPORTED_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp'] as const;
 const auth = new GoogleAuth();
@@ -33,6 +37,14 @@ type OpenAIImageDiagnostics = {
 };
 type DownloadedOpenAIImage = { bytes: Buffer; mimeType: SupportedImageMime; name: string; diagnostics: OpenAIImageDiagnostics };
 
+type UatAdmission = {
+  allowed: boolean;
+  existingIntent: boolean;
+  day: string;
+  count: number;
+  limit: number;
+};
+
 class OpenAIFileBridgeError extends Error {
   constructor(public code: string, public diagnostics: Partial<OpenAIImageDiagnostics> = {}) {
     super(code);
@@ -44,6 +56,7 @@ function bearer(req: express.Request): string {
   const value = String(req.header('authorization') || '');
   return value.toLowerCase().startsWith('bearer ') ? value.slice(7).trim() : '';
 }
+function utcDayKey(): string { return new Date().toISOString().slice(0, 10); }
 
 async function ensureBootstrapApiKey(): Promise<void> {
   if (!BOOTSTRAP_KEY_HASH) return;
@@ -69,6 +82,32 @@ async function authenticateApiKey(req: express.Request, res: express.Response, n
     res.locals.chatgptKeyId = snap.id;
     return next();
   } catch (error: any) { return res.status(500).json({ error: 'authentication_failed', detail: String(error?.message || error) }); }
+}
+
+async function admitUatDirectIntent(idempotencyKey: string): Promise<UatAdmission> {
+  const day = utcDayKey();
+  if (!UAT_DIRECT_MODE) return { allowed: true, existingIntent: false, day, count: 0, limit: UAT_DIRECT_DAILY_LIMIT };
+  const db = getFirestoreInstance();
+  if (!db) throw new Error('FIRESTORE_UNAVAILABLE_FOR_UAT_ADMISSION');
+  const intentHash = sha256(idempotencyKey);
+  const admissionRef = db.collection(UAT_ADMISSION_COLLECTION).doc(intentHash);
+  const quotaRef = db.collection(UAT_QUOTA_COLLECTION).doc(day);
+  return db.runTransaction(async (tx) => {
+    const admissionSnap = await tx.get(admissionRef);
+    if (admissionSnap.exists) {
+      const savedCount = Number(admissionSnap.data()?.dayCount || 0);
+      return { allowed: true, existingIntent: true, day, count: savedCount, limit: UAT_DIRECT_DAILY_LIMIT };
+    }
+    const quotaSnap = await tx.get(quotaRef);
+    const count = Number(quotaSnap.data()?.count || 0);
+    if (count >= UAT_DIRECT_DAILY_LIMIT) {
+      return { allowed: false, existingIntent: false, day, count, limit: UAT_DIRECT_DAILY_LIMIT };
+    }
+    const nextCount = count + 1;
+    tx.create(admissionRef, { idempotencyKeyHash: intentHash, day, dayCount: nextCount, createdAt: Date.now() });
+    tx.set(quotaRef, { day, count: nextCount, updatedAt: Date.now() }, { merge: true });
+    return { allowed: true, existingIntent: false, day, count: nextCount, limit: UAT_DIRECT_DAILY_LIMIT };
+  });
 }
 
 function allowedOpenAIFileUrl(raw: string): boolean {
@@ -257,6 +296,18 @@ async function responseJson(response: Response): Promise<any> {
   try { return JSON.parse(text); } catch { return { error: 'upstream_non_json', httpStatus: response.status }; }
 }
 
+async function lookupUpstreamTask(idempotencyKey: string): Promise<any | null> {
+  const response = await upstream('/api/mvp/videos/lookup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idempotencyKey }),
+  });
+  if (response.status === 404) return null;
+  const body = await responseJson(response);
+  if (!response.ok) throw new Error(`UPSTREAM_LOOKUP_HTTP_${response.status}`);
+  return body?.taskId ? body : null;
+}
+
 function actionTask(task: any) {
   return {
     taskId: task?.taskId || null,
@@ -299,6 +350,20 @@ function requestRejected(error: string, idempotencyKey: string | null = null, de
   };
 }
 
+function actionEnvelope(body: any, upstreamHttpStatus: number, idempotencyKey: string, inputFile: OpenAIImageDiagnostics, extra: Record<string, unknown> = {}) {
+  return {
+    ok: upstreamHttpStatus >= 200 && upstreamHttpStatus < 300,
+    upstreamHttpStatus,
+    ...actionTask(body),
+    taskCreated: Boolean(body?.taskId),
+    providerCalled: inferProviderCalled(body),
+    idempotencyKey,
+    inputFile,
+    authMode: UAT_DIRECT_MODE ? 'uat_direct_bounded' : 'bearer',
+    ...extra,
+  };
+}
+
 export function createChatGptGatewayApp() {
   const app = express();
   app.disable('x-powered-by');
@@ -316,6 +381,8 @@ export function createChatGptGatewayApp() {
         upstreamReachable,
         upstreamStatus: upstreamHealth.status,
         bootstrapKeyConfigured: Boolean(BOOTSTRAP_KEY_HASH),
+        uatDirectMode: UAT_DIRECT_MODE,
+        uatDirectDailyLimit: UAT_DIRECT_MODE ? UAT_DIRECT_DAILY_LIMIT : null,
       });
     } catch {
       return res.status(503).json({
@@ -326,6 +393,8 @@ export function createChatGptGatewayApp() {
         upstreamAuthMode: UPSTREAM_AUTH_MODE,
         upstreamReachable: false,
         bootstrapKeyConfigured: Boolean(BOOTSTRAP_KEY_HASH),
+        uatDirectMode: UAT_DIRECT_MODE,
+        uatDirectDailyLimit: UAT_DIRECT_MODE ? UAT_DIRECT_DAILY_LIMIT : null,
       });
     }
   });
@@ -335,8 +404,7 @@ export function createChatGptGatewayApp() {
     return res.type('application/yaml').send(template.replace('https://zaojing-chatgpt-gateway-uat-REPLACE.run.app', origin));
   });
 
-  // Keep the non-billable file-bridge preflight outside API-key auth so a stale
-  // ChatGPT Action credential cannot mask the actual conversation-file payload.
+  // Preflight is non-billable and always public so ChatGPT can diagnose the conversation-file bridge.
   app.post('/v1/images/preflight', async (req, res) => {
     const refs = Array.isArray(req.body?.openaiFileIdRefs) ? req.body.openaiFileIdRefs as OpenAIFileRef[] : [];
     if (refs.length !== 1) {
@@ -357,13 +425,18 @@ export function createChatGptGatewayApp() {
     }
   });
 
-  app.use('/v1', authenticateApiKey);
+  // Production/default mode remains Bearer-protected. The dedicated UAT deployment may
+  // explicitly enable bounded direct mode so ChatGPT can exercise the real file→Veo path
+  // even when its Action credential is stale or unavailable.
+  if (!UAT_DIRECT_MODE) app.use('/v1', authenticateApiKey);
 
   app.post('/v1/videos', async (req, res) => {
     const prompt = String(req.body?.prompt || '').trim();
     const durationSeconds = Number(req.body?.durationSeconds || 4);
     const refs = Array.isArray(req.body?.openaiFileIdRefs) ? req.body.openaiFileIdRefs as OpenAIFileRef[] : [];
-    const idempotencyKey = String(req.body?.idempotencyKey || `chatgpt_${crypto.randomUUID()}`);
+    const suppliedIdempotencyKey = String(req.body?.idempotencyKey || '').trim();
+    if (UAT_DIRECT_MODE && !suppliedIdempotencyKey) return res.status(200).json(requestRejected('idempotency_key_required_in_uat_direct_mode'));
+    const idempotencyKey = suppliedIdempotencyKey || `chatgpt_${crypto.randomUUID()}`;
 
     if (!prompt || prompt.length > 12_000) return res.status(200).json(requestRejected('prompt_invalid', idempotencyKey));
     if (![4, 6, 8].includes(durationSeconds)) return res.status(200).json(requestRejected('duration_invalid', idempotencyKey));
@@ -376,6 +449,44 @@ export function createChatGptGatewayApp() {
       return res.status(200).json(actionSafeFileBridgeFailure(error, 'create_video_file_bridge_failed', { idempotencyKey }));
     }
 
+    let admission: UatAdmission | null = null;
+    if (UAT_DIRECT_MODE) {
+      try {
+        admission = await admitUatDirectIntent(idempotencyKey);
+      } catch (error: any) {
+        return res.status(200).json({
+          ok: false,
+          status: 'GATEWAY_ERROR',
+          taskCreated: false,
+          providerCalled: false,
+          error: 'UAT_ADMISSION_FAILED',
+          stage: 'action_gateway',
+          retryable: true,
+          idempotencyKey,
+          inputFile: image.diagnostics,
+          diagnostics: { message: String(error?.message || error) },
+        });
+      }
+      if (!admission.allowed) {
+        return res.status(200).json(requestRejected('uat_direct_daily_limit_reached', idempotencyKey, { admission }));
+      }
+    }
+
+    // A retry with the same intent first asks the durable upstream idempotency index.
+    // If the first HTTP response was lost after task creation, this returns taskId without
+    // performing another provider submission.
+    try {
+      const existing = await lookupUpstreamTask(idempotencyKey);
+      if (existing) {
+        return res.status(200).json(actionEnvelope(existing, 200, idempotencyKey, image.diagnostics, {
+          recoveredBy: 'idempotency_lookup_before_submit',
+          admission,
+        }));
+      }
+    } catch {
+      // Continue to the idempotent start route. The same key is still the safety boundary.
+    }
+
     const form = new FormData();
     form.append('image', new Blob([image.bytes], { type: image.mimeType }), image.name);
     form.append('prompt', prompt);
@@ -385,28 +496,52 @@ export function createChatGptGatewayApp() {
     try {
       const response = await upstream('/api/mvp/videos/start', { method: 'POST', headers: { 'x-idempotency-key': idempotencyKey }, body: form });
       const body = await responseJson(response);
-      return res.status(200).json({
-        ok: response.ok,
-        upstreamHttpStatus: response.status,
-        ...actionTask(body),
-        taskCreated: Boolean(body?.taskId),
-        providerCalled: inferProviderCalled(body),
-        idempotencyKey,
-        inputFile: image.diagnostics,
-      });
-    } catch {
+      return res.status(200).json(actionEnvelope(body, response.status, idempotencyKey, image.diagnostics, { admission }));
+    } catch (startError: any) {
+      // If transport failed after the upstream committed the idempotency/task records,
+      // recover that task immediately instead of making ChatGPT guess whether it exists.
+      try {
+        const recovered = await lookupUpstreamTask(idempotencyKey);
+        if (recovered) {
+          return res.status(200).json(actionEnvelope(recovered, 200, idempotencyKey, image.diagnostics, {
+            recoveredBy: 'idempotency_lookup_after_transport_failure',
+            admission,
+          }));
+        }
+      } catch (lookupError: any) {
+        return res.status(200).json({
+          ok: false,
+          status: 'UPSTREAM_OUTCOME_UNKNOWN',
+          taskId: null,
+          taskCreated: null,
+          providerCalled: null,
+          stage: 'action_upstream_transport',
+          error: 'UPSTREAM_REQUEST_AND_LOOKUP_FAILED',
+          retryable: true,
+          idempotencyKey,
+          inputFile: image.diagnostics,
+          admission,
+          diagnostics: {
+            startError: String(startError?.message || startError),
+            lookupError: String(lookupError?.message || lookupError),
+          },
+          recommendedAction: 'Retry createIdentitySafeVideo with the same idempotencyKey only.',
+        });
+      }
       return res.status(200).json({
         ok: false,
         status: 'UPSTREAM_OUTCOME_UNKNOWN',
         taskId: null,
-        taskCreated: null,
-        providerCalled: null,
+        taskCreated: false,
+        providerCalled: false,
         stage: 'action_upstream_transport',
-        error: 'UPSTREAM_REQUEST_FAILED',
+        error: 'UPSTREAM_REQUEST_FAILED_NO_TASK_FOUND',
         retryable: true,
         idempotencyKey,
         inputFile: image.diagnostics,
-        recommendedAction: 'Retry createIdentitySafeVideo with the same idempotencyKey only. Do not generate a new key for the same intent.',
+        admission,
+        diagnostics: { startError: String(startError?.message || startError), lookupResult: 'not_found' },
+        recommendedAction: 'Retry createIdentitySafeVideo with the same idempotencyKey only.',
       });
     }
   });
@@ -433,7 +568,7 @@ export function createChatGptGatewayApp() {
 export async function startChatGptGateway() {
   await ensureBootstrapApiKey();
   const app = createChatGptGatewayApp();
-  return app.listen(PORT, '0.0.0.0', () => console.log(`[ZAOJING_CHATGPT_GATEWAY] listening on :${PORT}; upstreamAuth=${UPSTREAM_AUTH_MODE}`));
+  return app.listen(PORT, '0.0.0.0', () => console.log(`[ZAOJING_CHATGPT_GATEWAY] listening on :${PORT}; upstreamAuth=${UPSTREAM_AUTH_MODE}; uatDirect=${UAT_DIRECT_MODE}`));
 }
 
 if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) void startChatGptGateway();
