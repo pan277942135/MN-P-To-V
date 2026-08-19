@@ -430,6 +430,55 @@ export function createChatGptGatewayApp() {
   // even when its Action credential is stale or unavailable.
   if (!UAT_DIRECT_MODE) app.use('/v1', authenticateApiKey);
 
+  app.post('/v1/videos/resolve', async (req, res) => {
+    const idempotencyKey = String(req.body?.idempotencyKey || '').trim();
+    if (!idempotencyKey || idempotencyKey.length < 16 || idempotencyKey.length > 200) {
+      return res.status(200).json(requestRejected('idempotency_key_invalid', idempotencyKey || null));
+    }
+    try {
+      const task = await lookupUpstreamTask(idempotencyKey);
+      if (!task) {
+        return res.status(200).json({
+          ok: true,
+          status: 'INTENT_NOT_FOUND',
+          taskId: null,
+          taskCreated: false,
+          providerCalled: false,
+          stage: 'action_intent_resolve',
+          error: null,
+          retryable: false,
+          idempotencyKey,
+          recoveredBy: 'durable_idempotency_lookup',
+          authMode: UAT_DIRECT_MODE ? 'uat_direct_bounded' : 'bearer',
+          recommendedAction: 'No durable task exists for this intent. Classify it as pre-durable-task/client-to-gateway and do not infer a provider failure.',
+        });
+      }
+      return res.status(200).json({
+        ok: true,
+        ...actionTask(task),
+        taskCreated: true,
+        providerCalled: inferProviderCalled(task),
+        idempotencyKey,
+        recoveredBy: 'durable_idempotency_lookup',
+        authMode: UAT_DIRECT_MODE ? 'uat_direct_bounded' : 'bearer',
+      });
+    } catch (error: any) {
+      return res.status(200).json({
+        ok: false,
+        status: 'RESOLVE_FAILED',
+        taskId: null,
+        taskCreated: null,
+        providerCalled: null,
+        stage: 'action_intent_resolve',
+        error: 'UPSTREAM_LOOKUP_FAILED',
+        retryable: true,
+        idempotencyKey,
+        diagnostics: { message: String(error?.message || error) },
+        recommendedAction: 'Retry resolveIdentitySafeVideoIntent with the same idempotencyKey. Do not call create again until resolve is conclusive.',
+      });
+    }
+  });
+
   app.post('/v1/videos', async (req, res) => {
     const prompt = String(req.body?.prompt || '').trim();
     const durationSeconds = Number(req.body?.durationSeconds || 4);
@@ -525,7 +574,7 @@ export function createChatGptGatewayApp() {
             startError: String(startError?.message || startError),
             lookupError: String(lookupError?.message || lookupError),
           },
-          recommendedAction: 'Retry createIdentitySafeVideo with the same idempotencyKey only.',
+          recommendedAction: 'Call resolveIdentitySafeVideoIntent with the same idempotencyKey before any create retry.',
         });
       }
       return res.status(200).json({
@@ -541,7 +590,7 @@ export function createChatGptGatewayApp() {
         inputFile: image.diagnostics,
         admission,
         diagnostics: { startError: String(startError?.message || startError), lookupResult: 'not_found' },
-        recommendedAction: 'Retry createIdentitySafeVideo with the same idempotencyKey only.',
+        recommendedAction: 'Call resolveIdentitySafeVideoIntent with the same idempotencyKey before any create retry.',
       });
     }
   });
