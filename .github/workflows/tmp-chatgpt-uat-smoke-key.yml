@@ -41,18 +41,6 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
-      - name: Grant production gateway runtime permissions
-        shell: bash
-        run: |
-          set -euo pipefail
-          gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-            --member="serviceAccount:$RUNTIME_SA" \
-            --role="roles/iap.httpsResourceAccessor" --quiet >/dev/null
-          gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
-            --project="$PROJECT_ID" \
-            --member="serviceAccount:$RUNTIME_SA" \
-            --role="roles/iam.serviceAccountTokenCreator" --quiet >/dev/null
-
       - name: Build and deploy gateway from merged main
         shell: bash
         run: |
@@ -76,17 +64,13 @@ jobs:
           gcloud run services update "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" \
             --update-env-vars="ZAOJING_CHATGPT_PUBLIC_URL=$GATEWAY_URL" --quiet >/dev/null
 
-      - name: Verify gateway and mint encrypted UAT bearer key
+      - name: Verify public surface and mint encrypted UAT bearer key
         shell: bash
         run: |
           set -euo pipefail
           GATEWAY_URL="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
           GATEWAY_REVISION="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
           UPSTREAM_URL="$(gcloud run services describe "$UPSTREAM_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
-          test -n "$GATEWAY_URL"
-          test -n "$GATEWAY_REVISION"
-          test -n "$UPSTREAM_URL"
-
           HEALTH="$(curl -fsS "$GATEWAY_URL/health")"
           echo "$HEALTH" | grep -q 'zaojing-chatgpt-gateway'
           curl -fsS "$GATEWAY_URL/openapi.yaml" -o /tmp/openapi.yaml
@@ -95,35 +79,24 @@ jobs:
           UNAUTH="$(curl -sS -o /tmp/unauth.json -w '%{http_code}' "$GATEWAY_URL/v1/videos/test-task")"
           test "$UNAUTH" = '401'
 
-          gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
-            --project="$PROJECT_ID" \
-            --member="serviceAccount:$DEPLOY_SA" \
-            --role="roles/iam.serviceAccountTokenCreator" --quiet >/dev/null
-          cleanup() {
-            gcloud iam service-accounts remove-iam-policy-binding "$RUNTIME_SA" \
-              --project="$PROJECT_ID" \
-              --member="serviceAccount:$DEPLOY_SA" \
-              --role="roles/iam.serviceAccountTokenCreator" --quiet >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-
           API_KEY="zjg_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
           KEY_HASH="$(printf '%s' "$API_KEY" | sha256sum | awk '{print $1}')"
           CREATED_AT="$(date +%s%3N)"
-          ACCESS_TOKEN="$(gcloud auth print-access-token --impersonate-service-account="$RUNTIME_SA")"
+          ACCESS_TOKEN="$(gcloud auth print-access-token)"
           FIRESTORE_URL="https://firestore.googleapis.com/v1/projects/$PROJECT_ID/databases/$FIRESTORE_DATABASE_ID/documents/mvp_chatgpt_api_keys?documentId=$KEY_HASH"
           cat >/tmp/key-doc.json <<JSON
           {"fields":{"createdAt":{"integerValue":"$CREATED_AT"},"revokedAt":{"nullValue":null},"purpose":{"stringValue":"chatgpt-actions-v1-uat-smoke"}}}
           JSON
           CREATE_STATUS="$(curl -sS -o /tmp/key-create.json -w '%{http_code}' -X POST "$FIRESTORE_URL" -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json' --data-binary @/tmp/key-doc.json)"
           if [ "$CREATE_STATUS" != '200' ]; then
+            echo "FIRESTORE_KEY_CREATE_HTTP=$CREATE_STATUS"
             cat /tmp/key-create.json
             exit 1
           fi
 
           AUTH_STATUS="$(curl -sS -o /tmp/auth.json -w '%{http_code}' "$GATEWAY_URL/v1/videos/test-task" -H "Authorization: Bearer $API_KEY")"
           if [ "$AUTH_STATUS" != '404' ]; then
-            echo "Authenticated GET returned HTTP $AUTH_STATUS"
+            echo "AUTHENTICATED_GATEWAY_HTTP=$AUTH_STATUS"
             cat /tmp/auth.json
             exit 1
           fi
@@ -143,7 +116,6 @@ jobs:
           -----END PUBLIC KEY-----
           PEM
           ENCRYPTED_API_KEY="$(printf '%s' "$API_KEY" | openssl pkeyutl -encrypt -pubin -inkey /tmp/public.pem -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 | base64 -w0)"
-
           echo "GATEWAY_URL=$GATEWAY_URL"
           echo "GATEWAY_REVISION=$GATEWAY_REVISION"
           echo "OPENAPI_URL=$GATEWAY_URL/openapi.yaml"
