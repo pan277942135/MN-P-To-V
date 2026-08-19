@@ -7,6 +7,7 @@ import { getFirestoreInstance } from './src/server/db/firestore';
 const PORT = Number(process.env.PORT || 8080);
 const UPSTREAM_URL = String(process.env.ZAOJING_MVP_UPSTREAM_URL || '').replace(/\/+$/, '');
 const PUBLIC_URL = String(process.env.ZAOJING_CHATGPT_PUBLIC_URL || '').replace(/\/+$/, '');
+const RUNTIME_SA = String(process.env.RUNTIME_SERVICE_ACCOUNT_EMAIL || '');
 const KEY_COLLECTION = 'mvp_chatgpt_api_keys';
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const auth = new GoogleAuth();
@@ -59,11 +60,36 @@ async function downloadOpenAIImage(ref: OpenAIFileRef): Promise<{ bytes: Buffer;
   } finally { clearTimeout(timer); }
 }
 
+let cachedIapJwt: { token: string; expiresAt: number } | null = null;
+
+async function getIapServiceJwt(): Promise<string> {
+  if (cachedIapJwt && cachedIapJwt.expiresAt - Date.now() > 60_000) return cachedIapJwt.token;
+  if (!RUNTIME_SA) throw new Error('RUNTIME_SERVICE_ACCOUNT_EMAIL is missing');
+  const client = await auth.getClient();
+  const tokenResult = await client.getAccessToken();
+  const accessToken = typeof tokenResult === 'string' ? tokenResult : tokenResult?.token;
+  if (!accessToken) throw new Error('ADC_ACCESS_TOKEN_UNAVAILABLE');
+  const iat = Math.floor(Date.now() / 1000);
+  const exp = iat + 3000;
+  const payload = JSON.stringify({ iss: RUNTIME_SA, sub: RUNTIME_SA, aud: UPSTREAM_URL + '/*', iat, exp });
+  const response = await fetch(`https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(RUNTIME_SA)}:signJwt`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ payload }),
+  });
+  const body = await response.json() as any;
+  if (!response.ok || !body?.signedJwt) throw new Error('IAP_SIGN_JWT_FAILED: ' + JSON.stringify(body));
+  cachedIapJwt = { token: String(body.signedJwt), expiresAt: exp * 1000 };
+  return cachedIapJwt.token;
+}
+
 async function upstream(path: string, init: RequestInit = {}): Promise<Response> {
   if (!UPSTREAM_URL) throw new Error('ZAOJING_MVP_UPSTREAM_URL is missing');
-  const client = await auth.getIdTokenClient(UPSTREAM_URL);
-  const headers = await client.getRequestHeaders();
-  return fetch(`${UPSTREAM_URL}${path}`, { ...init, headers: { ...Object.fromEntries(new Headers(init.headers).entries()), ...headers } });
+  const iapJwt = await getIapServiceJwt();
+  return fetch(`${UPSTREAM_URL}${path}`, {
+    ...init,
+    headers: { ...Object.fromEntries(new Headers(init.headers).entries()), Authorization: `Bearer ${iapJwt}` },
+  });
 }
 
 async function responseJson(response: Response): Promise<any> {

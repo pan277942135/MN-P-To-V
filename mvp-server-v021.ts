@@ -7,6 +7,7 @@ import type { MvpVideoTask } from './src/mvp/mvpContract';
 const PORT = Number(process.env.PORT || 8080);
 const TASK_COLLECTION = 'mvp_video_tasks';
 const IDEMPOTENCY_COLLECTION = 'mvp_video_idempotency';
+const CHATGPT_KEY_COLLECTION = 'mvp_chatgpt_api_keys';
 const CLIENT_VERSION = 'identity-safe-v0.2.1-network-hardening';
 
 function sha256(input: string): string {
@@ -267,6 +268,24 @@ export async function createMvpAppV021() {
       return res.json(publicTask(taskSnap.data() as MvpVideoTask));
     } catch (error: any) {
       return res.status(500).json({ error: { code: 'LOOKUP_FAILED', message: String(error?.message || error) } });
+    }
+  });
+
+  app.post('/api/mvp/chatgpt/keys', async (_req, res) => {
+    try {
+      const db = getFirestoreInstance();
+      if (!db) return res.status(503).json({ error: { code: 'FIRESTORE_UNAVAILABLE', message: 'Firestore unavailable.' } });
+      const apiKey = 'zjg_' + crypto.randomBytes(32).toString('base64url');
+      const keyHash = sha256(apiKey);
+      const createdAt = Date.now();
+      await db.collection(CHATGPT_KEY_COLLECTION).doc(keyHash).create({ createdAt, revokedAt: null, purpose: 'chatgpt-actions-v1' });
+      return res.status(201).json({
+        apiKey,
+        createdAt,
+        warning: 'This key is shown once. Store it in the GPT Action Bearer API-key configuration; do not paste it into GPT instructions or source code.',
+      });
+    } catch (error: any) {
+      return res.status(500).json({ error: { code: 'CHATGPT_KEY_CREATE_FAILED', message: String(error?.message || error) } });
     }
   });
 
