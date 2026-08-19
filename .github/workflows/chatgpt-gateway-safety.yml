@@ -1,0 +1,45 @@
+name: ChatGPT Gateway Safety
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [core-chatgpt-gateway-v1]
+
+permissions:
+  contents: read
+
+jobs:
+  gateway-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - name: Source contract
+        run: |
+          grep -q "app.use('/v1', authenticateApiKey)" chatgpt-gateway.ts
+          grep -q 'openaiFileIdRefs' chatgpt-action-openapi.yaml
+          grep -q 'x-openai-isConsequential: true' chatgpt-action-openapi.yaml
+          grep -q 'iamcredentials.googleapis.com' chatgpt-gateway.ts
+          grep -q "app.post('/api/mvp/chatgpt/keys'" mvp-server-v021.ts
+          grep -q 'allow-unauthenticated' .github/workflows/chatgpt-gateway-uat-deploy.yml
+          grep -q 'roles/iap.httpsResourceAccessor' .github/workflows/chatgpt-gateway-uat-deploy.yml
+      - name: TypeScript
+        run: bun run lint
+      - name: Gateway contract
+        run: bunx vitest run src/__tests__/chatgptGatewayContract.test.ts
+      - name: Full regression
+        run: bun run test
+      - name: Production build
+        run: bun run build
+      - name: Gateway image
+        run: docker build -f Dockerfile.chatgpt-gateway -t zaojing-chatgpt-gateway:ci .
+      - name: Diff integrity
+        run: git diff --check
