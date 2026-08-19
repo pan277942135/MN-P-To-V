@@ -54,9 +54,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+          gcloud iap web add-iam-policy-binding \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --resource-type=cloud-run \
+            --service="$UPSTREAM_SERVICE" \
             --member="serviceAccount:$RUNTIME_SA" \
-            --role="roles/iap.httpsResourceAccessor" --quiet >/dev/null
+            --role="roles/iap.httpsResourceAccessor" \
+            --quiet >/dev/null
           gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
             --project="$PROJECT_ID" \
             --member="serviceAccount:$RUNTIME_SA" \
