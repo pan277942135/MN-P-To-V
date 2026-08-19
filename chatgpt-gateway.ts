@@ -1,10 +1,12 @@
 import express from 'express';
 import crypto from 'crypto';
+import fs from 'node:fs';
 import { GoogleAuth } from 'google-auth-library';
 import { getFirestoreInstance } from './src/server/db/firestore';
 
 const PORT = Number(process.env.PORT || 8080);
 const UPSTREAM_URL = String(process.env.ZAOJING_MVP_UPSTREAM_URL || '').replace(/\/+$/, '');
+const PUBLIC_URL = String(process.env.ZAOJING_CHATGPT_PUBLIC_URL || '').replace(/\/+$/, '');
 const KEY_COLLECTION = 'mvp_chatgpt_api_keys';
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const auth = new GoogleAuth();
@@ -92,8 +94,12 @@ export function createChatGptGatewayApp() {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '256kb' }));
-  app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'zaojing-chatgpt-gateway', version: 'v1' }));
-  app.get('/openapi.yaml', (_req, res) => res.sendFile('chatgpt-action-openapi.yaml', { root: process.cwd(), headers: { 'Content-Type': 'application/yaml; charset=utf-8' } }));
+  app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'zaojing-chatgpt-gateway', version: 'v1', upstreamConfigured: Boolean(UPSTREAM_URL) }));
+  app.get('/openapi.yaml', (_req, res) => {
+    const template = fs.readFileSync('chatgpt-action-openapi.yaml', 'utf8');
+    const origin = PUBLIC_URL || `${_req.protocol}://${_req.get('host')}`;
+    return res.type('application/yaml').send(template.replace('https://zaojing-chatgpt-gateway-uat-REPLACE.run.app', origin));
+  });
 
   app.use('/v1', authenticateApiKey);
 
