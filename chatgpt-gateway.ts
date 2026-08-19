@@ -335,8 +335,8 @@ export function createChatGptGatewayApp() {
     return res.type('application/yaml').send(template.replace('https://zaojing-chatgpt-gateway-uat-REPLACE.run.app', origin));
   });
 
-  app.use('/v1', authenticateApiKey);
-
+  // Keep the non-billable file-bridge preflight outside API-key auth so a stale
+  // ChatGPT Action credential cannot mask the actual conversation-file payload.
   app.post('/v1/images/preflight', async (req, res) => {
     const refs = Array.isArray(req.body?.openaiFileIdRefs) ? req.body.openaiFileIdRefs as OpenAIFileRef[] : [];
     if (refs.length !== 1) {
@@ -356,6 +356,8 @@ export function createChatGptGatewayApp() {
       return res.status(200).json(actionSafeFileBridgeFailure(error, 'preflight_image_failed'));
     }
   });
+
+  app.use('/v1', authenticateApiKey);
 
   app.post('/v1/videos', async (req, res) => {
     const prompt = String(req.body?.prompt || '').trim();
