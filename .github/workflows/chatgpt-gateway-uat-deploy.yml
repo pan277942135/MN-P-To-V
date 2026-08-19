@@ -34,19 +34,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - id: checkout
+        uses: actions/checkout@v4
       - name: Authenticate to Google Cloud
+        id: auth
         uses: google-github-actions/auth@v3
         with:
           project_id: ${{ env.PROJECT_ID }}
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.DEPLOY_SA }}
           create_credentials_file: true
-      - uses: google-github-actions/setup-gcloud@v3
+      - id: setup
+        uses: google-github-actions/setup-gcloud@v3
         with:
           project_id: ${{ env.PROJECT_ID }}
 
       - name: Grant narrow service-to-IAP credentials
+        id: grant
         shell: bash
         run: |
           set -euo pipefail
@@ -100,6 +104,7 @@ jobs:
           echo "revision=$REV" >> "$GITHUB_OUTPUT"
 
       - name: Verify public surface and protected actions
+        id: verify
         shell: bash
         env:
           URL: ${{ steps.deploy.outputs.url }}
@@ -133,7 +138,8 @@ jobs:
           - Gateway URL: ${URL:-unknown}
           - OpenAPI: ${URL:-unknown}/openapi.yaml
           - Bootstrap API-key hash configured: \`true\`
-          - Public verification: \`/health\`, \`/openapi.yaml\`, and unauthenticated \`/v1/* -> 401\`
+          - Step outcomes: checkout=\`${{ steps.checkout.outcome }}\`, auth=\`${{ steps.auth.outcome }}\`, setup=\`${{ steps.setup.outcome }}\`, grant=\`${{ steps.grant.outcome }}\`, image=\`${{ steps.image.outcome }}\`, upstream=\`${{ steps.upstream.outcome }}\`, deploy=\`${{ steps.deploy.outcome }}\`, verify=\`${{ steps.verify.outcome }}\`
+          - Public verification target: \`/health\`, \`/openapi.yaml\`, and unauthenticated \`/v1/* -> 401\`
           EOF
           )
           jq -nc --arg body "$BODY" '{body:$body}' > comment.json
