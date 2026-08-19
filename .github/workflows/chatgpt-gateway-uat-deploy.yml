@@ -7,7 +7,10 @@ on:
       - 'chatgpt-gateway.ts'
       - 'chatgpt-action-openapi.yaml'
       - 'Dockerfile.chatgpt-gateway'
+      - 'Dockerfile.mvp'
       - 'mvp-server-v021.ts'
+      - 'mvp-server-v02.ts'
+      - 'src/mvp/**'
       - 'src/__tests__/chatgptGatewayContract.test.ts'
       - '.github/workflows/chatgpt-gateway-uat-deploy.yml'
   workflow_dispatch:
@@ -22,17 +25,20 @@ env:
   REGION: us-central1
   GAR_REPO: zaojing
   GATEWAY_SERVICE: zaojing-chatgpt-gateway-uat
-  UPSTREAM_SERVICE: zaojing-mvp-simple-uat
+  CHATGPT_UPSTREAM_SERVICE: zaojing-chatgpt-upstream-uat
   WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
   DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
   RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
   FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  VEO_MODEL_ID: veo-3.1-fast-generate-001
+  IDENTITY_QA_MODEL: gemini-2.5-flash
   BOOTSTRAP_KEY_HASH: 2eb32be8da4af88e0d9dc19b8fa642977394a7021e91ca24e61ea667417f44f2
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - id: checkout
         uses: actions/checkout@v4
@@ -49,44 +55,55 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
-      - name: Grant narrow service-to-IAP credentials
-        id: grant
+      - name: Configure Artifact Registry auth
+        shell: bash
+        run: gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+
+      - name: Build and push private Identity Safe upstream image
+        id: upstream_image
         shell: bash
         run: |
           set -euo pipefail
-          gcloud iap web add-iam-policy-binding \
-            --project="$PROJECT_ID" \
-            --region="$REGION" \
-            --resource-type=cloud-run \
-            --service="$UPSTREAM_SERVICE" \
+          SHA="$(git rev-parse HEAD)"
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$CHATGPT_UPSTREAM_SERVICE:$SHA"
+          docker build -f Dockerfile.mvp -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy private Cloud Run upstream for ChatGPT
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run deploy "$CHATGPT_UPSTREAM_SERVICE" \
+            --project="$PROJECT_ID" --region="$REGION" --platform=managed \
+            --image='${{ steps.upstream_image.outputs.image }}' \
+            --service-account="$RUNTIME_SA" \
+            --no-allow-unauthenticated --no-iap \
+            --cpu=2 --memory=3Gi --timeout=900 --concurrency=4 --min-instances=0 --max-instances=2 \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=${{ steps.upstream_image.outputs.source_sha }}" \
+            --quiet
+          gcloud run services add-iam-policy-binding "$CHATGPT_UPSTREAM_SERVICE" \
+            --project="$PROJECT_ID" --region="$REGION" \
             --member="serviceAccount:$RUNTIME_SA" \
-            --role="roles/iap.httpsResourceAccessor" \
-            --quiet >/dev/null
-          gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
-            --project="$PROJECT_ID" \
-            --member="serviceAccount:$RUNTIME_SA" \
-            --role="roles/iam.serviceAccountTokenCreator" --quiet >/dev/null
+            --role="roles/run.invoker" --quiet >/dev/null
+          URL="$(gcloud run services describe "$CHATGPT_UPSTREAM_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          REV="$(gcloud run services describe "$CHATGPT_UPSTREAM_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          test -n "$URL"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REV" >> "$GITHUB_OUTPUT"
 
       - name: Build and push gateway image
-        id: image
+        id: gateway_image
         shell: bash
         run: |
           set -euo pipefail
           SHA="$(git rev-parse HEAD)"
           IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$GATEWAY_SERVICE:$SHA"
-          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
           docker build -f Dockerfile.chatgpt-gateway -t "$IMAGE" .
           docker push "$IMAGE"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve private IAP upstream
-        id: upstream
-        shell: bash
-        run: |
-          set -euo pipefail
-          URL="$(gcloud run services describe "$UPSTREAM_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
-          test -n "$URL"
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
 
       - name: Deploy public API-key gateway
         id: deploy
@@ -95,11 +112,11 @@ jobs:
           set -euo pipefail
           gcloud run deploy "$GATEWAY_SERVICE" \
             --project="$PROJECT_ID" --region="$REGION" --platform=managed \
-            --image='${{ steps.image.outputs.image }}' \
+            --image='${{ steps.gateway_image.outputs.image }}' \
             --service-account="$RUNTIME_SA" \
             --allow-unauthenticated --no-iap \
             --cpu=1 --memory=1Gi --timeout=120 --concurrency=20 --min-instances=0 --max-instances=2 \
-            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,ZAOJING_MVP_UPSTREAM_URL=${{ steps.upstream.outputs.url }},ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH=$BOOTSTRAP_KEY_HASH" \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,ZAOJING_MVP_UPSTREAM_URL=${{ steps.upstream.outputs.url }},ZAOJING_UPSTREAM_AUTH_MODE=cloud-run-id-token,ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH=$BOOTSTRAP_KEY_HASH" \
             --quiet
           URL="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
           REV="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
@@ -108,7 +125,7 @@ jobs:
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "revision=$REV" >> "$GITHUB_OUTPUT"
 
-      - name: Verify public surface and protected actions
+      - name: Verify gateway, upstream auth, OpenAPI, and Bearer boundary
         id: verify
         shell: bash
         env:
@@ -116,7 +133,10 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsS "$URL/health" | tee health.json
+          grep -q '"status":"ok"' health.json
           grep -q 'zaojing-chatgpt-gateway' health.json
+          grep -q '"upstreamAuthMode":"cloud-run-id-token"' health.json
+          grep -q '"upstreamReachable":true' health.json
           grep -q '"bootstrapKeyConfigured":true' health.json
           curl -fsS "$URL/openapi.yaml" | tee openapi.yaml
           grep -q "$URL" openapi.yaml
@@ -131,6 +151,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           URL: ${{ steps.deploy.outputs.url }}
           REVISION: ${{ steps.deploy.outputs.revision }}
+          UPSTREAM_URL: ${{ steps.upstream.outputs.url }}
+          UPSTREAM_REVISION: ${{ steps.upstream.outputs.revision }}
         run: |
           set -euo pipefail
           STATUS='${{ job.status }}'
@@ -138,13 +160,17 @@ jobs:
           ### ChatGPT Gateway UAT deployment evidence
           - Job status: \`$STATUS\`
           - Source SHA: \`${GITHUB_SHA}\`
-          - Cloud Run service: \`$GATEWAY_SERVICE\`
-          - Revision: \`${REVISION:-unknown}\`
+          - Gateway service: \`$GATEWAY_SERVICE\`
+          - Gateway revision: \`${REVISION:-unknown}\`
           - Gateway URL: ${URL:-unknown}
           - OpenAPI: ${URL:-unknown}/openapi.yaml
+          - Private upstream service: \`$CHATGPT_UPSTREAM_SERVICE\`
+          - Private upstream revision: \`${UPSTREAM_REVISION:-unknown}\`
+          - Private upstream URL: ${UPSTREAM_URL:-unknown}
+          - Upstream auth: \`Cloud Run IAM ID token\`
           - Bootstrap API-key hash configured: \`true\`
-          - Step outcomes: checkout=\`${{ steps.checkout.outcome }}\`, auth=\`${{ steps.auth.outcome }}\`, setup=\`${{ steps.setup.outcome }}\`, grant=\`${{ steps.grant.outcome }}\`, image=\`${{ steps.image.outcome }}\`, upstream=\`${{ steps.upstream.outcome }}\`, deploy=\`${{ steps.deploy.outcome }}\`, verify=\`${{ steps.verify.outcome }}\`
-          - Public verification target: \`/health\`, \`/openapi.yaml\`, and unauthenticated \`/v1/* -> 401\`
+          - Step outcomes: checkout=\`${{ steps.checkout.outcome }}\`, auth=\`${{ steps.auth.outcome }}\`, setup=\`${{ steps.setup.outcome }}\`, upstream_image=\`${{ steps.upstream_image.outcome }}\`, upstream=\`${{ steps.upstream.outcome }}\`, gateway_image=\`${{ steps.gateway_image.outcome }}\`, deploy=\`${{ steps.deploy.outcome }}\`, verify=\`${{ steps.verify.outcome }}\`
+          - Verification: gateway health includes reachable authenticated upstream, generated OpenAPI points at gateway, unauthenticated \`/v1/* -> 401\`.
           EOF
           )
           jq -nc --arg body "$BODY" '{body:$body}' > comment.json
@@ -156,13 +182,16 @@ jobs:
             --data-binary @comment.json >/dev/null
 
       - name: Deployment summary
+        if: success()
         shell: bash
         run: |
           {
-            echo '## Zaojing ChatGPT Actions Gateway UAT'
+            echo '## Zaojing ChatGPT Actions Gateway UAT ready'
             echo "- Gateway: ${{ steps.deploy.outputs.url }}"
             echo "- Revision: ${{ steps.deploy.outputs.revision }}"
             echo "- OpenAPI: ${{ steps.deploy.outputs.url }}/openapi.yaml"
-            echo "- Upstream: IAP-protected ${{ steps.upstream.outputs.url }}"
+            echo "- Private upstream: ${{ steps.upstream.outputs.url }}"
+            echo "- Upstream revision: ${{ steps.upstream.outputs.revision }}"
+            echo '- Upstream auth: Cloud Run IAM ID token from the gateway service identity.'
             echo '- Public routes: /health and /openapi.yaml only; /v1/* requires a hashed revocable Bearer key.'
           } >> "$GITHUB_STEP_SUMMARY"
