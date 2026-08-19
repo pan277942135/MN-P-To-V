@@ -16,6 +16,32 @@ paths:
       responses:
         '200':
           description: Healthy gateway.
+  /v1/images/preflight:
+    post:
+      operationId: preflightIdentityImage
+      summary: Verify that one ChatGPT conversation image reaches Zaojing as valid image bytes.
+      description: Download and validate one ChatGPT image reference without creating a video task or calling Veo. Use this to diagnose the Actions file bridge.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [openaiFileIdRefs]
+              properties:
+                openaiFileIdRefs:
+                  type: array
+                  minItems: 1
+                  maxItems: 1
+                  items:
+                    type: string
+                  description: Exactly one JPG, PNG or WebP uploaded by the user in this conversation.
+      responses:
+        '200': { description: File bridge delivered valid image bytes. }
+        '400': { description: File reference or downloaded image bytes are invalid. }
+        '401': { description: Invalid API key. }
+        '502': { description: OpenAI file download failed. }
   /v1/videos:
     post:
       operationId: createIdentitySafeVideo
@@ -50,8 +76,9 @@ paths:
       responses:
         '200': { description: Existing idempotent task. }
         '202': { description: Video task accepted and generating. }
-        '400': { description: Invalid prompt, duration, or image. }
+        '400': { description: Invalid prompt, duration, image reference, or downloaded image bytes. }
         '401': { description: Invalid API key. }
+        '502': { description: OpenAI file download or upstream request failed. }
   /v1/videos/{taskId}:
     get:
       operationId: getIdentitySafeVideoTask
