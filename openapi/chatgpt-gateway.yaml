@@ -1,0 +1,79 @@
+openapi: 3.1.0
+info:
+  title: Zaojing ChatGPT Video Gateway
+  version: 1.0.0
+  description: Authenticated Identity Safe image-to-video gateway. Provider regeneration remains governed by server-side admission and retry policy.
+servers:
+  - url: https://REPLACE_WITH_PUBLIC_GATEWAY_HOST
+security:
+  - bearerAuth: []
+paths:
+  /api/chatgpt/health:
+    get:
+      operationId: getZaojingGatewayHealth
+      summary: Check ChatGPT gateway availability
+      responses:
+        '200': { description: Gateway ready }
+  /api/chatgpt/videos:
+    post:
+      operationId: createIdentitySafeVideo
+      summary: Create an Identity Safe image-to-video task
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 200 }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image, prompt, durationSeconds]
+              properties:
+                image: { type: string, format: binary }
+                prompt: { type: string, maxLength: 12000 }
+                durationSeconds: { type: integer, enum: [4, 6, 8] }
+                identitySafeMode: { type: boolean, default: true }
+      responses:
+        '202': { description: Task accepted }
+        '400': { description: Input rejected }
+        '401': { description: Invalid gateway token }
+  /api/chatgpt/videos/{taskId}:
+    get:
+      operationId: getIdentitySafeVideoTask
+      summary: Get current generation and Identity QA status
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200': { description: Current task state }
+        '404': { description: Task not found }
+  /api/chatgpt/videos/{taskId}/recover:
+    post:
+      operationId: recoverIdentitySafeVideoArtifact
+      summary: Recover the current Provider attempt artifact without submitting another Veo generation
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200': { description: Recovery result }
+        '404': { description: Task not found }
+  /api/chatgpt/videos/{taskId}/result:
+    get:
+      operationId: getIdentitySafeVideoResult
+      summary: Return the verified final result when Identity Safe processing is complete
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200': { description: Verified final result }
+        '409': { description: Result not verified or not complete }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    TaskId:
+      in: path
+      name: taskId
+      required: true
+      schema: { type: string, minLength: 8, maxLength: 200 }
