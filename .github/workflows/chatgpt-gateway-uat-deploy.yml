@@ -15,6 +15,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  issues: write
 
 env:
   PROJECT_ID: xp-vertex-project
@@ -26,6 +27,7 @@ env:
   DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
   RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
   FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  BOOTSTRAP_KEY_HASH: 2eb32be8da4af88e0d9dc19b8fa642977394a7021e91ca24e61ea667417f44f2
 
 jobs:
   deploy:
@@ -88,7 +90,7 @@ jobs:
             --service-account="$RUNTIME_SA" \
             --allow-unauthenticated --no-iap \
             --cpu=1 --memory=1Gi --timeout=120 --concurrency=20 --min-instances=0 --max-instances=2 \
-            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,ZAOJING_MVP_UPSTREAM_URL=${{ steps.upstream.outputs.url }}" \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,ZAOJING_MVP_UPSTREAM_URL=${{ steps.upstream.outputs.url }},ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH=$BOOTSTRAP_KEY_HASH" \
             --quiet
           URL="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
           REV="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
@@ -105,11 +107,42 @@ jobs:
           set -euo pipefail
           curl -fsS "$URL/health" | tee health.json
           grep -q 'zaojing-chatgpt-gateway' health.json
+          grep -q '"bootstrapKeyConfigured":true' health.json
           curl -fsS "$URL/openapi.yaml" | tee openapi.yaml
           grep -q "$URL" openapi.yaml
           grep -q 'openaiFileIdRefs' openapi.yaml
           STATUS="$(curl -sS -o unauthorized.json -w '%{http_code}' "$URL/v1/videos/test-task")"
           test "$STATUS" = '401'
+
+      - name: Record deployment evidence
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          URL: ${{ steps.deploy.outputs.url }}
+          REVISION: ${{ steps.deploy.outputs.revision }}
+        run: |
+          set -euo pipefail
+          STATUS='${{ job.status }}'
+          BODY=$(cat <<EOF
+          ### ChatGPT Gateway UAT deployment evidence
+          - Job status: \`$STATUS\`
+          - Source SHA: \`${GITHUB_SHA}\`
+          - Cloud Run service: \`$GATEWAY_SERVICE\`
+          - Revision: \`${REVISION:-unknown}\`
+          - Gateway URL: ${URL:-unknown}
+          - OpenAPI: ${URL:-unknown}/openapi.yaml
+          - Bootstrap API-key hash configured: \`true\`
+          - Public verification: \`/health\`, \`/openapi.yaml\`, and unauthenticated \`/v1/* -> 401\`
+          EOF
+          )
+          jq -nc --arg body "$BODY" '{body:$body}' > comment.json
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/47/comments" \
+            --data-binary @comment.json >/dev/null
 
       - name: Deployment summary
         shell: bash
