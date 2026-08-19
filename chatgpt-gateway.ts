@@ -12,11 +12,31 @@ const RUNTIME_SA = String(process.env.RUNTIME_SERVICE_ACCOUNT_EMAIL || '');
 const BOOTSTRAP_KEY_HASH = String(process.env.ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH || '').trim().toLowerCase();
 const KEY_COLLECTION = 'mvp_chatgpt_api_keys';
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const SUPPORTED_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp'] as const;
 const auth = new GoogleAuth();
 
+type SupportedImageMime = typeof SUPPORTED_IMAGE_MIMES[number];
 type OpenAIFileRef = { name?: string; id?: string; mime_type?: string; download_link?: string };
+type OpenAIImageDiagnostics = {
+  fileIdPresent: boolean;
+  fileName: string | null;
+  declaredMime: string | null;
+  responseMime: string | null;
+  detectedMime: SupportedImageMime | null;
+  sizeBytes: number;
+  downloadHost: string | null;
+  contentSha256: string | null;
+  prefixHex: string | null;
+};
+type DownloadedOpenAIImage = { bytes: Buffer; mimeType: SupportedImageMime; name: string; diagnostics: OpenAIImageDiagnostics };
 
-function sha256(value: string): string { return crypto.createHash('sha256').update(value).digest('hex'); }
+class OpenAIFileBridgeError extends Error {
+  constructor(public code: string, public httpStatus: number, public diagnostics: Partial<OpenAIImageDiagnostics> = {}) {
+    super(code);
+  }
+}
+
+function sha256(value: Buffer | string): string { return crypto.createHash('sha256').update(value).digest('hex'); }
 function bearer(req: express.Request): string {
   const value = String(req.header('authorization') || '');
   return value.toLowerCase().startsWith('bearer ') ? value.slice(7).trim() : '';
@@ -57,21 +77,86 @@ function allowedOpenAIFileUrl(raw: string): boolean {
   } catch { return false; }
 }
 
-async function downloadOpenAIImage(ref: OpenAIFileRef): Promise<{ bytes: Buffer; mimeType: string; name: string }> {
+function downloadHost(raw: string): string | null {
+  try { return new URL(raw).hostname.toLowerCase(); }
+  catch { return null; }
+}
+
+function normalizeMime(raw: unknown): string | null {
+  const mime = String(raw || '').split(';')[0].trim().toLowerCase();
+  return mime || null;
+}
+
+function detectImageMime(bytes: Buffer): SupportedImageMime | null {
+  if (!bytes || bytes.length < 12) return null;
+  const jpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  const png = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a;
+  const webp = bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP';
+  if (jpeg) return 'image/jpeg';
+  if (png) return 'image/png';
+  if (webp) return 'image/webp';
+  return null;
+}
+
+function extensionForMime(mime: SupportedImageMime): string {
+  return mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+}
+
+function normalizedImageName(rawName: unknown, mime: SupportedImageMime): string {
+  const original = String(rawName || 'identity-reference').split(/[\\/]/).pop() || 'identity-reference';
+  const stem = original.replace(/\.[A-Za-z0-9]{1,10}$/, '') || 'identity-reference';
+  return `${stem}.${extensionForMime(mime)}`;
+}
+
+function fileBridgeErrorResponse(res: express.Response, error: unknown, fallbackError: string) {
+  if (error instanceof OpenAIFileBridgeError) {
+    return res.status(error.httpStatus).json({
+      error: error.code,
+      stage: 'action_file_bridge',
+      retryable: false,
+      diagnostics: error.diagnostics,
+    });
+  }
+  return res.status(502).json({ error: fallbackError, detail: String((error as any)?.message || error) });
+}
+
+async function downloadOpenAIImage(ref: OpenAIFileRef): Promise<DownloadedOpenAIImage> {
   const link = String(ref?.download_link || '');
-  if (!allowedOpenAIFileUrl(link)) throw new Error('OPENAI_FILE_URL_INVALID');
+  const initialDiagnostics: Partial<OpenAIImageDiagnostics> = {
+    fileIdPresent: Boolean(ref?.id),
+    fileName: ref?.name ? String(ref.name) : null,
+    declaredMime: normalizeMime(ref?.mime_type),
+    downloadHost: downloadHost(link),
+  };
+  if (!allowedOpenAIFileUrl(link)) throw new OpenAIFileBridgeError('OPENAI_FILE_URL_INVALID', 400, initialDiagnostics);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
     const response = await fetch(link, { signal: controller.signal, redirect: 'follow' });
-    if (!response.ok) throw new Error(`OPENAI_FILE_DOWNLOAD_FAILED_${response.status}`);
-    const declared = String(ref?.mime_type || response.headers.get('content-type') || '').split(';')[0].toLowerCase();
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(declared)) throw new Error('OPENAI_FILE_TYPE_UNSUPPORTED');
+    const responseMime = normalizeMime(response.headers.get('content-type'));
+    if (!response.ok) {
+      throw new OpenAIFileBridgeError(`OPENAI_FILE_DOWNLOAD_FAILED_${response.status}`, 502, { ...initialDiagnostics, responseMime });
+    }
     const contentLength = Number(response.headers.get('content-length') || 0);
-    if (contentLength > MAX_IMAGE_BYTES) throw new Error('OPENAI_FILE_TOO_LARGE');
+    if (contentLength > MAX_IMAGE_BYTES) {
+      throw new OpenAIFileBridgeError('OPENAI_FILE_TOO_LARGE', 400, { ...initialDiagnostics, responseMime, sizeBytes: contentLength });
+    }
     const bytes = Buffer.from(await response.arrayBuffer());
-    if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) throw new Error('OPENAI_FILE_TOO_LARGE');
-    return { bytes, mimeType: declared, name: String(ref?.name || 'identity-reference') };
+    const detectedMime = detectImageMime(bytes);
+    const diagnostics: OpenAIImageDiagnostics = {
+      fileIdPresent: Boolean(ref?.id),
+      fileName: ref?.name ? String(ref.name) : null,
+      declaredMime: normalizeMime(ref?.mime_type),
+      responseMime,
+      detectedMime,
+      sizeBytes: bytes.length,
+      downloadHost: downloadHost(link),
+      contentSha256: bytes.length ? sha256(bytes) : null,
+      prefixHex: bytes.length ? bytes.subarray(0, Math.min(16, bytes.length)).toString('hex') : null,
+    };
+    if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) throw new OpenAIFileBridgeError('OPENAI_FILE_TOO_LARGE', 400, diagnostics);
+    if (!detectedMime) throw new OpenAIFileBridgeError('OPENAI_FILE_CONTENT_INVALID', 400, diagnostics);
+    return { bytes, mimeType: detectedMime, name: normalizedImageName(ref?.name, detectedMime), diagnostics };
   } finally { clearTimeout(timer); }
 }
 
@@ -182,6 +267,17 @@ export function createChatGptGatewayApp() {
 
   app.use('/v1', authenticateApiKey);
 
+  app.post('/v1/images/preflight', async (req, res) => {
+    try {
+      const refs = Array.isArray(req.body?.openaiFileIdRefs) ? req.body.openaiFileIdRefs as OpenAIFileRef[] : [];
+      if (refs.length !== 1) return res.status(400).json({ error: 'exactly_one_image_required', stage: 'action_file_bridge' });
+      const image = await downloadOpenAIImage(refs[0]);
+      return res.json({ status: 'ok', fileBridge: 'valid_image', diagnostics: image.diagnostics });
+    } catch (error) {
+      return fileBridgeErrorResponse(res, error, 'preflight_image_failed');
+    }
+  });
+
   app.post('/v1/videos', async (req, res) => {
     try {
       const prompt = String(req.body?.prompt || '').trim();
@@ -199,8 +295,10 @@ export function createChatGptGatewayApp() {
       const idempotencyKey = String(req.body?.idempotencyKey || `chatgpt_${crypto.randomUUID()}`);
       const response = await upstream('/api/mvp/videos/start', { method: 'POST', headers: { 'x-idempotency-key': idempotencyKey }, body: form });
       const body = await responseJson(response);
-      return res.status(response.status).json({ ...actionTask(body), idempotencyKey });
-    } catch (error: any) { return res.status(502).json({ error: 'create_video_failed', detail: String(error?.message || error) }); }
+      return res.status(response.status).json({ ...actionTask(body), idempotencyKey, inputFile: image.diagnostics });
+    } catch (error) {
+      return fileBridgeErrorResponse(res, error, 'create_video_failed');
+    }
   });
 
   app.get('/v1/videos/:taskId', async (req, res) => {
