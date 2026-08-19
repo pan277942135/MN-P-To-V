@@ -1,0 +1,49 @@
+name: ChatGPT Preflight Smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'chatgpt-gateway.ts'
+      - '.github/workflows/chatgpt-preflight-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GATEWAY_URL: https://zaojing-chatgpt-gateway-uat-i7lns3auvq-uc.a.run.app
+    steps:
+      - name: Verify unauthenticated preflight reaches action-safe handler
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATUS="$(curl -sS -o preflight.json -w '%{http_code}' \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            --data '{"openaiFileIdRefs":["file-smoke-diagnostic"]}' \
+            "$GATEWAY_URL/v1/images/preflight")"
+          cat preflight.json
+          test "$STATUS" = '200'
+          jq -e '
+            .ok == false and
+            .status == "FILE_BRIDGE_FAILED" and
+            .error == "OPENAI_FILE_URL_INVALID" and
+            .stage == "action_file_bridge" and
+            .taskCreated == false and
+            .providerCalled == false and
+            .diagnostics.referenceKind == "string_file_id"
+          ' preflight.json >/dev/null
+
+      - name: Verify billable video routes remain authenticated
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATUS="$(curl -sS -o unauthorized.json -w '%{http_code}' "$GATEWAY_URL/v1/videos/test-task")"
+          cat unauthorized.json
+          test "$STATUS" = '401'
+          jq -e '.error == "invalid_api_key"' unauthorized.json >/dev/null
