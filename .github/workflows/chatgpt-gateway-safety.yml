@@ -27,10 +27,15 @@ jobs:
           grep -q "app.use('/v1', authenticateApiKey)" chatgpt-gateway.ts
           grep -q 'openaiFileIdRefs' chatgpt-action-openapi.yaml
           grep -q 'x-openai-isConsequential: true' chatgpt-action-openapi.yaml
-          grep -q 'iamcredentials.googleapis.com' chatgpt-gateway.ts
+          grep -q 'metadata.google.internal' chatgpt-gateway.ts
+          grep -q 'ZAOJING_UPSTREAM_AUTH_MODE' chatgpt-gateway.ts
           grep -q "app.post('/api/mvp/chatgpt/keys'" mvp-server-v021.ts
           grep -q 'allow-unauthenticated' .github/workflows/chatgpt-gateway-uat-deploy.yml
-          grep -q 'roles/iap.httpsResourceAccessor' .github/workflows/chatgpt-gateway-uat-deploy.yml
+          grep -q 'CHATGPT_UPSTREAM_SERVICE: zaojing-chatgpt-upstream-uat' .github/workflows/chatgpt-gateway-uat-deploy.yml
+          grep -q 'roles/run.invoker' .github/workflows/chatgpt-gateway-uat-deploy.yml
+          grep -q 'ZAOJING_UPSTREAM_AUTH_MODE=cloud-run-id-token' .github/workflows/chatgpt-gateway-uat-deploy.yml
+          ! grep -q 'roles/iap.httpsResourceAccessor' .github/workflows/chatgpt-gateway-uat-deploy.yml
+          ! grep -q 'roles/iam.serviceAccountTokenCreator' .github/workflows/chatgpt-gateway-uat-deploy.yml
       - name: TypeScript
         run: bun run lint
       - name: Gateway contract
