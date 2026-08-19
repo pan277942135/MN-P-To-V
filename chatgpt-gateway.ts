@@ -8,6 +8,7 @@ const PORT = Number(process.env.PORT || 8080);
 const UPSTREAM_URL = String(process.env.ZAOJING_MVP_UPSTREAM_URL || '').replace(/\/+$/, '');
 const PUBLIC_URL = String(process.env.ZAOJING_CHATGPT_PUBLIC_URL || '').replace(/\/+$/, '');
 const RUNTIME_SA = String(process.env.RUNTIME_SERVICE_ACCOUNT_EMAIL || '');
+const BOOTSTRAP_KEY_HASH = String(process.env.ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH || '').trim().toLowerCase();
 const KEY_COLLECTION = 'mvp_chatgpt_api_keys';
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const auth = new GoogleAuth();
@@ -18,6 +19,19 @@ function sha256(value: string): string { return crypto.createHash('sha256').upda
 function bearer(req: express.Request): string {
   const value = String(req.header('authorization') || '');
   return value.toLowerCase().startsWith('bearer ') ? value.slice(7).trim() : '';
+}
+
+async function ensureBootstrapApiKey(): Promise<void> {
+  if (!BOOTSTRAP_KEY_HASH) return;
+  if (!/^[a-f0-9]{64}$/.test(BOOTSTRAP_KEY_HASH)) throw new Error('ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH_INVALID');
+  const db = getFirestoreInstance();
+  if (!db) throw new Error('FIRESTORE_UNAVAILABLE_FOR_BOOTSTRAP_KEY');
+  const ref = db.collection(KEY_COLLECTION).doc(BOOTSTRAP_KEY_HASH);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (snap.exists) return;
+    tx.set(ref, { createdAt: Date.now(), revokedAt: null, purpose: 'chatgpt-actions-v1-bootstrap' });
+  });
 }
 
 async function authenticateApiKey(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -120,7 +134,7 @@ export function createChatGptGatewayApp() {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '256kb' }));
-  app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'zaojing-chatgpt-gateway', version: 'v1', upstreamConfigured: Boolean(UPSTREAM_URL) }));
+  app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'zaojing-chatgpt-gateway', version: 'v1', upstreamConfigured: Boolean(UPSTREAM_URL), bootstrapKeyConfigured: Boolean(BOOTSTRAP_KEY_HASH) }));
   app.get('/openapi.yaml', (_req, res) => {
     const template = fs.readFileSync('chatgpt-action-openapi.yaml', 'utf8');
     const origin = PUBLIC_URL || `${_req.protocol}://${_req.get('host')}`;
@@ -169,9 +183,10 @@ export function createChatGptGatewayApp() {
   return app;
 }
 
-export function startChatGptGateway() {
+export async function startChatGptGateway() {
+  await ensureBootstrapApiKey();
   const app = createChatGptGatewayApp();
   return app.listen(PORT, '0.0.0.0', () => console.log(`[ZAOJING_CHATGPT_GATEWAY] listening on :${PORT}`));
 }
 
-if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) startChatGptGateway();
+if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) void startChatGptGateway();
