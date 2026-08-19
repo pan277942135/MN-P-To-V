@@ -93,6 +93,23 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(schema).toContain('required: [prompt, durationSeconds, idempotencyKey, openaiFileIdRefs]');
   });
 
+  it('exposes a non-billable intent resolver for create client-response loss and never submits Veo', () => {
+    expect(gateway).toContain("app.post('/v1/videos/resolve'");
+    expect(gateway).toContain("status: 'INTENT_NOT_FOUND'");
+    expect(gateway).toContain("status: 'RESOLVE_FAILED'");
+    expect(gateway).toContain("stage: 'action_intent_resolve'");
+    const resolveStart = gateway.indexOf("app.post('/v1/videos/resolve'");
+    const videoStart = gateway.indexOf("app.post('/v1/videos'");
+    expect(resolveStart).toBeGreaterThanOrEqual(0);
+    expect(videoStart).toBeGreaterThan(resolveStart);
+    const resolveBlock = gateway.slice(resolveStart, videoStart);
+    expect(resolveBlock).toContain('lookupUpstreamTask');
+    expect(resolveBlock).not.toContain("upstream('/api/mvp/videos/start'");
+    expect(schema).toContain('operationId: resolveIdentitySafeVideoIntent');
+    expect(schema).toContain('Call this immediately after any create client or transport error before retrying create.');
+    expect(schema).toContain('It only queries the durable idempotency index and never calls Veo.');
+  });
+
   it('makes create return an observable action-safe result even when the private upstream transport fails', () => {
     const videoStart = gateway.indexOf("app.post('/v1/videos'");
     const getStart = gateway.indexOf("app.get('/v1/videos/:taskId'");
@@ -101,7 +118,7 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(createBlock).toContain("status: 'UPSTREAM_OUTCOME_UNKNOWN'");
     expect(createBlock).toContain('UPSTREAM_REQUEST_AND_LOOKUP_FAILED');
     expect(createBlock).toContain('UPSTREAM_REQUEST_FAILED_NO_TASK_FOUND');
-    expect(createBlock).toContain('Retry createIdentitySafeVideo with the same idempotencyKey only');
+    expect(createBlock).toContain('Call resolveIdentitySafeVideoIntent with the same idempotencyKey before any create retry.');
   });
 
   it('reuses the existing Identity Safe start/status/recover pipeline instead of bypassing it', () => {
@@ -137,10 +154,14 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(deploy).toContain("grep -q '\"uatDirectMode\":true' health.json");
   });
 
-  it('marks Veo creation consequential and recovery non-consequential', () => {
+  it('marks Veo creation consequential and recovery/resolve non-consequential', () => {
     expect(schema).toContain('operationId: createIdentitySafeVideo');
     expect(schema).toContain('x-openai-isConsequential: true');
+    expect(schema).toContain('operationId: resolveIdentitySafeVideoIntent');
     expect(schema).toContain('operationId: recoverIdentitySafeVideoArtifact');
+    const resolveStart = schema.indexOf('operationId: resolveIdentitySafeVideoIntent');
+    const createStart = schema.indexOf('operationId: createIdentitySafeVideo');
+    expect(schema.slice(resolveStart, createStart)).toContain('x-openai-isConsequential: false');
     expect(schema).toContain('x-openai-isConsequential: false');
     expect(schema).toContain('openaiFileIdRefs');
   });

@@ -126,7 +126,7 @@ jobs:
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "revision=$REV" >> "$GITHUB_OUTPUT"
 
-      - name: Verify gateway, file bridge, upstream auth, OpenAPI, and bounded direct UAT boundary
+      - name: Verify gateway, file bridge, intent resolver, upstream auth, OpenAPI, and bounded direct UAT boundary
         id: verify
         shell: bash
         env:
@@ -139,6 +139,10 @@ jobs:
             -X POST -H 'Content-Type: application/json' \
             --data '{"openaiFileIdRefs":["file-selftest-no-download-link"]}' \
             "$URL/v1/images/preflight" || true)"
+          RESOLVE_STATUS="$(curl -sS -o resolve.json -w '%{http_code}' \
+            -X POST -H 'Content-Type: application/json' \
+            --data '{"idempotencyKey":"uat-resolve-never-created-0001"}' \
+            "$URL/v1/videos/resolve" || true)"
           DIRECT_FILE_STATUS="$(curl -sS -o direct-file.json -w '%{http_code}' \
             -X POST -H 'Content-Type: application/json' \
             --data '{"prompt":"uat file bridge smoke","durationSeconds":4,"idempotencyKey":"uat-file-bridge-smoke-0001","openaiFileIdRefs":["file-selftest-no-download-link"]}' \
@@ -150,12 +154,15 @@ jobs:
           echo "health_status=$HEALTH_STATUS" >> "$GITHUB_OUTPUT"
           echo "openapi_status=$OPENAPI_STATUS" >> "$GITHUB_OUTPUT"
           echo "preflight_status=$PREFLIGHT_STATUS" >> "$GITHUB_OUTPUT"
+          echo "resolve_status=$RESOLVE_STATUS" >> "$GITHUB_OUTPUT"
           echo "direct_file_status=$DIRECT_FILE_STATUS" >> "$GITHUB_OUTPUT"
           echo "direct_status=$DIRECT_STATUS" >> "$GITHUB_OUTPUT"
           echo '[verify] health:'
           cat health.json || true
           echo '[verify] preflight:'
           cat preflight.json || true
+          echo '[verify] intent resolve:'
+          cat resolve.json || true
           echo '[verify] direct file bridge:'
           cat direct-file.json || true
           echo '[verify] direct boundary:'
@@ -171,9 +178,12 @@ jobs:
           test "$OPENAPI_STATUS" = '200'
           grep -q "$URL" openapi.yaml
           grep -q 'openaiFileIdRefs' openapi.yaml
+          grep -q 'operationId: resolveIdentitySafeVideoIntent' openapi.yaml
           grep -q 'required: \[prompt, durationSeconds, idempotencyKey, openaiFileIdRefs\]' openapi.yaml
           test "$PREFLIGHT_STATUS" = '200'
           jq -e '.ok == false and .status == "FILE_BRIDGE_FAILED" and .error == "OPENAI_FILE_URL_INVALID" and .stage == "action_file_bridge" and .taskCreated == false and .providerCalled == false and .diagnostics.referenceKind == "string_file_id"' preflight.json >/dev/null
+          test "$RESOLVE_STATUS" = '200'
+          jq -e '.ok == true and .status == "INTENT_NOT_FOUND" and .taskId == null and .taskCreated == false and .providerCalled == false and .stage == "action_intent_resolve" and .recoveredBy == "durable_idempotency_lookup"' resolve.json >/dev/null
           test "$DIRECT_FILE_STATUS" = '200'
           jq -e '.ok == false and .status == "FILE_BRIDGE_FAILED" and .error == "OPENAI_FILE_URL_INVALID" and .stage == "action_file_bridge" and .taskCreated == false and .providerCalled == false' direct-file.json >/dev/null
           test "$DIRECT_STATUS" = '200'
@@ -192,6 +202,7 @@ jobs:
           HEALTH_STATUS: ${{ steps.verify.outputs.health_status }}
           OPENAPI_STATUS: ${{ steps.verify.outputs.openapi_status }}
           PREFLIGHT_STATUS: ${{ steps.verify.outputs.preflight_status }}
+          RESOLVE_STATUS: ${{ steps.verify.outputs.resolve_status }}
           DIRECT_FILE_STATUS: ${{ steps.verify.outputs.direct_file_status }}
           DIRECT_STATUS: ${{ steps.verify.outputs.direct_status }}
         run: |
@@ -199,6 +210,7 @@ jobs:
           STATUS='${{ job.status }}'
           HEALTH_BODY="$(cat health.json 2>/dev/null || echo unavailable)"
           PREFLIGHT_BODY="$(cat preflight.json 2>/dev/null || echo unavailable)"
+          RESOLVE_BODY="$(cat resolve.json 2>/dev/null || echo unavailable)"
           DIRECT_FILE_BODY="$(cat direct-file.json 2>/dev/null || echo unavailable)"
           DIRECT_BODY="$(cat direct.json 2>/dev/null || echo unavailable)"
           BODY=$(cat <<EOF
@@ -216,7 +228,7 @@ jobs:
           - UAT direct mode: \`true\`, daily new-intent cap: \`$UAT_DIRECT_DAILY_LIMIT\`
           - Bootstrap API-key hash configured for non-UAT/default mode: \`true\`
           - Step outcomes: checkout=\`${{ steps.checkout.outcome }}\`, auth=\`${{ steps.auth.outcome }}\`, setup=\`${{ steps.setup.outcome }}\`, upstream_image=\`${{ steps.upstream_image.outcome }}\`, upstream=\`${{ steps.upstream.outcome }}\`, gateway_image=\`${{ steps.gateway_image.outcome }}\`, deploy=\`${{ steps.deploy.outcome }}\`, verify=\`${{ steps.verify.outcome }}\`
-          - HTTP verification: health=\`${HEALTH_STATUS:-unknown}\`, openapi=\`${OPENAPI_STATUS:-unknown}\`, preflight=\`${PREFLIGHT_STATUS:-unknown}\`, direct_file_bridge=\`${DIRECT_FILE_STATUS:-unknown}\`, direct_action_boundary=\`${DIRECT_STATUS:-unknown}\`
+          - HTTP verification: health=\`${HEALTH_STATUS:-unknown}\`, openapi=\`${OPENAPI_STATUS:-unknown}\`, preflight=\`${PREFLIGHT_STATUS:-unknown}\`, resolve=\`${RESOLVE_STATUS:-unknown}\`, direct_file_bridge=\`${DIRECT_FILE_STATUS:-unknown}\`, direct_action_boundary=\`${DIRECT_STATUS:-unknown}\`
 
           Health body:
           \`\`\`json
@@ -226,6 +238,11 @@ jobs:
           Preflight body:
           \`\`\`json
           $PREFLIGHT_BODY
+          \`\`\`
+
+          Intent resolve body:
+          \`\`\`json
+          $RESOLVE_BODY
           \`\`\`
 
           Direct file-bridge body:
@@ -259,7 +276,7 @@ jobs:
             echo "- Private upstream: ${{ steps.upstream.outputs.url }}"
             echo "- Upstream revision: ${{ steps.upstream.outputs.revision }}"
             echo '- Upstream auth: Cloud Run IAM ID token from the gateway service identity.'
-            echo '- Preflight and direct create file-bridge smoke checks both returned action-safe HTTP 200 envelopes.'
+            echo '- Preflight, intent resolve, and direct create file-bridge checks returned action-safe HTTP 200 envelopes.'
             echo "- UAT direct actions enabled with Firestore-backed daily new-intent cap: $UAT_DIRECT_DAILY_LIMIT."
             echo '- Default/non-UAT gateway mode still requires the hashed revocable Bearer key.'
           } >> "$GITHUB_STEP_SUMMARY"
