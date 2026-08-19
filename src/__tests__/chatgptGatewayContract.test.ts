@@ -19,7 +19,37 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(gateway).toContain("host.endsWith('.oaiusercontent.com')");
     expect(gateway).toContain("host.endsWith('.openai.com')");
     expect(gateway).toContain('MAX_IMAGE_BYTES = 20 * 1024 * 1024');
-    expect(gateway).toContain("['image/jpeg', 'image/png', 'image/webp']");
+    expect(gateway).toContain("SUPPORTED_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp']");
+  });
+
+  it('validates downloaded image bytes by magic signature instead of trusting declared MIME', () => {
+    expect(gateway).toContain('function detectImageMime(bytes: Buffer)');
+    expect(gateway).toContain("bytes[0] === 0xff && bytes[1] === 0xd8");
+    expect(gateway).toContain("bytes[0] === 0x89 && bytes[1] === 0x50");
+    expect(gateway).toContain("bytes.subarray(0, 4).toString('ascii') === 'RIFF'");
+    expect(gateway).toContain("throw new OpenAIFileBridgeError('OPENAI_FILE_CONTENT_INVALID'");
+    expect(gateway).toContain('contentSha256');
+    expect(gateway).toContain('prefixHex');
+  });
+
+  it('exposes a non-billable file-bridge preflight action that never calls the upstream video start route', () => {
+    expect(gateway).toContain("app.post('/v1/images/preflight'");
+    expect(schema).toContain('operationId: preflightIdentityImage');
+    expect(schema).toContain('x-openai-isConsequential: false');
+    const preflightStart = gateway.indexOf("app.post('/v1/images/preflight'");
+    const videoStart = gateway.indexOf("app.post('/v1/videos'");
+    expect(preflightStart).toBeGreaterThanOrEqual(0);
+    expect(videoStart).toBeGreaterThan(preflightStart);
+    const preflightBlock = gateway.slice(preflightStart, videoStart);
+    expect(preflightBlock).not.toContain("upstream('/api/mvp/videos/start'");
+    expect(preflightBlock).toContain('downloadOpenAIImage');
+  });
+
+  it('normalizes forwarded image MIME and filename from detected bytes', () => {
+    expect(gateway).toContain('normalizedImageName');
+    expect(gateway).toContain('mimeType: detectedMime');
+    expect(gateway).toContain("new Blob([image.bytes], { type: image.mimeType })");
+    expect(gateway).toContain('inputFile: image.diagnostics');
   });
 
   it('reuses the existing Identity Safe start/status/recover pipeline instead of bypassing it', () => {
@@ -59,6 +89,13 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(schema).toContain('operationId: recoverIdentitySafeVideoArtifact');
     expect(schema).toContain('x-openai-isConsequential: false');
     expect(schema).toContain('openaiFileIdRefs');
+  });
+
+  it('stays within ChatGPT Actions editor schema validation constraints', () => {
+    expect(schema).toContain('components:\n  schemas: {}');
+    for (const match of schema.matchAll(/^\s+description:\s+(.+)$/gm)) {
+      expect(match[1].length).toBeLessThanOrEqual(300);
+    }
   });
 
   it('exposes one-time key creation only from the existing IAP-protected MVP app', () => {
