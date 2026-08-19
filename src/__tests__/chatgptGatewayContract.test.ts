@@ -61,6 +61,13 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(schema).toContain('openaiFileIdRefs');
   });
 
+  it('stays within ChatGPT Actions editor schema validation constraints', () => {
+    expect(schema).toContain('components:\n  schemas: {}');
+    for (const match of schema.matchAll(/^\s+description:\s+(.+)$/gm)) {
+      expect(match[1].length).toBeLessThanOrEqual(300);
+    }
+  });
+
   it('exposes one-time key creation only from the existing IAP-protected MVP app', () => {
     expect(wrapper).toContain("app.post('/api/mvp/chatgpt/keys'");
     expect(wrapper).toContain('crypto.randomBytes(32)');
