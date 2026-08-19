@@ -6,6 +6,7 @@ import { getFirestoreInstance } from './src/server/db/firestore';
 
 const PORT = Number(process.env.PORT || 8080);
 const UPSTREAM_URL = String(process.env.ZAOJING_MVP_UPSTREAM_URL || '').replace(/\/+$/, '');
+const UPSTREAM_AUTH_MODE = String(process.env.ZAOJING_UPSTREAM_AUTH_MODE || 'iap-signed-jwt').trim().toLowerCase();
 const PUBLIC_URL = String(process.env.ZAOJING_CHATGPT_PUBLIC_URL || '').replace(/\/+$/, '');
 const RUNTIME_SA = String(process.env.RUNTIME_SERVICE_ACCOUNT_EMAIL || '');
 const BOOTSTRAP_KEY_HASH = String(process.env.ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH || '').trim().toLowerCase();
@@ -75,6 +76,7 @@ async function downloadOpenAIImage(ref: OpenAIFileRef): Promise<{ bytes: Buffer;
 }
 
 let cachedIapJwt: { token: string; expiresAt: number } | null = null;
+let cachedCloudRunIdToken: { token: string; expiresAt: number } | null = null;
 
 async function getIapServiceJwt(): Promise<string> {
   if (cachedIapJwt && cachedIapJwt.expiresAt - Date.now() > 60_000) return cachedIapJwt.token;
@@ -97,12 +99,24 @@ async function getIapServiceJwt(): Promise<string> {
   return cachedIapJwt.token;
 }
 
+async function getCloudRunIdToken(): Promise<string> {
+  if (cachedCloudRunIdToken && cachedCloudRunIdToken.expiresAt - Date.now() > 60_000) return cachedCloudRunIdToken.token;
+  if (!UPSTREAM_URL) throw new Error('ZAOJING_MVP_UPSTREAM_URL is missing');
+  const endpoint = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity' +
+    `?audience=${encodeURIComponent(UPSTREAM_URL)}&format=full`;
+  const response = await fetch(endpoint, { headers: { 'Metadata-Flavor': 'Google' } });
+  const token = (await response.text()).trim();
+  if (!response.ok || !token) throw new Error(`CLOUD_RUN_ID_TOKEN_FAILED_${response.status}`);
+  cachedCloudRunIdToken = { token, expiresAt: Date.now() + 5 * 60_000 };
+  return token;
+}
+
 async function upstream(path: string, init: RequestInit = {}): Promise<Response> {
   if (!UPSTREAM_URL) throw new Error('ZAOJING_MVP_UPSTREAM_URL is missing');
-  const iapJwt = await getIapServiceJwt();
+  const token = UPSTREAM_AUTH_MODE === 'cloud-run-id-token' ? await getCloudRunIdToken() : await getIapServiceJwt();
   return fetch(`${UPSTREAM_URL}${path}`, {
     ...init,
-    headers: { ...Object.fromEntries(new Headers(init.headers).entries()), Authorization: `Bearer ${iapJwt}` },
+    headers: { ...Object.fromEntries(new Headers(init.headers).entries()), Authorization: `Bearer ${token}` },
   });
 }
 
@@ -134,7 +148,32 @@ export function createChatGptGatewayApp() {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '256kb' }));
-  app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'zaojing-chatgpt-gateway', version: 'v1', upstreamConfigured: Boolean(UPSTREAM_URL), bootstrapKeyConfigured: Boolean(BOOTSTRAP_KEY_HASH) }));
+  app.get('/health', async (_req, res) => {
+    try {
+      const upstreamHealth = await upstream('/api/mvp/health');
+      const upstreamReachable = upstreamHealth.ok;
+      return res.status(upstreamReachable ? 200 : 503).json({
+        status: upstreamReachable ? 'ok' : 'degraded',
+        service: 'zaojing-chatgpt-gateway',
+        version: 'v1',
+        upstreamConfigured: Boolean(UPSTREAM_URL),
+        upstreamAuthMode: UPSTREAM_AUTH_MODE,
+        upstreamReachable,
+        upstreamStatus: upstreamHealth.status,
+        bootstrapKeyConfigured: Boolean(BOOTSTRAP_KEY_HASH),
+      });
+    } catch {
+      return res.status(503).json({
+        status: 'degraded',
+        service: 'zaojing-chatgpt-gateway',
+        version: 'v1',
+        upstreamConfigured: Boolean(UPSTREAM_URL),
+        upstreamAuthMode: UPSTREAM_AUTH_MODE,
+        upstreamReachable: false,
+        bootstrapKeyConfigured: Boolean(BOOTSTRAP_KEY_HASH),
+      });
+    }
+  });
   app.get('/openapi.yaml', (_req, res) => {
     const template = fs.readFileSync('chatgpt-action-openapi.yaml', 'utf8');
     const origin = PUBLIC_URL || `${_req.protocol}://${_req.get('host')}`;
@@ -186,7 +225,7 @@ export function createChatGptGatewayApp() {
 export async function startChatGptGateway() {
   await ensureBootstrapApiKey();
   const app = createChatGptGatewayApp();
-  return app.listen(PORT, '0.0.0.0', () => console.log(`[ZAOJING_CHATGPT_GATEWAY] listening on :${PORT}`));
+  return app.listen(PORT, '0.0.0.0', () => console.log(`[ZAOJING_CHATGPT_GATEWAY] listening on :${PORT}; upstreamAuth=${UPSTREAM_AUTH_MODE}`));
 }
 
 if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) void startChatGptGateway();
