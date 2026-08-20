@@ -1,0 +1,144 @@
+name: E2E-04 Provider Capacity Retry
+
+on:
+  push:
+    branches: [e2e-04-character-reference-final]
+    paths:
+      - '.github/workflows/e2e-04-provider-capacity-retry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+env:
+  URL: https://zaojing-chatgpt-gateway-uat-i7lns3auvq-uc.a.run.app
+  CHARACTER_ID: char_731dace9-bfaf-44e3-b280-be90f3708518
+  REFERENCE_ID: ref_0
+  PROJECT_ID: xp-vertex-project
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - name: Authenticate for final artifact proof
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Retry only after explicit terminal provider failure
+        id: run
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > retry-history.txt
+          SUCCESS_TASK=''
+          for ATTEMPT in 1 2; do
+            IDEM="e2e04capacity-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ATTEMPT}"
+            jq -nc --arg cid "$CHARACTER_ID" --arg rid "$REFERENCE_ID" --arg idem "$IDEM" '{prompt:"Fixed camera. The person remains in the same pose with gentle natural breathing. Keep the scene unchanged.",durationSeconds:4,idempotencyKey:$idem,inputSource:{type:"character_reference",characterId:$cid,referenceId:$rid}}' > request.json
+            curl -sS -X POST -H 'Content-Type: application/json' --data-binary @request.json "$URL/v1/videos" -o create.json
+            echo "CREATE[$ATTEMPT] $(jq -c . create.json)" >> retry-history.txt
+            TASK="$(jq -r '.taskId // empty' create.json)"
+            test -n "$TASK"
+            cp create.json status.json
+
+            for POLL in $(seq 1 40); do
+              STATUS="$(jq -r '.status // empty' status.json 2>/dev/null || true)"
+              case "$STATUS" in COMPLETED|FAILED|SUBMISSION_OUTCOME_UNKNOWN) break;; esac
+              sleep 8
+              HTTP="$(curl -sS -o status.json -w '%{http_code}' "$URL/v1/videos/$TASK" || true)"
+              echo "POLL[$ATTEMPT.$POLL] HTTP=$HTTP $(jq -c '{status,stage,providerAttempt,identityRetryCount,artifactPersisted,artifactVerified,sizeBytes,identityReport,error,inputSource}' status.json 2>/dev/null || true)" >> retry-history.txt
+            done
+
+            STATUS="$(jq -r '.status // empty' status.json)"
+            echo "FINAL[$ATTEMPT] $(jq -c . status.json)" >> retry-history.txt
+            if [ "$STATUS" = 'COMPLETED' ]; then
+              jq -e '.artifactPersisted == true and .artifactVerified == true and .videoReady == true and .sizeBytes >= 1000' status.json >/dev/null
+              jq -e '.identityReport.pass == true and .identityReport.gateStatus == "pass"' status.json >/dev/null
+              SUCCESS_TASK="$TASK"
+              cp status.json success.json
+              break
+            fi
+
+            CODE="$(jq -r '.error.code // empty' status.json)"
+            PCODE="$(jq -r '.error.providerCode // empty' status.json)"
+            MSG="$(jq -r '.error.message // empty' status.json)"
+            if [ "$STATUS" = 'FAILED' ] && { [ "$PCODE" = '8' ] || echo "$MSG" | grep -qi 'high load'; }; then
+              continue
+            fi
+            # Safety, identity, request, or any other non-capacity failure is not retried here.
+            break
+          done
+          echo "success_task=$SUCCESS_TASK" >> "$GITHUB_OUTPUT"
+          test -n "$SUCCESS_TASK"
+
+      - name: Verify canonical MP4
+        id: mp4
+        if: steps.run.outputs.success_task != ''
+        shell: bash
+        env:
+          TASK_ID: ${{ steps.run.outputs.success_task }}
+        run: |
+          set -euo pipefail
+          OBJECT="gs://$VEO_OUTPUT_BUCKET/veo/$TASK_ID/video.mp4"
+          echo "object=$OBJECT" >> "$GITHUB_OUTPUT"
+          gcloud storage cp "$OBJECT" result.mp4
+          BYTES="$(stat -c%s result.mp4)"
+          test "$BYTES" -ge 1000
+          python3 - <<'PY'
+          from pathlib import Path
+          b=Path('result.mp4').read_bytes()
+          assert b'ftyp' in b[:64]
+          print({'verifiedMp4Bytes':len(b),'ftyp':True})
+          PY
+          echo "bytes=$BYTES" >> "$GITHUB_OUTPUT"
+
+      - name: Record capacity retry evidence
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUCCESS_TASK: ${{ steps.run.outputs.success_task }}
+          MP4_OBJECT: ${{ steps.mp4.outputs.object }}
+          MP4_BYTES: ${{ steps.mp4.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          HISTORY="$(cat retry-history.txt 2>/dev/null || echo unavailable)"
+          SUCCESS="$(cat success.json 2>/dev/null || echo unavailable)"
+          BODY=$(cat <<EOF
+          ### E2E-04 provider-capacity retry evidence
+          - Job status: \`${{ job.status }}\`
+          - Source SHA: \`${GITHUB_SHA}\`
+          - Character: \`$CHARACTER_ID\`
+          - Reference: \`$REFERENCE_ID\`
+          - Maximum new provider tasks: \`2\`
+          - Successful task: \`${SUCCESS_TASK:-none}\`
+          - User master re-upload: \`false\`
+          - Canonical MP4: \`${MP4_OBJECT:-unknown}\`
+          - Canonical MP4 bytes: \`${MP4_BYTES:-unknown}\`
+
+          Retry history:
+          \`\`\`text
+          $HISTORY
+          \`\`\`
+
+          Successful final task:
+          \`\`\`json
+          $SUCCESS
+          \`\`\`
+          EOF
+          )
+          jq -nc --arg body "$BODY" '{body:$body}' > comment.json
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/47/comments" --data-binary @comment.json >/dev/null
