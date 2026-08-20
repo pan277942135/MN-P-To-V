@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Zaojing Identity Safe Video API
-  version: 1.0.0
-  description: Create and monitor Zaojing Identity Safe image-to-video tasks from ChatGPT.
+  version: 1.1.0
+  description: Read durable Zaojing character packages and create or monitor Identity Safe image-to-video tasks from ChatGPT.
 servers:
   - url: https://zaojing-chatgpt-gateway-uat-REPLACE.run.app
 security:
@@ -16,6 +16,43 @@ paths:
       responses:
         '200':
           description: Healthy gateway.
+  /v1/characters:
+    get:
+      operationId: listZaojingCharacters
+      security: []
+      summary: List durable character packages already stored in Zaojing.
+      description: Use this before asking the user to upload a character pack. Optionally search by character id, name, or description. This is a read-only operation.
+      x-openai-isConsequential: false
+      parameters:
+        - in: query
+          name: q
+          required: false
+          schema:
+            type: string
+            maxLength: 120
+          description: Optional character id or name such as meining or 梅凝.
+      responses:
+        '200':
+          description: Action-safe character list. Inspect ok, status, count, characters, and any explicit registry error.
+  /v1/characters/{characterId}:
+    get:
+      operationId: getZaojingCharacterPackage
+      security: []
+      summary: Get one durable Zaojing character package for generation planning.
+      description: Returns identitySpec plus stable reference asset URLs from the existing Firestore and GCS character library. This does not create or modify a character.
+      x-openai-isConsequential: false
+      parameters:
+        - in: path
+          name: characterId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 160
+          description: Exact characterId returned by listZaojingCharacters.
+      responses:
+        '200':
+          description: Action-safe role package or CHARACTER_NOT_FOUND result. Use rolePackage identitySpec and reference metadata as the durable source of truth.
   /v1/images/preflight:
     post:
       operationId: preflightIdentityImage
