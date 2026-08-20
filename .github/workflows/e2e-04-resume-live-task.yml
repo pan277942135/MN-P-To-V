@@ -1,0 +1,141 @@
+name: E2E-04 Resume Existing Live Task
+
+on:
+  push:
+    branches: [e2e-04-character-reference-final]
+    paths:
+      - '.github/workflows/e2e-04-resume-live-task.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+env:
+  URL: https://zaojing-chatgpt-gateway-uat-i7lns3auvq-uc.a.run.app
+  TASK_ID: mvp_7bcb86ca-ff95-4fdc-8758-5b940ce2db4e
+  EXPECTED_CHARACTER_ID: char_731dace9-bfaf-44e3-b280-be90f3708518
+  EXPECTED_REFERENCE_ID: ref_0
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  resume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Poll existing task only
+        id: poll
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo start > resume-stage.txt
+          : > poll-history.txt
+          for i in $(seq 1 60); do
+            HTTP="$(curl -sS -o status.json -w '%{http_code}' "$URL/v1/videos/$TASK_ID" || true)"
+            STATUS="$(jq -r '.status // empty' status.json 2>/dev/null || true)"
+            STAGE="$(jq -r '.stage // empty' status.json 2>/dev/null || true)"
+            echo "poll[$i] http=$HTTP status=$STATUS stage=$STAGE $(jq -c '{providerAttempt,identityRetryCount,artifactPersisted,artifactVerified,sizeBytes,identityReport,error,inputSource}' status.json 2>/dev/null || true)" | tee -a poll-history.txt
+            case "$STATUS" in
+              COMPLETED|FAILED|SUBMISSION_OUTCOME_UNKNOWN) break ;;
+            esac
+            sleep 10
+          done
+          echo terminal > resume-stage.txt
+          cat status.json
+          STATUS="$(jq -r '.status // empty' status.json)"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "provider_attempt=$(jq -r '.providerAttempt // empty' status.json)" >> "$GITHUB_OUTPUT"
+          echo "identity_retry_count=$(jq -r '.identityRetryCount // empty' status.json)" >> "$GITHUB_OUTPUT"
+          echo "size_bytes=$(jq -r '.sizeBytes // empty' status.json)" >> "$GITHUB_OUTPUT"
+          echo "identity_gate=$(jq -r '.identityReport.gateStatus // empty' status.json)" >> "$GITHUB_OUTPUT"
+          jq -e '.inputSource.type == "character_reference" and .inputSource.characterId == $cid and .inputSource.referenceId == $rid' --arg cid "$EXPECTED_CHARACTER_ID" --arg rid "$EXPECTED_REFERENCE_ID" status.json >/dev/null
+          if [ "$STATUS" = 'SUBMISSION_OUTCOME_UNKNOWN' ]; then
+            echo recover > resume-stage.txt
+            curl -sS -X POST "$URL/v1/videos/$TASK_ID/recover" -o recovery.json || true
+            cat recovery.json
+            cp recovery.json status.json
+            STATUS="$(jq -r '.status // empty' status.json 2>/dev/null || true)"
+            echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          fi
+          test "$STATUS" = 'COMPLETED'
+          jq -e '.artifactPersisted == true and .artifactVerified == true and .videoReady == true and .sizeBytes >= 1000' status.json >/dev/null
+          jq -e '.identityReport.pass == true and .identityReport.gateStatus == "pass"' status.json >/dev/null
+          echo pass > resume-stage.txt
+
+      - name: Authenticate to Google Cloud for artifact proof
+        if: steps.poll.outputs.status == 'COMPLETED'
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        if: steps.poll.outputs.status == 'COMPLETED'
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Verify canonical MP4
+        id: mp4
+        if: steps.poll.outputs.status == 'COMPLETED'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OBJECT="gs://$VEO_OUTPUT_BUCKET/veo/$TASK_ID/video.mp4"
+          echo "object=$OBJECT" >> "$GITHUB_OUTPUT"
+          gcloud storage cp "$OBJECT" result.mp4
+          BYTES="$(stat -c%s result.mp4)"
+          test "$BYTES" -ge 1000
+          python3 - <<'PY'
+          from pathlib import Path
+          b = Path('result.mp4').read_bytes()
+          assert b'ftyp' in b[:64]
+          print({'mp4Bytes': len(b), 'ftypVerified': True})
+          PY
+          echo "bytes=$BYTES" >> "$GITHUB_OUTPUT"
+
+      - name: Record resume evidence
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MP4_OBJECT: ${{ steps.mp4.outputs.object }}
+          MP4_BYTES: ${{ steps.mp4.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          JOB_STATUS='${{ job.status }}'
+          STAGE="$(cat resume-stage.txt 2>/dev/null || echo unknown)"
+          FINAL="$(cat status.json 2>/dev/null || echo unavailable)"
+          HISTORY="$(cat poll-history.txt 2>/dev/null || echo unavailable)"
+          BODY=$(cat <<EOF
+          ### E2E-04 existing-task resume evidence
+          - Job status: \`$JOB_STATUS\`
+          - Source SHA: \`${GITHUB_SHA}\`
+          - Task: \`$TASK_ID\`
+          - No new create call: \`true\`
+          - Expected character: \`$EXPECTED_CHARACTER_ID\`
+          - Expected reference: \`$EXPECTED_REFERENCE_ID\`
+          - Resume stage: \`$STAGE\`
+          - Canonical MP4: \`${MP4_OBJECT:-unknown}\`
+          - Canonical MP4 bytes: \`${MP4_BYTES:-unknown}\`
+
+          Final task:
+          \`\`\`json
+          $FINAL
+          \`\`\`
+
+          Poll history:
+          \`\`\`text
+          $HISTORY
+          \`\`\`
+          EOF
+          )
+          jq -nc --arg body "$BODY" '{body:$body}' > comment.json
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/47/comments" --data-binary @comment.json >/dev/null
