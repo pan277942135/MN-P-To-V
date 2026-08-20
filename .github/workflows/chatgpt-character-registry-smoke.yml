@@ -1,6 +1,10 @@
 name: ChatGPT Character Registry Live Smoke
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/chatgpt-character-registry-smoke.yml'
   workflow_run:
     workflows: ['ChatGPT Gateway UAT Deploy']
     types: [completed]
@@ -16,6 +20,7 @@ env:
 jobs:
   character-registry-smoke:
     if: >-
+      github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
