@@ -1,0 +1,220 @@
+name: E2E-04 Character Reference Live Acceptance v2
+
+on:
+  push:
+    branches: [e2e-04-character-reference-final]
+    paths:
+      - '.github/workflows/e2e-04-character-reference-live-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  GAR_REPO: zaojing
+  GATEWAY_SERVICE: zaojing-chatgpt-gateway-uat
+  CHATGPT_UPSTREAM_SERVICE: zaojing-chatgpt-upstream-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  BOOTSTRAP_KEY_HASH: 2eb32be8da4af88e0d9dc19b8fa642977394a7021e91ca24e61ea667417f44f2
+  UAT_DIRECT_DAILY_LIMIT: '12'
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Build and deploy current gateway branch
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          UPSTREAM_URL="$(gcloud run services describe "$CHATGPT_UPSTREAM_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          test -n "$UPSTREAM_URL"
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          SHA="$(git rev-parse HEAD)"
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$GATEWAY_SERVICE:e2e04v2-$SHA"
+          docker build -f Dockerfile.chatgpt-gateway -t "$IMAGE" .
+          docker push "$IMAGE"
+          gcloud run deploy "$GATEWAY_SERVICE" \
+            --project="$PROJECT_ID" --region="$REGION" --platform=managed \
+            --image="$IMAGE" --service-account="$RUNTIME_SA" \
+            --allow-unauthenticated --no-iap \
+            --cpu=1 --memory=1Gi --timeout=300 --concurrency=20 --min-instances=0 --max-instances=2 \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,ZAOJING_MVP_UPSTREAM_URL=$UPSTREAM_URL,ZAOJING_UPSTREAM_AUTH_MODE=cloud-run-id-token,ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH=$BOOTSTRAP_KEY_HASH,ZAOJING_CHATGPT_UAT_DIRECT=true,ZAOJING_CHATGPT_UAT_DAILY_LIMIT=$UAT_DIRECT_DAILY_LIMIT" \
+            --quiet
+          URL="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          gcloud run services update "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --update-env-vars="ZAOJING_CHATGPT_PUBLIC_URL=$URL" --quiet >/dev/null
+          REV="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REV" >> "$GITHUB_OUTPUT"
+
+      - name: Generate real 4-second Mei Ning video
+        id: verify
+        shell: bash
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          set -euo pipefail
+          echo health > stage.txt
+          curl -fsS "$URL/health" -o health.json
+          jq -e '.status == "ok" and .upstreamReachable == true' health.json >/dev/null
+
+          echo character-list > stage.txt
+          curl -fsS --get --data-urlencode 'q=梅凝' "$URL/v1/characters" -o characters.json
+          CHARACTER_ID="$(jq -r '.characters[0].characterId // empty' characters.json)"
+          test -n "$CHARACTER_ID"
+          echo "character_id=$CHARACTER_ID" >> "$GITHUB_OUTPUT"
+
+          echo character-package > stage.txt
+          curl -fsS "$URL/v1/characters/$CHARACTER_ID" -o package.json
+          REFERENCE_ID="$(jq -r '[.rolePackage.references[] | select(.angle == "front")][0].referenceId // .rolePackage.references[0].referenceId // empty' package.json)"
+          test -n "$REFERENCE_ID"
+          echo "reference_id=$REFERENCE_ID" >> "$GITHUB_OUTPUT"
+
+          echo reference-bytes > stage.txt
+          curl -fsS -D reference.headers "$URL/v1/characters/$CHARACTER_ID/references/$REFERENCE_ID" -o reference.bin
+          grep -qi '^content-type: image/png' reference.headers
+          grep -qi '^x-zaojing-mime-authority: magic-bytes' reference.headers
+          grep -qi '^x-zaojing-metadata-mime-mismatch: true' reference.headers
+          python3 - <<'PY'
+          from pathlib import Path
+          b = Path('reference.bin').read_bytes()
+          assert b[:8] == b'\x89PNG\r\n\x1a\n'
+          print('reference_png_bytes', len(b))
+          PY
+
+          IDEM="e2e04v2-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-meining"
+          echo "idempotency_key=$IDEM" >> "$GITHUB_OUTPUT"
+          jq -nc --arg cid "$CHARACTER_ID" --arg rid "$REFERENCE_ID" --arg idem "$IDEM" '{prompt:"Keep the adult character identity stable. Near-locked camera. Natural breathing, one subtle blink, minimal hair movement. No reframing.",durationSeconds:4,idempotencyKey:$idem,inputSource:{type:"character_reference",characterId:$cid,referenceId:$rid}}' > request.json
+
+          echo create > stage.txt
+          curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @request.json "$URL/v1/videos" -o create.json
+          cat create.json
+          jq -e '.taskCreated == true and .taskId != null and .inputSource.type == "character_reference"' create.json >/dev/null
+          jq -e '.inputFile.detectedMime == "image/png" and .inputFile.metadataMimeMismatch == true and .inputFile.mimeAuthority == "magic_bytes"' create.json >/dev/null
+          TASK_ID="$(jq -r '.taskId' create.json)"
+          echo "task_id=$TASK_ID" >> "$GITHUB_OUTPUT"
+
+          cp create.json final.json
+          echo poll > stage.txt
+          for i in $(seq 1 50); do
+            STATUS="$(jq -r '.status // empty' final.json)"
+            case "$STATUS" in COMPLETED|FAILED|SUBMISSION_OUTCOME_UNKNOWN) break;; esac
+            sleep 10
+            curl -fsS "$URL/v1/videos/$TASK_ID" -o final.json
+            echo "poll[$i] $(jq -c '{status,stage,providerAttempt,identityRetryCount,artifactPersisted,artifactVerified,sizeBytes,identityReport,error}' final.json)"
+          done
+
+          echo final-assertions > stage.txt
+          cat final.json
+          jq -e '.status == "COMPLETED"' final.json >/dev/null
+          jq -e '.artifactPersisted == true and .artifactVerified == true and .videoReady == true and .sizeBytes >= 1000' final.json >/dev/null
+          jq -e '.identityReport.pass == true and .identityReport.gateStatus == "pass"' final.json >/dev/null
+          jq -e '.inputSource.type == "character_reference" and .inputSource.characterId == $cid and .inputSource.referenceId == $rid' --arg cid "$CHARACTER_ID" --arg rid "$REFERENCE_ID" final.json >/dev/null
+          echo "size_bytes=$(jq -r '.sizeBytes' final.json)" >> "$GITHUB_OUTPUT"
+          echo "identity_gate=$(jq -r '.identityReport.gateStatus' final.json)" >> "$GITHUB_OUTPUT"
+          echo "provider_attempt=$(jq -r '.providerAttempt' final.json)" >> "$GITHUB_OUTPUT"
+          echo "identity_retry_count=$(jq -r '.identityRetryCount' final.json)" >> "$GITHUB_OUTPUT"
+          echo done > stage.txt
+
+      - name: Verify canonical MP4 in GCS
+        id: mp4
+        shell: bash
+        env:
+          TASK_ID: ${{ steps.verify.outputs.task_id }}
+        run: |
+          set -euo pipefail
+          OBJECT="gs://$VEO_OUTPUT_BUCKET/veo/$TASK_ID/video.mp4"
+          echo "object=$OBJECT" >> "$GITHUB_OUTPUT"
+          gcloud storage cp "$OBJECT" result.mp4
+          BYTES="$(stat -c%s result.mp4)"
+          test "$BYTES" -ge 1000
+          python3 - <<'PY'
+          from pathlib import Path
+          b = Path('result.mp4').read_bytes()
+          assert b'ftyp' in b[:64]
+          print('verified_mp4_bytes', len(b))
+          PY
+          echo "bytes=$BYTES" >> "$GITHUB_OUTPUT"
+
+      - name: Record live v2 evidence
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          URL: ${{ steps.deploy.outputs.url }}
+          REVISION: ${{ steps.deploy.outputs.revision }}
+          CHARACTER_ID: ${{ steps.verify.outputs.character_id }}
+          REFERENCE_ID: ${{ steps.verify.outputs.reference_id }}
+          TASK_ID: ${{ steps.verify.outputs.task_id }}
+          IDEM: ${{ steps.verify.outputs.idempotency_key }}
+          SIZE_BYTES: ${{ steps.verify.outputs.size_bytes }}
+          IDENTITY_GATE: ${{ steps.verify.outputs.identity_gate }}
+          PROVIDER_ATTEMPT: ${{ steps.verify.outputs.provider_attempt }}
+          IDENTITY_RETRY_COUNT: ${{ steps.verify.outputs.identity_retry_count }}
+          MP4_OBJECT: ${{ steps.mp4.outputs.object }}
+          MP4_BYTES: ${{ steps.mp4.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          STATUS='${{ job.status }}'
+          STAGE="$(cat stage.txt 2>/dev/null || echo before-verify)"
+          CREATE="$(cat create.json 2>/dev/null || echo unavailable)"
+          FINAL="$(cat final.json 2>/dev/null || echo unavailable)"
+          HEADERS="$(cat reference.headers 2>/dev/null || echo unavailable)"
+          BODY=$(cat <<EOF
+          ### E2E-04 character_reference live acceptance v2
+          - Job status: \`$STATUS\`
+          - Source SHA: \`${GITHUB_SHA}\`
+          - Stage: \`$STAGE\`
+          - Gateway: ${URL:-unknown}
+          - Revision: \`${REVISION:-unknown}\`
+          - Character: \`${CHARACTER_ID:-unknown}\`
+          - Reference: \`${REFERENCE_ID:-unknown}\`
+          - Task: \`${TASK_ID:-unknown}\`
+          - Idempotency: \`${IDEM:-unknown}\`
+          - User master re-upload: \`false\`
+          - Identity QA: \`${IDENTITY_GATE:-unknown}\`
+          - Provider attempt: \`${PROVIDER_ATTEMPT:-unknown}\`
+          - Identity retry count: \`${IDENTITY_RETRY_COUNT:-unknown}\`
+          - Task bytes: \`${SIZE_BYTES:-unknown}\`
+          - Canonical MP4: \`${MP4_OBJECT:-unknown}\`
+          - Canonical MP4 bytes: \`${MP4_BYTES:-unknown}\`
+
+          Reference headers:
+          \`\`\`text
+          $HEADERS
+          \`\`\`
+          Create:
+          \`\`\`json
+          $CREATE
+          \`\`\`
+          Final:
+          \`\`\`json
+          $FINAL
+          \`\`\`
+          EOF
+          )
+          jq -nc --arg body "$BODY" '{body:$body}' > comment.json
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/47/comments" --data-binary @comment.json >/dev/null
