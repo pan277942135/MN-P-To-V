@@ -1,6 +1,9 @@
 import express from 'express';
-import { Storage } from '@google-cloud/storage';
 import { getFirestoreInstance } from './src/server/db/firestore';
+import {
+  CharacterReferenceInputError,
+  resolveCharacterReferenceInput,
+} from './src/server/services/chatgptCharacterInputResolver';
 
 type UpstreamCall = (path: string, init?: RequestInit) => Promise<Response>;
 
@@ -26,9 +29,6 @@ type DurableCharacterReference = {
 
 const CHARACTER_COLLECTION = 'characters';
 const CHARACTER_LIMIT = 100;
-const CHARACTER_REFERENCE_MAX_BYTES = 20 * 1024 * 1024;
-const CHARACTER_REFERENCE_DOWNLOAD_TIMEOUT_MS = 10_000;
-const storage = new Storage();
 
 function normalizeQuery(value: unknown): string {
   return String(value || '').trim().toLocaleLowerCase();
@@ -89,6 +89,22 @@ async function getCharacterRecord(characterId: string): Promise<any | null> {
   return { ...(snap.data() || {}), id: snap.id, evidenceSource: 'firestore' };
 }
 
+function characterReferenceHttpStatus(error: CharacterReferenceInputError): number {
+  switch (error.code) {
+    case 'CHARACTER_NOT_FOUND':
+    case 'CHARACTER_REFERENCE_NOT_FOUND':
+      return 404;
+    case 'CHARACTER_REFERENCE_TOO_LARGE':
+      return 413;
+    case 'CHARACTER_NOT_READY':
+      return 409;
+    case 'CHARACTER_RIGHTS_NOT_CONFIRMED':
+      return 403;
+    default:
+      return 502;
+  }
+}
+
 export function createChatGptCharacterRouter(deps: CharacterRouterDeps): express.Router {
   const router = express.Router();
 
@@ -143,6 +159,8 @@ export function createChatGptCharacterRouter(deps: CharacterRouterDeps): express
       const references = orderedReferences(record).map((ref) => ({
         referenceId: String(ref?.id || ''),
         angle: ref?.angle || 'other',
+        // This is catalog metadata only. The reference byte endpoint normalizes Content-Type
+        // from the actual GCS magic bytes through resolveCharacterReferenceInput().
         mimeType: ref?.mimeType || 'image/jpeg',
         width: Number(ref?.width || 0) || null,
         height: Number(ref?.height || 0) || null,
@@ -183,35 +201,25 @@ export function createChatGptCharacterRouter(deps: CharacterRouterDeps): express
     const characterId = String(req.params.characterId || '').trim();
     const referenceId = String(req.params.referenceId || '').trim();
     try {
-      const record = await getCharacterRecord(characterId);
-      if (!record) return res.status(404).json({ error: 'character_not_found', characterId });
-      const ref = orderedReferences(record).find((item) => String(item.id || '') === referenceId);
-      if (!ref) return res.status(404).json({ error: 'character_reference_not_found', characterId, referenceId });
-
-      const bucket = String(ref.outputBucket || '').trim();
-      const objectPath = String(ref.outputObjectPath || '').trim();
-      const mimeType = String(ref.mimeType || 'image/jpeg').split(';')[0].toLowerCase();
-      if (!bucket || !objectPath) return res.status(502).json({ error: 'character_reference_storage_pointer_missing' });
-      if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
-        return res.status(502).json({ error: 'character_reference_invalid_mime', mimeType });
-      }
-      if (Number(ref.sizeBytes || 0) > CHARACTER_REFERENCE_MAX_BYTES) {
-        return res.status(413).json({ error: 'character_reference_too_large' });
-      }
-
-      const [downloaded] = await storage.bucket(bucket).file(objectPath).download({
-        timeout: CHARACTER_REFERENCE_DOWNLOAD_TIMEOUT_MS,
-      } as any);
-      const bytes = Buffer.from(downloaded);
-      if (!bytes.length) return res.status(502).json({ error: 'character_reference_empty' });
-      if (bytes.length > CHARACTER_REFERENCE_MAX_BYTES) return res.status(413).json({ error: 'character_reference_too_large' });
-
-      res.setHeader('Content-Type', mimeType);
-      res.setHeader('Content-Length', String(bytes.length));
+      const resolved = await resolveCharacterReferenceInput(characterId, referenceId);
+      res.setHeader('Content-Type', resolved.mimeType);
+      res.setHeader('Content-Length', String(resolved.bytes.length));
       res.setHeader('Cache-Control', 'private, max-age=300');
-      res.setHeader('Content-Disposition', `inline; filename="${characterId}_${referenceId}"`);
-      return res.status(200).send(bytes);
+      res.setHeader('Content-Disposition', `inline; filename="${resolved.name}"`);
+      res.setHeader('X-Zaojing-Mime-Authority', 'magic-bytes');
+      if (resolved.diagnostics.metadataMimeMismatch) {
+        res.setHeader('X-Zaojing-Metadata-Mime-Mismatch', 'true');
+      }
+      return res.status(200).send(resolved.bytes);
     } catch (error: any) {
+      if (error instanceof CharacterReferenceInputError) {
+        return res.status(characterReferenceHttpStatus(error)).json({
+          error: error.code.toLowerCase(),
+          characterId,
+          referenceId,
+          diagnostics: error.diagnostics,
+        });
+      }
       return res.status(502).json({
         error: 'character_reference_read_failed',
         detail: String(error?.message || error),
