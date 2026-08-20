@@ -1,0 +1,119 @@
+name: E2E-04 Character Reference Diagnostic
+
+on:
+  push:
+    branches: [e2e-04-character-reference-final]
+    paths:
+      - '.github/workflows/e2e-04-character-reference-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  URL: https://zaojing-chatgpt-gateway-uat-i7lns3auvq-uc.a.run.app
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Probe public E2E-04 boundary
+        id: probe
+        shell: bash
+        run: |
+          set +e
+          : > stage.txt
+          echo health > stage.txt
+          curl -sS -o health.json -w '%{http_code}' "$URL/health" > health.status
+
+          echo openapi > stage.txt
+          curl -sS -o openapi.yaml -w '%{http_code}' "$URL/openapi.yaml" > openapi.status
+
+          echo characters > stage.txt
+          curl -sS --get --data-urlencode 'q=梅凝' -o characters.json -w '%{http_code}' "$URL/v1/characters" > characters.status
+          CHARACTER_ID="$(jq -r '.characters[0].characterId // empty' characters.json 2>/dev/null)"
+          echo "$CHARACTER_ID" > character-id.txt
+
+          if [ -n "$CHARACTER_ID" ]; then
+            echo package > stage.txt
+            curl -sS -o character-package.json -w '%{http_code}' "$URL/v1/characters/$CHARACTER_ID" > package.status
+            REFERENCE_ID="$(jq -r '[.rolePackage.references[] | select(.angle == "front")][0].referenceId // .rolePackage.references[0].referenceId // empty' character-package.json 2>/dev/null)"
+            echo "$REFERENCE_ID" > reference-id.txt
+          else
+            : > character-package.json
+            echo 000 > package.status
+            : > reference-id.txt
+          fi
+
+          REFERENCE_ID="$(cat reference-id.txt)"
+          if [ -n "$CHARACTER_ID" ] && [ -n "$REFERENCE_ID" ]; then
+            echo create > stage.txt
+            IDEM="e2e04diag-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-meining"
+            jq -nc --arg idem "$IDEM" --arg cid "$CHARACTER_ID" --arg rid "$REFERENCE_ID" '{prompt:"Keep the adult character identity stable. Near-locked camera, natural breathing, minimal hair movement.",durationSeconds:4,idempotencyKey:$idem,inputSource:{type:"character_reference",characterId:$cid,referenceId:$rid}}' > create-request.json
+            curl -sS -o create.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data-binary @create-request.json "$URL/v1/videos" > create.status
+          else
+            : > create-request.json
+            : > create.json
+            echo 000 > create.status
+          fi
+
+          echo done > stage.txt
+
+      - name: Record diagnostic evidence
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          STAGE="$(cat stage.txt 2>/dev/null || echo unknown)"
+          HS="$(cat health.status 2>/dev/null || echo unknown)"
+          OS="$(cat openapi.status 2>/dev/null || echo unknown)"
+          CS="$(cat characters.status 2>/dev/null || echo unknown)"
+          PS="$(cat package.status 2>/dev/null || echo unknown)"
+          CRS="$(cat create.status 2>/dev/null || echo unknown)"
+          CID="$(cat character-id.txt 2>/dev/null || true)"
+          RID="$(cat reference-id.txt 2>/dev/null || true)"
+          HEALTH="$(cat health.json 2>/dev/null || echo unavailable)"
+          CHARS="$(cat characters.json 2>/dev/null || echo unavailable)"
+          PACKAGE="$(cat character-package.json 2>/dev/null || echo unavailable)"
+          CREATE="$(cat create.json 2>/dev/null || echo unavailable)"
+          OPENAPI_MATCH="$(grep -E 'character_reference|required: \[prompt, durationSeconds, idempotencyKey\]' openapi.yaml 2>/dev/null | head -20 || true)"
+          BODY=$(cat <<EOF
+          ### E2E-04 public diagnostic
+          - Source SHA: \`${GITHUB_SHA}\`
+          - Last stage: \`$STAGE\`
+          - HTTP: health=\`$HS\`, openapi=\`$OS\`, characters=\`$CS\`, package=\`$PS\`, create=\`$CRS\`
+          - Character: \`${CID:-unknown}\`
+          - Reference: \`${RID:-unknown}\`
+
+          OpenAPI matches:
+          \`\`\`text
+          $OPENAPI_MATCH
+          \`\`\`
+
+          Health:
+          \`\`\`json
+          $HEALTH
+          \`\`\`
+
+          Characters:
+          \`\`\`json
+          $CHARS
+          \`\`\`
+
+          Character package:
+          \`\`\`json
+          $PACKAGE
+          \`\`\`
+
+          Create response:
+          \`\`\`json
+          $CREATE
+          \`\`\`
+          EOF
+          )
+          jq -nc --arg body "$BODY" '{body:$body}' > comment.json
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/47/comments" --data-binary @comment.json >/dev/null
