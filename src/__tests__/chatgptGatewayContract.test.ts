@@ -5,6 +5,7 @@ const gateway = fs.readFileSync('chatgpt-gateway.ts', 'utf8');
 const schema = fs.readFileSync('chatgpt-action-openapi.yaml', 'utf8');
 const wrapper = fs.readFileSync('mvp-server-v021.ts', 'utf8');
 const resolver = fs.readFileSync('src/server/services/chatgptCharacterInputResolver.ts', 'utf8');
+const characterRouter = fs.readFileSync('chatgpt-character-router.ts', 'utf8');
 const deploy = fs.readFileSync('.github/workflows/chatgpt-gateway-uat-deploy.yml', 'utf8');
 
 describe('ChatGPT Actions gateway contract', () => {
@@ -97,6 +98,16 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(resolver).toContain("CHARACTER_COLLECTION = 'characters'");
     expect(resolver).toContain("artifactAuthority: 'gcs'");
     expect(resolver).toContain('identitySpecSha256');
+  });
+
+  it('uses actual character master bytes as MIME authority and reports stale catalog metadata instead of rejecting the master', () => {
+    expect(resolver).toContain('detectSupportedImageMime');
+    expect(resolver).toContain('metadataMimeMismatch');
+    expect(resolver).toContain("mimeAuthority: 'magic_bytes'");
+    expect(resolver).not.toContain('CHARACTER_REFERENCE_MIME_MISMATCH');
+    expect(characterRouter).toContain('resolveCharacterReferenceInput(characterId, referenceId)');
+    expect(characterRouter).toContain("res.setHeader('Content-Type', resolved.mimeType)");
+    expect(characterRouter).toContain("res.setHeader('X-Zaojing-Mime-Authority', 'magic-bytes')");
   });
 
   it('persists durable source provenance and rejects idempotency reuse with a different source', () => {
