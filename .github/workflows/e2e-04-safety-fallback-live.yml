@@ -1,0 +1,172 @@
+name: E2E-04 Safety Fallback Live
+
+on:
+  push:
+    branches: [e2e-04-character-reference-final]
+    paths:
+      - '.github/workflows/e2e-04-safety-fallback-live.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+env:
+  URL: https://zaojing-chatgpt-gateway-uat-i7lns3auvq-uc.a.run.app
+  PROJECT_ID: xp-vertex-project
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+
+jobs:
+  diagnose-and-accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Authenticate for final GCS proof
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Try bounded Mei Ning references with minimal motion prompt
+        id: attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > attempts.txt
+          echo init > safety-stage.txt
+          curl -fsS --get --data-urlencode 'q=梅凝' "$URL/v1/characters" -o characters.json
+          CHARACTER_ID="$(jq -r '.characters[0].characterId // empty' characters.json)"
+          test -n "$CHARACTER_ID"
+          curl -fsS "$URL/v1/characters/$CHARACTER_ID" -o package.json
+          mapfile -t REFS < <(jq -r '[.rolePackage.references[] | select(.angle == "front")] + [.rolePackage.references[] | select(.angle != "front")] | .[0:3][] | .referenceId' package.json)
+          test "${#REFS[@]}" -ge 1
+          echo "character_id=$CHARACTER_ID" >> "$GITHUB_OUTPUT"
+
+          SUCCESS_TASK=''
+          SUCCESS_REF=''
+          for INDEX in "${!REFS[@]}"; do
+            REF="${REFS[$INDEX]}"
+            ATTEMPT=$((INDEX+1))
+            IDEM="e2e04safe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ATTEMPT}"
+            echo "attempt-$ATTEMPT-create-$REF" > safety-stage.txt
+            jq -nc --arg cid "$CHARACTER_ID" --arg rid "$REF" --arg idem "$IDEM" '{prompt:"Fixed camera. The person stays in the same pose with only gentle natural breathing. Keep the scene unchanged.",durationSeconds:4,idempotencyKey:$idem,inputSource:{type:"character_reference",characterId:$cid,referenceId:$rid}}' > request.json
+            curl -sS -X POST -H 'Content-Type: application/json' --data-binary @request.json "$URL/v1/videos" -o create.json
+            echo "ATTEMPT $ATTEMPT REF $REF CREATE $(jq -c . create.json)" >> attempts.txt
+            TASK="$(jq -r '.taskId // empty' create.json)"
+            if [ -z "$TASK" ]; then
+              continue
+            fi
+
+            cp create.json status.json
+            echo "attempt-$ATTEMPT-poll-$REF" > safety-stage.txt
+            for POLL in $(seq 1 35); do
+              STATUS="$(jq -r '.status // empty' status.json 2>/dev/null || true)"
+              case "$STATUS" in COMPLETED|FAILED|SUBMISSION_OUTCOME_UNKNOWN) break;; esac
+              sleep 8
+              HTTP="$(curl -sS -o status.json -w '%{http_code}' "$URL/v1/videos/$TASK" || true)"
+              echo "ATTEMPT $ATTEMPT POLL $POLL HTTP $HTTP $(jq -c '{status,stage,providerAttempt,identityRetryCount,artifactPersisted,artifactVerified,sizeBytes,identityReport,error,inputSource}' status.json 2>/dev/null || true)" >> attempts.txt
+            done
+
+            STATUS="$(jq -r '.status // empty' status.json 2>/dev/null || true)"
+            echo "ATTEMPT $ATTEMPT REF $REF FINAL $(jq -c . status.json 2>/dev/null || true)" >> attempts.txt
+            if [ "$STATUS" = 'COMPLETED' ]; then
+              jq -e '.artifactPersisted == true and .artifactVerified == true and .videoReady == true and .sizeBytes >= 1000' status.json >/dev/null
+              jq -e '.identityReport.pass == true and .identityReport.gateStatus == "pass"' status.json >/dev/null
+              SUCCESS_TASK="$TASK"
+              SUCCESS_REF="$REF"
+              cp status.json success.json
+              break
+            fi
+
+            if [ "$STATUS" = 'FAILED' ]; then
+              CODE="$(jq -r '.error.code // empty' status.json)"
+              if [ "$CODE" = 'SAFETY_REJECTED' ]; then
+                continue
+              fi
+            fi
+
+            # Do not launch another provider task while an existing task has an uncertain/non-terminal outcome.
+            break
+          done
+
+          echo "success_task=$SUCCESS_TASK" >> "$GITHUB_OUTPUT"
+          echo "success_ref=$SUCCESS_REF" >> "$GITHUB_OUTPUT"
+          if [ -z "$SUCCESS_TASK" ]; then
+            echo no-success > safety-stage.txt
+            exit 1
+          fi
+          echo success > safety-stage.txt
+
+      - name: Verify successful canonical MP4
+        id: mp4
+        if: steps.attempt.outputs.success_task != ''
+        shell: bash
+        env:
+          TASK_ID: ${{ steps.attempt.outputs.success_task }}
+        run: |
+          set -euo pipefail
+          OBJECT="gs://$VEO_OUTPUT_BUCKET/veo/$TASK_ID/video.mp4"
+          echo "object=$OBJECT" >> "$GITHUB_OUTPUT"
+          gcloud storage cp "$OBJECT" result.mp4
+          BYTES="$(stat -c%s result.mp4)"
+          test "$BYTES" -ge 1000
+          python3 - <<'PY'
+          from pathlib import Path
+          b=Path('result.mp4').read_bytes()
+          assert b'ftyp' in b[:64]
+          print({'verifiedMp4Bytes':len(b),'ftyp':True})
+          PY
+          echo "bytes=$BYTES" >> "$GITHUB_OUTPUT"
+
+      - name: Record safety fallback evidence
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHARACTER_ID: ${{ steps.attempt.outputs.character_id }}
+          SUCCESS_TASK: ${{ steps.attempt.outputs.success_task }}
+          SUCCESS_REF: ${{ steps.attempt.outputs.success_ref }}
+          MP4_OBJECT: ${{ steps.mp4.outputs.object }}
+          MP4_BYTES: ${{ steps.mp4.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          STATUS='${{ job.status }}'
+          STAGE="$(cat safety-stage.txt 2>/dev/null || echo unknown)"
+          ATTEMPTS="$(cat attempts.txt 2>/dev/null || echo unavailable)"
+          SUCCESS="$(cat success.json 2>/dev/null || echo unavailable)"
+          BODY=$(cat <<EOF
+          ### E2E-04 bounded safety fallback evidence
+          - Job status: \`$STATUS\`
+          - Source SHA: \`${GITHUB_SHA}\`
+          - Stage: \`$STAGE\`
+          - Character: \`${CHARACTER_ID:-unknown}\`
+          - Tested at most: \`3 references\`
+          - Prompt class: \`minimal fixed-camera natural breathing\`
+          - Successful reference: \`${SUCCESS_REF:-none}\`
+          - Successful task: \`${SUCCESS_TASK:-none}\`
+          - User master re-upload: \`false\`
+          - Canonical MP4: \`${MP4_OBJECT:-unknown}\`
+          - Canonical MP4 bytes: \`${MP4_BYTES:-unknown}\`
+
+          Attempt history:
+          \`\`\`text
+          $ATTEMPTS
+          \`\`\`
+
+          Successful final task:
+          \`\`\`json
+          $SUCCESS
+          \`\`\`
+          EOF
+          )
+          jq -nc --arg body "$BODY" '{body:$body}' > comment.json
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/47/comments" --data-binary @comment.json >/dev/null
