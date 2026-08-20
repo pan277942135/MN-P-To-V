@@ -1,0 +1,127 @@
+name: ChatGPT Character Registry Live Smoke
+
+on:
+  workflow_run:
+    workflows: ['ChatGPT Gateway UAT Deploy']
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  GATEWAY_URL: https://zaojing-chatgpt-gateway-uat-i7lns3auvq-uc.a.run.app
+
+jobs:
+  character-registry-smoke:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify durable character list, package, and one GCS-backed master image
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LIST_STATUS="$(curl -sS --retry 8 --retry-all-errors --retry-delay 5 \
+            -o characters.json -w '%{http_code}' "$GATEWAY_URL/v1/characters")"
+          echo '[character-list]'
+          cat characters.json
+          test "$LIST_STATUS" = '200'
+          jq -e '.ok == true and .status == "CHARACTER_LIST_OK" and (.characters | type == "array") and .count > 0' characters.json >/dev/null
+
+          CHARACTER_ID="$(jq -r '.characters[0].characterId' characters.json)"
+          test -n "$CHARACTER_ID"
+          test "$CHARACTER_ID" != 'null'
+
+          ENCODED_CHARACTER_ID="$(python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CHARACTER_ID")"
+          DETAIL_STATUS="$(curl -sS --retry 5 --retry-all-errors --retry-delay 3 \
+            -o character.json -w '%{http_code}' "$GATEWAY_URL/v1/characters/$ENCODED_CHARACTER_ID")"
+          echo '[character-package]'
+          cat character.json
+          test "$DETAIL_STATUS" = '200'
+          jq -e --arg id "$CHARACTER_ID" '
+            .ok == true and
+            .status == "CHARACTER_PACKAGE_OK" and
+            .rolePackage.characterId == $id and
+            (.rolePackage.identitySpec | type == "object") and
+            (.rolePackage.references | type == "array") and
+            .rolePackage.referenceCount > 0
+          ' character.json >/dev/null
+
+          ASSET_URL="$(jq -r '.rolePackage.references[0].assetUrl' character.json)"
+          test -n "$ASSET_URL"
+          test "$ASSET_URL" != 'null'
+
+          ASSET_STATUS="$(curl -sS --retry 5 --retry-all-errors --retry-delay 3 \
+            -D asset-headers.txt -o character-master.bin -w '%{http_code}' "$ASSET_URL")"
+          echo '[character-reference-headers]'
+          cat asset-headers.txt
+          test "$ASSET_STATUS" = '200'
+          grep -Eiq '^content-type: image/(jpeg|png|webp)' asset-headers.txt
+          test -s character-master.bin
+
+          ASSET_BYTES="$(wc -c < character-master.bin | tr -d ' ')"
+          echo "list_status=$LIST_STATUS" >> "$GITHUB_OUTPUT"
+          echo "detail_status=$DETAIL_STATUS" >> "$GITHUB_OUTPUT"
+          echo "asset_status=$ASSET_STATUS" >> "$GITHUB_OUTPUT"
+          echo "character_id=$CHARACTER_ID" >> "$GITHUB_OUTPUT"
+          echo "asset_bytes=$ASSET_BYTES" >> "$GITHUB_OUTPUT"
+
+      - name: Record character-registry UAT evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIST_STATUS: ${{ steps.verify.outputs.list_status }}
+          DETAIL_STATUS: ${{ steps.verify.outputs.detail_status }}
+          ASSET_STATUS: ${{ steps.verify.outputs.asset_status }}
+          CHARACTER_ID: ${{ steps.verify.outputs.character_id }}
+          ASSET_BYTES: ${{ steps.verify.outputs.asset_bytes }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATUS='${{ job.status }}'
+          LIST_BODY="$(cat characters.json 2>/dev/null || echo unavailable)"
+          DETAIL_BODY="$(cat character.json 2>/dev/null || echo unavailable)"
+          BODY=$(cat <<EOF
+          ### ChatGPT Character Registry UAT evidence
+          - Job status: \`$STATUS\`
+          - Trigger source SHA: \`${{ github.event.workflow_run.head_sha || github.sha }}\`
+          - Gateway: $GATEWAY_URL
+          - Character list HTTP: \`${LIST_STATUS:-unknown}\`
+          - Character package HTTP: \`${DETAIL_STATUS:-unknown}\`
+          - Character master asset HTTP: \`${ASSET_STATUS:-unknown}\`
+          - Verified characterId: \`${CHARACTER_ID:-unknown}\`
+          - Downloaded master bytes: \`${ASSET_BYTES:-unknown}\`
+
+          Character list body:
+          \`\`\`json
+          $LIST_BODY
+          \`\`\`
+
+          Character package body:
+          \`\`\`json
+          $DETAIL_BODY
+          \`\`\`
+          EOF
+          )
+          gh api \
+            --method POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/${GITHUB_REPOSITORY}/issues/47/comments" \
+            -f body="$BODY" >/dev/null
+
+      - name: Summary
+        if: success()
+        run: |
+          {
+            echo '## ChatGPT character registry live smoke passed'
+            echo "- Character: ${{ steps.verify.outputs.character_id }}"
+            echo "- Master bytes fetched through gateway: ${{ steps.verify.outputs.asset_bytes }}"
+            echo '- Proven chain: ChatGPT gateway -> existing Firestore character package -> existing GCS master image.'
+          } >> "$GITHUB_STEP_SUMMARY"

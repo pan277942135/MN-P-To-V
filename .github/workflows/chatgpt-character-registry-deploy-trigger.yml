@@ -1,0 +1,31 @@
+name: ChatGPT Character Registry Deploy Trigger
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'chatgpt-character-router.ts'
+      - 'src/__tests__/chatgptCharacterRegistryContract.test.ts'
+      - '.github/workflows/chatgpt-character-registry-deploy-trigger.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch-gateway-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch ChatGPT Gateway UAT deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api \
+            --method POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/chatgpt-gateway-uat-deploy.yml/dispatches" \
+            -f ref=main
+          echo 'Dispatched ChatGPT Gateway UAT Deploy for character-registry changes.'
