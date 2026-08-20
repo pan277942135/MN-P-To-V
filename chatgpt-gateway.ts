@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import fs from 'node:fs';
 import { GoogleAuth } from 'google-auth-library';
 import { getFirestoreInstance } from './src/server/db/firestore';
+import { createChatGptCharacterRouter } from './chatgpt-character-router';
 
 const PORT = Number(process.env.PORT || 8080);
 const UPSTREAM_URL = String(process.env.ZAOJING_MVP_UPSTREAM_URL || '').replace(/\/+$/, '');
@@ -429,6 +430,8 @@ export function createChatGptGatewayApp() {
   // explicitly enable bounded direct mode so ChatGPT can exercise the real file→Veo path
   // even when its Action credential is stale or unavailable.
   if (!UAT_DIRECT_MODE) app.use('/v1', authenticateApiKey);
+
+  app.use('/v1/characters', createChatGptCharacterRouter({ upstream, publicUrl: PUBLIC_URL }));
 
   app.post('/v1/videos/resolve', async (req, res) => {
     const idempotencyKey = String(req.body?.idempotencyKey || '').trim();
