@@ -4,6 +4,11 @@ on:
   push:
     branches: [e2e-04-character-reference-final]
     paths:
+      - 'chatgpt-gateway.ts'
+      - 'chatgpt-character-router.ts'
+      - 'chatgpt-action-openapi.yaml'
+      - 'src/server/services/chatgptCharacterInputResolver.ts'
+      - 'src/__tests__/chatgptGatewayContract.test.ts'
       - '.github/workflows/e2e-04-character-reference-live.yml'
   workflow_dispatch:
 
@@ -32,6 +37,13 @@ jobs:
     steps:
       - name: Checkout feature branch
         uses: actions/checkout@v4
+
+      - name: Run gateway contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bunx vitest run src/__tests__/chatgptGatewayContract.test.ts
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
@@ -95,24 +107,43 @@ jobs:
           URL: ${{ steps.deploy.outputs.url }}
         run: |
           set -euo pipefail
+          echo health > live-stage.txt
           curl -fsS "$URL/health" -o health.json
           jq -e '.status == "ok" and .upstreamReachable == true and .uatDirectMode == true' health.json >/dev/null
 
+          echo openapi > live-stage.txt
           curl -fsS "$URL/openapi.yaml" -o openapi.yaml
           grep -q 'character_reference' openapi.yaml
           grep -q 'required: \[prompt, durationSeconds, idempotencyKey\]' openapi.yaml
 
+          echo characters > live-stage.txt
           curl -fsS --get --data-urlencode 'q=梅凝' "$URL/v1/characters" -o characters.json
           jq -e '.ok == true and .count >= 1' characters.json >/dev/null
           CHARACTER_ID="$(jq -r '.characters[0].characterId' characters.json)"
           test -n "$CHARACTER_ID" && test "$CHARACTER_ID" != 'null'
+          echo "character_id=$CHARACTER_ID" >> "$GITHUB_OUTPUT"
 
+          echo package > live-stage.txt
           curl -fsS "$URL/v1/characters/$CHARACTER_ID" -o character-package.json
           jq -e '.ok == true and .rolePackage.characterId == $id and .rolePackage.referenceCount >= 1' --arg id "$CHARACTER_ID" character-package.json >/dev/null
           REFERENCE_ID="$(jq -r '[.rolePackage.references[] | select(.angle == "front")][0].referenceId // .rolePackage.references[0].referenceId' character-package.json)"
           test -n "$REFERENCE_ID" && test "$REFERENCE_ID" != 'null'
+          echo "reference_id=$REFERENCE_ID" >> "$GITHUB_OUTPUT"
+
+          echo reference-bytes > live-stage.txt
+          curl -fsS -D reference-headers.txt "$URL/v1/characters/$CHARACTER_ID/references/$REFERENCE_ID" -o reference.bin
+          grep -qi '^content-type: image/png' reference-headers.txt
+          grep -qi '^x-zaojing-mime-authority: magic-bytes' reference-headers.txt
+          grep -qi '^x-zaojing-metadata-mime-mismatch: true' reference-headers.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          data = Path('reference.bin').read_bytes()
+          assert data[:8] == b'\x89PNG\r\n\x1a\n', data[:16]
+          print({'referenceBytes': len(data), 'pngMagicVerified': True})
+          PY
 
           IDEMPOTENCY_KEY="e2e04-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-meining"
+          echo "idempotency_key=$IDEMPOTENCY_KEY" >> "$GITHUB_OUTPUT"
           jq -nc \
             --arg prompt 'Keep the adult character identity stable. Near-locked camera, natural breathing, one subtle blink, minimal hair movement, no reframing.' \
             --arg idem "$IDEMPOTENCY_KEY" \
@@ -120,14 +151,18 @@ jobs:
             --arg rid "$REFERENCE_ID" \
             '{prompt:$prompt,durationSeconds:4,idempotencyKey:$idem,inputSource:{type:"character_reference",characterId:$cid,referenceId:$rid}}' > create-request.json
 
+          echo create > live-stage.txt
           CREATE_HTTP="$(curl -sS -o create.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data-binary @create-request.json "$URL/v1/videos")"
           test "$CREATE_HTTP" = '200'
           cat create.json
           jq -e '.taskCreated == true and .taskId != null and .inputSource.type == "character_reference" and .inputSource.characterId == $cid and .inputSource.referenceId == $rid' --arg cid "$CHARACTER_ID" --arg rid "$REFERENCE_ID" create.json >/dev/null
+          jq -e '.inputFile.detectedMime == "image/png" and .inputFile.metadataMimeMismatch == true and .inputFile.mimeAuthority == "magic_bytes"' create.json >/dev/null
           TASK_ID="$(jq -r '.taskId' create.json)"
           test -n "$TASK_ID" && test "$TASK_ID" != 'null'
+          echo "task_id=$TASK_ID" >> "$GITHUB_OUTPUT"
 
           cp create.json final.json
+          echo poll > live-stage.txt
           for i in $(seq 1 45); do
             STATUS="$(jq -r '.status // ""' final.json)"
             if [ "$STATUS" = 'COMPLETED' ] || [ "$STATUS" = 'FAILED' ] || [ "$STATUS" = 'SUBMISSION_OUTCOME_UNKNOWN' ]; then
@@ -138,19 +173,17 @@ jobs:
             echo "[poll $i] $(jq -c '{status,stage,providerAttempt,identityRetryCount,artifactPersisted,artifactVerified,sizeBytes,identityReport,inputSource,error}' final.json)"
           done
 
+          echo assertions > live-stage.txt
           jq -e '.status == "COMPLETED"' final.json >/dev/null
           jq -e '.inputSource.type == "character_reference" and .inputSource.characterId == $cid and .inputSource.referenceId == $rid' --arg cid "$CHARACTER_ID" --arg rid "$REFERENCE_ID" final.json >/dev/null
           jq -e '.artifactPersisted == true and .artifactVerified == true and .sizeBytes >= 1000 and .videoReady == true' final.json >/dev/null
           jq -e '.identityReport.pass == true and .identityReport.gateStatus == "pass"' final.json >/dev/null
 
-          echo "character_id=$CHARACTER_ID" >> "$GITHUB_OUTPUT"
-          echo "reference_id=$REFERENCE_ID" >> "$GITHUB_OUTPUT"
-          echo "task_id=$TASK_ID" >> "$GITHUB_OUTPUT"
-          echo "idempotency_key=$IDEMPOTENCY_KEY" >> "$GITHUB_OUTPUT"
           echo "size_bytes=$(jq -r '.sizeBytes' final.json)" >> "$GITHUB_OUTPUT"
           echo "identity_gate=$(jq -r '.identityReport.gateStatus' final.json)" >> "$GITHUB_OUTPUT"
           echo "provider_attempt=$(jq -r '.providerAttempt' final.json)" >> "$GITHUB_OUTPUT"
           echo "identity_retry_count=$(jq -r '.identityRetryCount' final.json)" >> "$GITHUB_OUTPUT"
+          echo done > live-stage.txt
 
       - name: Verify canonical GCS MP4 bytes
         id: artifact
@@ -193,11 +226,18 @@ jobs:
         run: |
           set -euo pipefail
           STATUS='${{ job.status }}'
+          STAGE="$(cat live-stage.txt 2>/dev/null || echo before-live)"
+          HEALTH_BODY="$(cat health.json 2>/dev/null || echo unavailable)"
+          CHARACTERS_BODY="$(cat characters.json 2>/dev/null || echo unavailable)"
+          PACKAGE_BODY="$(cat character-package.json 2>/dev/null || echo unavailable)"
+          REFERENCE_HEADERS="$(cat reference-headers.txt 2>/dev/null || echo unavailable)"
+          CREATE_BODY="$(cat create.json 2>/dev/null || echo unavailable)"
           FINAL_BODY="$(cat final.json 2>/dev/null || echo unavailable)"
           BODY=$(cat <<EOF
           ### E2E-04 character_reference live acceptance
           - Job status: \`$STATUS\`
           - Source SHA: \`${GITHUB_SHA}\`
+          - Last live stage: \`$STAGE\`
           - Gateway URL: ${GATEWAY_URL:-unknown}
           - Gateway revision: \`${GATEWAY_REVISION:-unknown}\`
           - Character: \`${CHARACTER_ID:-unknown}\`
@@ -206,7 +246,6 @@ jobs:
           - Idempotency key: \`${IDEMPOTENCY_KEY:-unknown}\`
           - Input source: \`character_reference\`
           - User re-uploaded master image: \`false\`
-          - Artifact persisted/verified: see final task body below
           - Task video size: \`${SIZE_BYTES:-unknown}\`
           - Canonical GCS MP4: \`${MP4_OBJECT:-unknown}\`
           - Canonical MP4 bytes: \`${MP4_BYTES:-unknown}\`
@@ -214,9 +253,34 @@ jobs:
           - Provider attempt: \`${PROVIDER_ATTEMPT:-unknown}\`
           - Identity retry count: \`${IDENTITY_RETRY_COUNT:-unknown}\`
 
+          Reference response headers:
+          \`\`\`text
+          $REFERENCE_HEADERS
+          \`\`\`
+
+          Create response:
+          \`\`\`json
+          $CREATE_BODY
+          \`\`\`
+
           Final task body:
           \`\`\`json
           $FINAL_BODY
+          \`\`\`
+
+          Health body:
+          \`\`\`json
+          $HEALTH_BODY
+          \`\`\`
+
+          Characters body:
+          \`\`\`json
+          $CHARACTERS_BODY
+          \`\`\`
+
+          Character package body:
+          \`\`\`json
+          $PACKAGE_BODY
           \`\`\`
           EOF
           )
