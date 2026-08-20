@@ -44,6 +44,8 @@ export type ResolvedCharacterReferenceInput = {
     angle: string;
     declaredMime: string | null;
     detectedMime: SupportedImageMime;
+    metadataMimeMismatch: boolean;
+    mimeAuthority: 'magic_bytes';
     sizeBytes: number;
     contentSha256: string;
     identitySpecSha256: string;
@@ -69,7 +71,7 @@ function normalizeMime(raw: unknown): string | null {
   return mime || null;
 }
 
-function detectImageMime(bytes: Buffer): SupportedImageMime | null {
+export function detectSupportedImageMime(bytes: Buffer): SupportedImageMime | null {
   if (!bytes || bytes.length < 12) return null;
   const jpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
   const png = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a;
@@ -156,18 +158,14 @@ export async function resolveCharacterReferenceInput(
     throw new CharacterReferenceInputError('CHARACTER_REFERENCE_TOO_LARGE', { characterId, referenceId, sizeBytes: downloaded.length });
   }
 
-  const detectedMime = detectImageMime(downloaded);
+  // GCS object bytes are the artifact authority. Firestore mimeType is metadata and can be stale
+  // (for example an old JPEG label on PNG bytes). Valid magic bytes must not be rejected solely
+  // because metadata disagrees; instead normalize to detected MIME and surface the mismatch.
+  const detectedMime = detectSupportedImageMime(downloaded);
   if (!detectedMime) {
     throw new CharacterReferenceInputError('CHARACTER_REFERENCE_CONTENT_INVALID', { characterId, referenceId, declaredMime });
   }
-  if (declaredMime && SUPPORTED_IMAGE_MIMES.includes(declaredMime as SupportedImageMime) && declaredMime !== detectedMime) {
-    throw new CharacterReferenceInputError('CHARACTER_REFERENCE_MIME_MISMATCH', {
-      characterId,
-      referenceId,
-      declaredMime,
-      detectedMime,
-    });
-  }
+  const metadataMimeMismatch = Boolean(declaredMime && declaredMime !== detectedMime);
 
   const identitySpec = (record.identitySpec && typeof record.identitySpec === 'object') ? record.identitySpec : { lockedTraits: [] };
   const identitySpecSha256 = sha256(JSON.stringify(identitySpec));
@@ -199,6 +197,8 @@ export async function resolveCharacterReferenceInput(
       angle,
       declaredMime,
       detectedMime,
+      metadataMimeMismatch,
+      mimeAuthority: 'magic_bytes',
       sizeBytes: downloaded.length,
       contentSha256,
       identitySpecSha256,
