@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Zaojing Identity Safe Video API
-  version: 1.1.0
+  version: 1.2.0
   description: Read durable Zaojing character packages and create or monitor Identity Safe image-to-video tasks from ChatGPT.
 servers:
   - url: https://zaojing-chatgpt-gateway-uat-REPLACE.run.app
@@ -105,8 +105,8 @@ paths:
     post:
       operationId: createIdentitySafeVideo
       security: []
-      summary: Create one Identity Safe video from exactly one image in the ChatGPT conversation.
-      description: UAT supports bounded direct calls. Generate one stable idempotencyKey per intent; if this action itself has a client/transport error, call resolveIdentitySafeVideoIntent before any create retry.
+      summary: Create one Identity Safe video from a durable Zaojing character reference or one ChatGPT conversation image.
+      description: Prefer character_reference when the user names a stored Zaojing character. Reuse one stable idempotencyKey per intent; resolve any transport error before retrying create.
       x-openai-isConsequential: true
       requestBody:
         required: true
@@ -114,12 +114,12 @@ paths:
           application/json:
             schema:
               type: object
-              required: [prompt, durationSeconds, idempotencyKey, openaiFileIdRefs]
+              required: [prompt, durationSeconds, idempotencyKey]
               properties:
                 prompt:
                   type: string
                   maxLength: 12000
-                  description: Scene and motion prompt. Identity Safe automatically constrains risky motion.
+                  description: Scene and motion prompt. For character_reference, Zaojing adds the durable identity lock before the provider call.
                 durationSeconds:
                   type: integer
                   enum: [4, 6, 8]
@@ -128,16 +128,34 @@ paths:
                   minLength: 16
                   maxLength: 200
                   description: Stable random key for one user intent. Generate it once and reuse the exact same value on every recovery or retry of that intent.
+                inputSource:
+                  type: object
+                  description: Durable input selector. Use character_reference for a Zaojing role; use conversation_file only when an explicit conversation image is intended.
+                  properties:
+                    type:
+                      type: string
+                      enum: [character_reference, conversation_file]
+                    characterId:
+                      type: string
+                      maxLength: 160
+                      description: Exact characterId returned by listZaojingCharacters. Required when type is character_reference.
+                    referenceId:
+                      type: string
+                      maxLength: 160
+                      description: Exact durable referenceId returned by getZaojingCharacterPackage. Required when type is character_reference.
+                    openaiFileIdRef:
+                      type: string
+                      description: Optional single ChatGPT conversation image reference when type is conversation_file.
                 openaiFileIdRefs:
                   type: array
                   minItems: 1
                   maxItems: 1
                   items:
                     type: string
-                  description: Exactly one JPG, PNG or WebP uploaded by the user in this conversation.
+                  description: Legacy conversation-image input. Do not send this together with character_reference.
       responses:
         '200':
-          description: Action-safe create or recovery result. Inspect taskId, taskCreated, providerCalled, error, recoveredBy, inputFile and diagnostics.
+          description: Action-safe create or recovery result. Inspect taskId, inputSource, taskCreated, providerCalled, error, recoveredBy, inputFile and diagnostics.
         '429':
           description: UAT bounded direct-admission limit reached.
   /v1/videos/{taskId}:
@@ -151,7 +169,7 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200': { description: Current task state. }
+        '200': { description: Current task state including durable inputSource binding when available. }
         '202': { description: Task is still running. }
         '404': { description: Task not found. }
   /v1/videos/{taskId}/recover:

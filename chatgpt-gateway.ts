@@ -4,6 +4,10 @@ import fs from 'node:fs';
 import { GoogleAuth } from 'google-auth-library';
 import { getFirestoreInstance } from './src/server/db/firestore';
 import { createChatGptCharacterRouter } from './chatgpt-character-router';
+import {
+  CharacterReferenceInputError,
+  resolveCharacterReferenceInput,
+} from './src/server/services/chatgptCharacterInputResolver';
 
 const PORT = Number(process.env.PORT || 8080);
 const UPSTREAM_URL = String(process.env.ZAOJING_MVP_UPSTREAM_URL || '').replace(/\/+$/, '');
@@ -16,6 +20,8 @@ const UAT_DIRECT_DAILY_LIMIT = Math.max(1, Math.min(100, Number(process.env.ZAOJ
 const KEY_COLLECTION = 'mvp_chatgpt_api_keys';
 const UAT_ADMISSION_COLLECTION = 'mvp_chatgpt_uat_admissions';
 const UAT_QUOTA_COLLECTION = 'mvp_chatgpt_uat_daily_quota';
+const INPUT_BINDING_COLLECTION = 'mvp_chatgpt_input_bindings';
+const TASK_INPUT_BINDING_COLLECTION = 'mvp_chatgpt_task_input_bindings';
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const SUPPORTED_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp'] as const;
 const auth = new GoogleAuth();
@@ -38,6 +44,28 @@ type OpenAIImageDiagnostics = {
 };
 type DownloadedOpenAIImage = { bytes: Buffer; mimeType: SupportedImageMime; name: string; diagnostics: OpenAIImageDiagnostics };
 
+type GatewayInputSource =
+  | { type: 'conversation_file'; contentSha256: string | null }
+  | {
+      type: 'character_reference';
+      characterId: string;
+      characterName: string;
+      characterUpdatedAt: number | null;
+      referenceId: string;
+      angle: string;
+      contentSha256: string;
+      identitySpecSha256: string;
+    };
+
+type GatewayResolvedImage = {
+  bytes: Buffer;
+  mimeType: SupportedImageMime;
+  name: string;
+  diagnostics: Record<string, unknown>;
+  source: GatewayInputSource;
+  identityLockPrompt?: string | null;
+};
+
 type UatAdmission = {
   allowed: boolean;
   existingIntent: boolean;
@@ -48,6 +76,12 @@ type UatAdmission = {
 
 class OpenAIFileBridgeError extends Error {
   constructor(public code: string, public diagnostics: Partial<OpenAIImageDiagnostics> = {}) {
+    super(code);
+  }
+}
+
+class VideoInputSourceError extends Error {
+  constructor(public code: string, public diagnostics: Record<string, unknown> = {}) {
     super(code);
   }
 }
@@ -247,6 +281,128 @@ async function downloadOpenAIImage(ref: OpenAIFileRef): Promise<DownloadedOpenAI
   } finally { clearTimeout(timer); }
 }
 
+function characterIdentityPrompt(prompt: string, image: GatewayResolvedImage): string {
+  if (image.source.type !== 'character_reference' || !image.identityLockPrompt) return prompt;
+  return `${prompt}\n\n[ZAOJING_DURABLE_CHARACTER_IDENTITY]\n${image.identityLockPrompt}\nKeep the generated person faithful to this durable character identity and to the supplied master reference.`;
+}
+
+async function resolveVideoInput(body: any): Promise<GatewayResolvedImage> {
+  const refs = Array.isArray(body?.openaiFileIdRefs) ? body.openaiFileIdRefs as OpenAIFileRef[] : [];
+  const inputSource = body?.inputSource && typeof body.inputSource === 'object' ? body.inputSource : null;
+  const sourceType = String(inputSource?.type || '').trim();
+
+  if (sourceType === 'character_reference') {
+    if (refs.length > 0 || inputSource?.openaiFileIdRef) {
+      throw new VideoInputSourceError('multiple_input_sources_not_allowed');
+    }
+    try {
+      const resolved = await resolveCharacterReferenceInput(inputSource?.characterId, inputSource?.referenceId);
+      return {
+        bytes: resolved.bytes,
+        mimeType: resolved.mimeType,
+        name: resolved.name,
+        diagnostics: resolved.diagnostics,
+        identityLockPrompt: resolved.identityLockPrompt,
+        source: {
+          type: 'character_reference',
+          characterId: resolved.characterId,
+          characterName: resolved.characterName,
+          characterUpdatedAt: resolved.characterUpdatedAt,
+          referenceId: resolved.referenceId,
+          angle: resolved.angle,
+          contentSha256: resolved.contentSha256,
+          identitySpecSha256: resolved.identitySpecSha256,
+        },
+      };
+    } catch (error: any) {
+      if (error instanceof CharacterReferenceInputError) {
+        throw new VideoInputSourceError(error.code, error.diagnostics);
+      }
+      throw error;
+    }
+  }
+
+  if (sourceType && sourceType !== 'conversation_file') {
+    throw new VideoInputSourceError('input_source_type_invalid', { sourceType });
+  }
+
+  const explicitRef = inputSource?.openaiFileIdRef as OpenAIFileRef | undefined;
+  if (explicitRef && refs.length > 0) throw new VideoInputSourceError('multiple_input_sources_not_allowed');
+  const ref = explicitRef || refs[0];
+  const count = explicitRef ? 1 : refs.length;
+  if (!ref || count !== 1) throw new VideoInputSourceError('exactly_one_image_required', { receivedFileRefCount: refs.length });
+
+  const downloaded = await downloadOpenAIImage(ref);
+  return {
+    bytes: downloaded.bytes,
+    mimeType: downloaded.mimeType,
+    name: downloaded.name,
+    diagnostics: downloaded.diagnostics,
+    source: { type: 'conversation_file', contentSha256: downloaded.diagnostics.contentSha256 },
+  };
+}
+
+function inputSourceFingerprint(source: GatewayInputSource): string {
+  return sha256(JSON.stringify(source));
+}
+
+async function bindInputIntent(idempotencyKey: string, source: GatewayInputSource, taskId?: string | null): Promise<void> {
+  const db = getFirestoreInstance();
+  if (!db) throw new Error('FIRESTORE_UNAVAILABLE_FOR_INPUT_BINDING');
+  const intentHash = sha256(idempotencyKey);
+  const intentRef = db.collection(INPUT_BINDING_COLLECTION).doc(intentHash);
+  const fingerprint = inputSourceFingerprint(source);
+  const now = Date.now();
+
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(intentRef);
+    if (snap.exists) {
+      const existingFingerprint = String(snap.data()?.sourceFingerprint || '');
+      if (existingFingerprint && existingFingerprint !== fingerprint) {
+        throw new VideoInputSourceError('IDEMPOTENCY_INPUT_MISMATCH', {
+          idempotencyKeyHash: intentHash,
+          existingSourceType: snap.data()?.inputSource?.type || null,
+          requestedSourceType: source.type,
+        });
+      }
+      tx.set(intentRef, { inputSource: source, sourceFingerprint: fingerprint, taskId: taskId || snap.data()?.taskId || null, updatedAt: now }, { merge: true });
+      return;
+    }
+    tx.create(intentRef, {
+      idempotencyKeyHash: intentHash,
+      inputSource: source,
+      sourceFingerprint: fingerprint,
+      taskId: taskId || null,
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  if (taskId) {
+    await db.collection(TASK_INPUT_BINDING_COLLECTION).doc(taskId).set({
+      taskId,
+      idempotencyKeyHash: intentHash,
+      inputSource: source,
+      sourceFingerprint: fingerprint,
+      updatedAt: now,
+    }, { merge: true });
+  }
+}
+
+async function getIntentInputBinding(idempotencyKey: string): Promise<any | null> {
+  const db = getFirestoreInstance();
+  if (!db) return null;
+  const snap = await db.collection(INPUT_BINDING_COLLECTION).doc(sha256(idempotencyKey)).get();
+  return snap.exists ? snap.data() : null;
+}
+
+async function getTaskInputBinding(taskId: string): Promise<any | null> {
+  const db = getFirestoreInstance();
+  if (!db) return null;
+  const snap = await db.collection(TASK_INPUT_BINDING_COLLECTION).doc(taskId).get();
+  return snap.exists ? snap.data() : null;
+}
+
 let cachedIapJwt: { token: string; expiresAt: number } | null = null;
 let cachedCloudRunIdToken: { token: string; expiresAt: number } | null = null;
 
@@ -351,7 +507,7 @@ function requestRejected(error: string, idempotencyKey: string | null = null, de
   };
 }
 
-function actionEnvelope(body: any, upstreamHttpStatus: number, idempotencyKey: string, inputFile: OpenAIImageDiagnostics, extra: Record<string, unknown> = {}) {
+function actionEnvelope(body: any, upstreamHttpStatus: number, idempotencyKey: string, inputFile: Record<string, unknown>, extra: Record<string, unknown> = {}) {
   return {
     ok: upstreamHttpStatus >= 200 && upstreamHttpStatus < 300,
     upstreamHttpStatus,
@@ -440,6 +596,7 @@ export function createChatGptGatewayApp() {
     }
     try {
       const task = await lookupUpstreamTask(idempotencyKey);
+      const binding = await getIntentInputBinding(idempotencyKey);
       if (!task) {
         return res.status(200).json({
           ok: true,
@@ -451,17 +608,20 @@ export function createChatGptGatewayApp() {
           error: null,
           retryable: false,
           idempotencyKey,
+          inputSource: binding?.inputSource || null,
           recoveredBy: 'durable_idempotency_lookup',
           authMode: UAT_DIRECT_MODE ? 'uat_direct_bounded' : 'bearer',
           recommendedAction: 'No durable task exists for this intent. Classify it as pre-durable-task/client-to-gateway and do not infer a provider failure.',
         });
       }
+      if (task?.taskId && binding?.inputSource) await bindInputIntent(idempotencyKey, binding.inputSource, task.taskId);
       return res.status(200).json({
         ok: true,
         ...actionTask(task),
         taskCreated: true,
         providerCalled: inferProviderCalled(task),
         idempotencyKey,
+        inputSource: binding?.inputSource || null,
         recoveredBy: 'durable_idempotency_lookup',
         authMode: UAT_DIRECT_MODE ? 'uat_direct_bounded' : 'bearer',
       });
@@ -485,20 +645,59 @@ export function createChatGptGatewayApp() {
   app.post('/v1/videos', async (req, res) => {
     const prompt = String(req.body?.prompt || '').trim();
     const durationSeconds = Number(req.body?.durationSeconds || 4);
-    const refs = Array.isArray(req.body?.openaiFileIdRefs) ? req.body.openaiFileIdRefs as OpenAIFileRef[] : [];
     const suppliedIdempotencyKey = String(req.body?.idempotencyKey || '').trim();
     if (UAT_DIRECT_MODE && !suppliedIdempotencyKey) return res.status(200).json(requestRejected('idempotency_key_required_in_uat_direct_mode'));
     const idempotencyKey = suppliedIdempotencyKey || `chatgpt_${crypto.randomUUID()}`;
 
     if (!prompt || prompt.length > 12_000) return res.status(200).json(requestRejected('prompt_invalid', idempotencyKey));
     if (![4, 6, 8].includes(durationSeconds)) return res.status(200).json(requestRejected('duration_invalid', idempotencyKey));
-    if (refs.length !== 1) return res.status(200).json(requestRejected('exactly_one_image_required', idempotencyKey, { receivedFileRefCount: refs.length }));
 
-    let image: DownloadedOpenAIImage;
+    let image: GatewayResolvedImage;
     try {
-      image = await downloadOpenAIImage(refs[0]);
-    } catch (error) {
-      return res.status(200).json(actionSafeFileBridgeFailure(error, 'create_video_file_bridge_failed', { idempotencyKey }));
+      image = await resolveVideoInput(req.body);
+    } catch (error: any) {
+      if (error instanceof VideoInputSourceError) {
+        return res.status(200).json(requestRejected(error.code, idempotencyKey, { diagnostics: error.diagnostics }));
+      }
+      if (error instanceof OpenAIFileBridgeError) {
+        return res.status(200).json(actionSafeFileBridgeFailure(error, 'create_video_file_bridge_failed', { idempotencyKey }));
+      }
+      return res.status(200).json({
+        ok: false,
+        status: 'GATEWAY_ERROR',
+        taskCreated: false,
+        providerCalled: false,
+        error: 'INPUT_SOURCE_RESOLUTION_FAILED',
+        stage: 'action_gateway',
+        retryable: true,
+        idempotencyKey,
+        diagnostics: { message: String(error?.message || error) },
+      });
+    }
+
+    const submittedPrompt = characterIdentityPrompt(prompt, image);
+    if (submittedPrompt.length > 12_000) {
+      return res.status(200).json(requestRejected('prompt_invalid_after_character_identity_lock', idempotencyKey));
+    }
+
+    try {
+      await bindInputIntent(idempotencyKey, image.source);
+    } catch (error: any) {
+      if (error instanceof VideoInputSourceError) {
+        return res.status(200).json(requestRejected(error.code, idempotencyKey, { diagnostics: error.diagnostics }));
+      }
+      return res.status(200).json({
+        ok: false,
+        status: 'GATEWAY_ERROR',
+        taskCreated: false,
+        providerCalled: false,
+        error: 'INPUT_BINDING_FAILED',
+        stage: 'action_gateway',
+        retryable: true,
+        idempotencyKey,
+        inputSource: image.source,
+        diagnostics: { message: String(error?.message || error) },
+      });
     }
 
     let admission: UatAdmission | null = null;
@@ -516,11 +715,12 @@ export function createChatGptGatewayApp() {
           retryable: true,
           idempotencyKey,
           inputFile: image.diagnostics,
+          inputSource: image.source,
           diagnostics: { message: String(error?.message || error) },
         });
       }
       if (!admission.allowed) {
-        return res.status(200).json(requestRejected('uat_direct_daily_limit_reached', idempotencyKey, { admission }));
+        return res.status(200).json(requestRejected('uat_direct_daily_limit_reached', idempotencyKey, { admission, inputSource: image.source }));
       }
     }
 
@@ -530,9 +730,11 @@ export function createChatGptGatewayApp() {
     try {
       const existing = await lookupUpstreamTask(idempotencyKey);
       if (existing) {
+        await bindInputIntent(idempotencyKey, image.source, existing.taskId || null);
         return res.status(200).json(actionEnvelope(existing, 200, idempotencyKey, image.diagnostics, {
           recoveredBy: 'idempotency_lookup_before_submit',
           admission,
+          inputSource: image.source,
         }));
       }
     } catch {
@@ -541,23 +743,32 @@ export function createChatGptGatewayApp() {
 
     const form = new FormData();
     form.append('image', new Blob([image.bytes], { type: image.mimeType }), image.name);
-    form.append('prompt', prompt);
+    form.append('prompt', submittedPrompt);
     form.append('durationSeconds', String(durationSeconds));
     form.append('identitySafeMode', 'true');
+    form.append('inputSourceType', image.source.type);
+    if (image.source.type === 'character_reference') {
+      form.append('characterId', image.source.characterId);
+      form.append('characterReferenceId', image.source.referenceId);
+      form.append('identitySpecSha256', image.source.identitySpecSha256);
+    }
 
     try {
       const response = await upstream('/api/mvp/videos/start', { method: 'POST', headers: { 'x-idempotency-key': idempotencyKey }, body: form });
       const body = await responseJson(response);
-      return res.status(200).json(actionEnvelope(body, response.status, idempotencyKey, image.diagnostics, { admission }));
+      if (body?.taskId) await bindInputIntent(idempotencyKey, image.source, body.taskId);
+      return res.status(200).json(actionEnvelope(body, response.status, idempotencyKey, image.diagnostics, { admission, inputSource: image.source }));
     } catch (startError: any) {
       // If transport failed after the upstream committed the idempotency/task records,
       // recover that task immediately instead of making ChatGPT guess whether it exists.
       try {
         const recovered = await lookupUpstreamTask(idempotencyKey);
         if (recovered) {
+          await bindInputIntent(idempotencyKey, image.source, recovered.taskId || null);
           return res.status(200).json(actionEnvelope(recovered, 200, idempotencyKey, image.diagnostics, {
             recoveredBy: 'idempotency_lookup_after_transport_failure',
             admission,
+            inputSource: image.source,
           }));
         }
       } catch (lookupError: any) {
@@ -572,6 +783,7 @@ export function createChatGptGatewayApp() {
           retryable: true,
           idempotencyKey,
           inputFile: image.diagnostics,
+          inputSource: image.source,
           admission,
           diagnostics: {
             startError: String(startError?.message || startError),
@@ -591,6 +803,7 @@ export function createChatGptGatewayApp() {
         retryable: true,
         idempotencyKey,
         inputFile: image.diagnostics,
+        inputSource: image.source,
         admission,
         diagnostics: { startError: String(startError?.message || startError), lookupResult: 'not_found' },
         recommendedAction: 'Call resolveIdentitySafeVideoIntent with the same idempotencyKey before any create retry.',
@@ -602,7 +815,8 @@ export function createChatGptGatewayApp() {
     try {
       const response = await upstream(`/api/mvp/videos/${encodeURIComponent(req.params.taskId)}`);
       const body = await responseJson(response);
-      return res.status(response.status).json(actionTask(body));
+      const binding = await getTaskInputBinding(req.params.taskId);
+      return res.status(response.status).json({ ...actionTask(body), inputSource: binding?.inputSource || null });
     } catch (error: any) { return res.status(502).json({ error: 'get_video_failed', detail: String(error?.message || error) }); }
   });
 
@@ -610,7 +824,8 @@ export function createChatGptGatewayApp() {
     try {
       const response = await upstream(`/api/mvp/videos/${encodeURIComponent(req.params.taskId)}/recover`, { method: 'POST' });
       const body = await responseJson(response);
-      return res.status(response.status).json(actionTask(body));
+      const binding = await getTaskInputBinding(req.params.taskId);
+      return res.status(response.status).json({ ...actionTask(body), inputSource: binding?.inputSource || null });
     } catch (error: any) { return res.status(502).json({ error: 'recover_video_failed', detail: String(error?.message || error) }); }
   });
 

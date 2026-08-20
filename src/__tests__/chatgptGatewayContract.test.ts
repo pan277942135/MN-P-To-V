@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 const gateway = fs.readFileSync('chatgpt-gateway.ts', 'utf8');
 const schema = fs.readFileSync('chatgpt-action-openapi.yaml', 'utf8');
 const wrapper = fs.readFileSync('mvp-server-v021.ts', 'utf8');
+const resolver = fs.readFileSync('src/server/services/chatgptCharacterInputResolver.ts', 'utf8');
 const deploy = fs.readFileSync('.github/workflows/chatgpt-gateway-uat-deploy.yml', 'utf8');
 
 describe('ChatGPT Actions gateway contract', () => {
@@ -85,12 +86,40 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(gateway).toContain('inputFile: image.diagnostics');
   });
 
+  it('supports durable character_reference input without routing the master through the ChatGPT file bridge', () => {
+    expect(schema).toContain('enum: [character_reference, conversation_file]');
+    expect(schema).toContain('characterId:');
+    expect(schema).toContain('referenceId:');
+    expect(gateway).toContain('resolveCharacterReferenceInput');
+    expect(gateway).toContain("sourceType === 'character_reference'");
+    expect(gateway).toContain("form.append('characterId', image.source.characterId)");
+    expect(gateway).toContain("form.append('characterReferenceId', image.source.referenceId)");
+    expect(resolver).toContain("CHARACTER_COLLECTION = 'characters'");
+    expect(resolver).toContain("artifactAuthority: 'gcs'");
+    expect(resolver).toContain('identitySpecSha256');
+  });
+
+  it('persists durable source provenance and rejects idempotency reuse with a different source', () => {
+    expect(gateway).toContain("INPUT_BINDING_COLLECTION = 'mvp_chatgpt_input_bindings'");
+    expect(gateway).toContain("TASK_INPUT_BINDING_COLLECTION = 'mvp_chatgpt_task_input_bindings'");
+    expect(gateway).toContain('inputSourceFingerprint');
+    expect(gateway).toContain('IDEMPOTENCY_INPUT_MISMATCH');
+    expect(gateway).toContain('getTaskInputBinding');
+  });
+
+  it('adds the durable character identity lock server-side before the existing provider pipeline', () => {
+    expect(gateway).toContain('[ZAOJING_DURABLE_CHARACTER_IDENTITY]');
+    expect(gateway).toContain('characterIdentityPrompt(prompt, image)');
+    expect(resolver).toContain('identityLockPromptEnglish');
+    expect(resolver).toContain('identityLockPromptChinese');
+  });
+
   it('requires a stable idempotency key in direct UAT mode and recovers durable tasks before resubmission', () => {
     expect(gateway).toContain("requestRejected('idempotency_key_required_in_uat_direct_mode')");
     expect(gateway).toContain("upstream('/api/mvp/videos/lookup'");
     expect(gateway).toContain("recoveredBy: 'idempotency_lookup_before_submit'");
     expect(gateway).toContain("recoveredBy: 'idempotency_lookup_after_transport_failure'");
-    expect(schema).toContain('required: [prompt, durationSeconds, idempotencyKey, openaiFileIdRefs]');
+    expect(schema).toContain('required: [prompt, durationSeconds, idempotencyKey]');
   });
 
   it('exposes a non-billable intent resolver for create client-response loss and never submits Veo', () => {
