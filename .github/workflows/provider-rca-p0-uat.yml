@@ -1,0 +1,305 @@
+name: Provider RCA P0 UAT
+
+on:
+  push:
+    branches: [provider-rca-p0]
+    paths:
+      - 'mvp-server-v02.ts'
+      - 'mvp-server-v021.ts'
+      - 'src/mvp/**'
+      - 'Dockerfile.mvp'
+      - '.github/workflows/provider-rca-p0-uat.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  PROJECT_NUMBER: '89614354864'
+  REGION: us-central1
+  MODEL: veo-3.1-fast-generate-001
+  GAR_REPO: zaojing
+  UPSTREAM_SERVICE: zaojing-chatgpt-upstream-uat
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+  FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  GATEWAY_URL: https://zaojing-chatgpt-gateway-uat-i7lns3auvq-uc.a.run.app
+
+jobs:
+  provider-rca:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout current E2E code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Build and deploy only the private upstream P0 diagnostics image
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          SHA="$(git rev-parse HEAD)"
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$UPSTREAM_SERVICE:$SHA"
+          docker build -f Dockerfile.mvp -t "$IMAGE" .
+          docker push "$IMAGE"
+          gcloud run deploy "$UPSTREAM_SERVICE" \
+            --project="$PROJECT_ID" --region="$REGION" --platform=managed \
+            --image="$IMAGE" --service-account="$RUNTIME_SA" \
+            --no-allow-unauthenticated --no-iap \
+            --cpu=2 --memory=3Gi --timeout=900 --concurrency=4 --min-instances=0 --max-instances=2 \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,IDENTITY_QA_MODEL=gemini-2.5-flash,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SHA" \
+            --quiet
+          URL="$(gcloud run services describe "$UPSTREAM_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          REVISION="$(gcloud run services describe "$UPSTREAM_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          test -n "$URL"
+          test -n "$REVISION"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify deployed revision and collect readiness
+        id: readiness
+        if: always()
+        shell: bash
+        env:
+          UPSTREAM_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          set +e
+          TOKEN="$(gcloud auth print-identity-token --impersonate-service-account="$RUNTIME_SA" --audiences="$UPSTREAM_URL" 2>/dev/null)"
+          if [ -n "$TOKEN" ]; then
+            HEALTH_STATUS="$(curl -sS -o upstream-health.json -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$UPSTREAM_URL/api/mvp/health" || true)"
+            READINESS_STATUS="$(curl -sS -o upstream-readiness.json -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$UPSTREAM_URL/api/mvp/readiness" || true)"
+          else
+            HEALTH_STATUS="token_unavailable"
+            READINESS_STATUS="token_unavailable"
+            echo '{"error":"runtime identity token unavailable"}' > upstream-health.json
+            echo '{"error":"runtime identity token unavailable"}' > upstream-readiness.json
+          fi
+          echo "health_status=$HEALTH_STATUS" >> "$GITHUB_OUTPUT"
+          echo "readiness_status=$READINESS_STATUS" >> "$GITHUB_OUTPUT"
+          echo "readiness_probes health_http=$HEALTH_STATUS readiness_http=$READINESS_STATUS"
+
+      - name: Capture Vertex quota and monitoring baseline
+        id: observability_before
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          ACCESS_TOKEN="$(gcloud auth print-access-token 2>/dev/null)"
+          QUOTA_STATUS="$(curl -sS --get -o vertex-quota-before.json -w '%{http_code}' \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "https://serviceusage.googleapis.com/v1beta1/projects/$PROJECT_NUMBER/services/aiplatform.googleapis.com/consumerQuotaMetrics" || true)"
+          DESCRIPTOR_STATUS="$(curl -sS --get -o vertex-metric-descriptors-before.json -w '%{http_code}' \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            --data-urlencode 'filter=metric.type = starts_with("aiplatform.googleapis.com/")' \
+            --data-urlencode 'pageSize=1000' \
+            "https://monitoring.googleapis.com/v3/projects/$PROJECT_ID/metricDescriptors" || true)"
+          jq -r '.metricDescriptors[]?.type // empty' vertex-metric-descriptors-before.json 2>/dev/null \
+            | grep -Ei 'request|error|quota|prediction|latenc|throughput' | head -20 > vertex-metric-types-before.txt || true
+          rm -f vertex-series-before-*.json vertex-series-before-status.txt
+          SERIES_INDEX=0
+          START_TIME="$(date -u -d '15 minutes ago' '+%Y-%m-%dT%H:%M:%SZ')"
+          END_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          while IFS= read -r METRIC_TYPE; do
+            [ -n "$METRIC_TYPE" ] || continue
+            curl -sS --get -o "vertex-series-before-$SERIES_INDEX.json" -w "%{http_code}\n" \
+              -H "Authorization: Bearer $ACCESS_TOKEN" \
+              --data-urlencode "filter=metric.type = \"$METRIC_TYPE\"" \
+              --data-urlencode "interval.startTime=$START_TIME" \
+              --data-urlencode "interval.endTime=$END_TIME" \
+              --data-urlencode 'pageSize=100' \
+              "https://monitoring.googleapis.com/v3/projects/$PROJECT_ID/timeSeries" \
+              2>/dev/null >> vertex-series-before-status.txt || true
+            SERIES_INDEX=$((SERIES_INDEX + 1))
+          done < vertex-metric-types-before.txt
+          printf '{"quotaHttp":"%s","metricDescriptorsHttp":"%s"}\n' "$QUOTA_STATUS" "$DESCRIPTOR_STATUS" > observability-before-status.json
+          echo "quota_status=$QUOTA_STATUS" >> "$GITHUB_OUTPUT"
+          echo "descriptor_status=$DESCRIPTOR_STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: Test A - one pure Veo text-to-video request in us-central1
+        id: test_a
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          A_PROMPT='A domestic cat sits quietly on a windowsill beside a softly lit window, fixed camera, natural breathing, subtle ear movement, realistic motion, no people, no text.'
+          jq -nc --arg prompt "$A_PROMPT" '{instances:[{prompt:$prompt}],parameters:{sampleCount:1,aspectRatio:"9:16",durationSeconds:4,resolution:"1080p",generateAudio:false,storageUri:"gs://ai-studio-bucket-89614354864-asia-south1/provider-rca-test-a/"}}' > test-a-request.json
+          ACCESS_TOKEN="$(gcloud auth print-access-token 2>/dev/null)"
+          A_SUBMIT_HTTP="$(curl -sS -D test-a-submit.headers -o test-a-submit.json -w '%{http_code}' \
+            -X POST -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json' \
+            --data-binary @test-a-request.json \
+            "https://$REGION-aiplatform.googleapis.com/v1/projects/$PROJECT_ID/locations/$REGION/publishers/google/models/$MODEL:predictLongRunning" || true)"
+          A_OPERATION="$(jq -r '.name // empty' test-a-submit.json 2>/dev/null)"
+          A_REQUEST_ID="$(awk -F': *' 'tolower($1)=="x-request-id" || tolower($1)=="x-goog-request-id" || tolower($1)=="x-google-request-id" {gsub("\r", "", $2); print $2; exit}' test-a-submit.headers 2>/dev/null)"
+          if [ -n "$A_OPERATION" ]; then
+            for i in $(seq 1 36); do
+              A_POLL_HTTP="$(curl -sS -D test-a-poll.headers -o test-a-final.json -w '%{http_code}' \
+                -X POST -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json' \
+                --data "{\"operationName\":\"$A_OPERATION\"}" \
+                "https://$REGION-aiplatform.googleapis.com/v1/projects/$PROJECT_ID/locations/$REGION/publishers/google/models/$MODEL:fetchPredictOperation" || true)"
+              A_DONE="$(jq -r '.done // false' test-a-final.json 2>/dev/null)"
+              if [ "$A_DONE" = 'true' ]; then break; fi
+              sleep 10
+            done
+          else
+            cp test-a-submit.json test-a-final.json
+            A_POLL_HTTP='not_polled'
+          fi
+          A_POLL_REQUEST_ID="$(awk -F': *' 'tolower($1)=="x-request-id" || tolower($1)=="x-goog-request-id" || tolower($1)=="x-google-request-id" {gsub("\r", "", $2); print $2; exit}' test-a-poll.headers 2>/dev/null)"
+          jq -n --arg submitHttp "$A_SUBMIT_HTTP" --arg pollHttp "${A_POLL_HTTP:-not_started}" --arg operation "$A_OPERATION" --arg requestId "${A_POLL_REQUEST_ID:-$A_REQUEST_ID}" --slurpfile submit test-a-submit.json --slurpfile final test-a-final.json '{submitHttp:$submitHttp,pollHttp:$pollHttp,operationName:$operation,requestId:$requestId,submit:$submit[0],final:$final[0]}' > test-a-evidence.json
+          echo "test_a_request_completed operation_created=$([ -n \"$A_OPERATION\" ] && echo true || echo false) request_id_captured=$([ -n \"${A_POLL_REQUEST_ID:-$A_REQUEST_ID}\" ] && echo true || echo false) submit_http=$A_SUBMIT_HTTP poll_http=${A_POLL_HTTP:-not_started}"
+
+      - name: Test B - one simplified character_reference request in us-central1
+        id: test_b
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          curl -sS --get --data-urlencode 'q=梅凝' "$GATEWAY_URL/v1/characters" -o test-b-characters.json
+          CHARACTER_ID="$(jq -r '.characters[0].characterId // empty' test-b-characters.json 2>/dev/null)"
+          curl -sS "$GATEWAY_URL/v1/characters/$CHARACTER_ID" -o test-b-package.json
+          REFERENCE_ID="$(jq -r '[.rolePackage.references[] | select(.angle == "front")][0].referenceId // .rolePackage.references[0].referenceId // empty' test-b-package.json 2>/dev/null)"
+          IDEMPOTENCY_KEY="provider-rca-test-b-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          jq -nc --arg characterId "$CHARACTER_ID" --arg referenceId "$REFERENCE_ID" --arg key "$IDEMPOTENCY_KEY" '{prompt:"固定镜头，人物保持自然轻微呼吸，动作极少，不重新构图。",durationSeconds:4,idempotencyKey:$key,inputSource:{type:"character_reference",characterId:$characterId,referenceId:$referenceId}}' > test-b-request.json
+          B_CREATE_HTTP="$(curl -sS -X POST -H 'Content-Type: application/json' --data-binary @test-b-request.json -o test-b-create.json -w '%{http_code}' "$GATEWAY_URL/v1/videos" || true)"
+          TASK_ID="$(jq -r '.taskId // empty' test-b-create.json 2>/dev/null)"
+          if [ -n "$TASK_ID" ]; then
+            cp test-b-create.json test-b-final.json
+            for i in $(seq 1 36); do
+              B_POLL_HTTP="$(curl -sS -o test-b-final.json -w '%{http_code}' "$GATEWAY_URL/v1/videos/$TASK_ID" || true)"
+              B_STATUS="$(jq -r '.status // empty' test-b-final.json 2>/dev/null)"
+              case "$B_STATUS" in COMPLETED|FAILED|SUBMISSION_OUTCOME_UNKNOWN) break;; esac
+              sleep 10
+            done
+          else
+            cp test-b-create.json test-b-final.json
+            B_POLL_HTTP='not_polled'
+          fi
+          jq -n --arg createHttp "$B_CREATE_HTTP" --arg pollHttp "${B_POLL_HTTP:-not_started}" --arg taskId "$TASK_ID" --arg characterId "$CHARACTER_ID" --arg referenceId "$REFERENCE_ID" --slurpfile create test-b-create.json --slurpfile final test-b-final.json '{createHttp:$createHttp,pollHttp:$pollHttp,taskId:$taskId,characterId:$characterId,referenceId:$referenceId,create:$create[0],final:$final[0]}' > test-b-evidence.json
+          echo "test_b_request_completed task_created=$([ -n \"$TASK_ID\" ] && echo true || echo false) create_http=$B_CREATE_HTTP poll_http=${B_POLL_HTTP:-not_polled}"
+
+      - name: Capture Vertex quota and monitoring after A/B
+        id: observability_after
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          ACCESS_TOKEN="$(gcloud auth print-access-token 2>/dev/null)"
+          QUOTA_STATUS="$(curl -sS --get -o vertex-quota-after.json -w '%{http_code}' \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "https://serviceusage.googleapis.com/v1beta1/projects/$PROJECT_NUMBER/services/aiplatform.googleapis.com/consumerQuotaMetrics" || true)"
+          DESCRIPTOR_STATUS="$(curl -sS --get -o vertex-metric-descriptors-after.json -w '%{http_code}' \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            --data-urlencode 'filter=metric.type = starts_with("aiplatform.googleapis.com/")' \
+            --data-urlencode 'pageSize=1000' \
+            "https://monitoring.googleapis.com/v3/projects/$PROJECT_ID/metricDescriptors" || true)"
+          jq -r '.metricDescriptors[]?.type // empty' vertex-metric-descriptors-after.json 2>/dev/null \
+            | grep -Ei 'request|error|quota|prediction|latenc|throughput' | head -20 > vertex-metric-types-after.txt || true
+          rm -f vertex-series-after-*.json vertex-series-after-status.txt
+          SERIES_INDEX=0
+          START_TIME="$(date -u -d '15 minutes ago' '+%Y-%m-%dT%H:%M:%SZ')"
+          END_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          while IFS= read -r METRIC_TYPE; do
+            [ -n "$METRIC_TYPE" ] || continue
+            curl -sS --get -o "vertex-series-after-$SERIES_INDEX.json" -w "%{http_code}\n" \
+              -H "Authorization: Bearer $ACCESS_TOKEN" \
+              --data-urlencode "filter=metric.type = \"$METRIC_TYPE\"" \
+              --data-urlencode "interval.startTime=$START_TIME" \
+              --data-urlencode "interval.endTime=$END_TIME" \
+              --data-urlencode 'pageSize=100' \
+              "https://monitoring.googleapis.com/v3/projects/$PROJECT_ID/timeSeries" \
+              2>/dev/null >> vertex-series-after-status.txt || true
+            SERIES_INDEX=$((SERIES_INDEX + 1))
+          done < vertex-metric-types-after.txt
+          printf '{"quotaHttp":"%s","metricDescriptorsHttp":"%s"}\n' "$QUOTA_STATUS" "$DESCRIPTOR_STATUS" > observability-after-status.json
+
+      - name: Build RCA evidence summary
+        if: always()
+        shell: bash
+        run: |
+          classify_failure() {
+            local file="$1"
+            local done code status text
+            done="$(jq -r '.final.done // .done // false' "$file" 2>/dev/null)"
+            code="$(jq -r '.final.error.code // .final.error.providerCode // .error.code // .error.providerCode // empty' "$file" 2>/dev/null)"
+            status="$(jq -r '.final.error.status // .final.error.providerStatus // .error.status // .error.providerStatus // empty' "$file" 2>/dev/null)"
+            text="$(jq -r '[.. | scalars] | map(tostring) | join(" ")' "$file" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+            if [ "$done" != 'true' ]; then
+              echo request_not_completed
+            elif [[ "$text" == *quotafailure* || "$text" == *quota_exceeded* || "$text" == *rate_limit* || "$text" == *rate\ limit* ]]; then
+              echo quota_signal
+            elif [[ "$code" == '8' || "$status" == 'RESOURCE_EXHAUSTED' ]] && [[ "$text" == *high\ load* || "$text" == *capacity* || "$text" == *overload* || "$text" == *try\ again\ later* ]]; then
+              echo shared_capacity_signal
+            elif [[ "$code" == '8' || "$status" == 'RESOURCE_EXHAUSTED' ]]; then
+              echo resource_exhausted_unresolved
+            elif [ "$done" = 'true' ] && [ -z "$code" ] && [ -z "$status" ]; then
+              echo completed
+            else
+              echo request_rejected_or_other
+            fi
+          }
+          quota_fields() {
+            jq '[.. | objects | select(has("usage") or has("effectiveLimit") or has("defaultLimit"))] | length' "$1" 2>/dev/null || echo 0
+          }
+          descriptor_count() {
+            jq '.metricDescriptors | length // 0' "$1" 2>/dev/null || echo 0
+          }
+          series_points() {
+            local total=0 file count
+            for file in "$@"; do
+              [ -f "$file" ] || continue
+              count="$(jq '[.timeSeriesData[]?.point[]?, .timeSeries[]?.points[]?] | length' "$file" 2>/dev/null || echo 0)"
+              total=$((total + count))
+            done
+            echo "$total"
+          }
+          A_CLASS="$(classify_failure test-a-evidence.json)"
+          B_CLASS="$(classify_failure test-b-evidence.json)"
+          A_CODE="$(jq -r '.final.error.code // .final.error.providerCode // .error.code // .error.providerCode // empty' test-a-evidence.json 2>/dev/null)"
+          A_STATUS="$(jq -r '.final.error.status // .final.error.providerStatus // .error.status // .error.providerStatus // empty' test-a-evidence.json 2>/dev/null)"
+          B_CODE="$(jq -r '.final.error.providerCode // .final.error.rawStatus // .final.error.code // .error.providerCode // .error.rawStatus // .error.code // empty' test-b-evidence.json 2>/dev/null)"
+          B_STATUS="$(jq -r '.final.error.providerStatus // .final.error.status // .error.providerStatus // .error.status // empty' test-b-evidence.json 2>/dev/null)"
+          A_REQUEST_ID_CAPTURED="$(jq -r 'if (.requestId // "") != "" then "true" else "false" end' test-a-evidence.json 2>/dev/null || echo false)"
+          B_REQUEST_ID_CAPTURED="$(jq -r 'if ((.final.error.requestId // .error.requestId // "") != "") then "true" else "false" end' test-b-evidence.json 2>/dev/null || echo false)"
+          BEFORE_QUOTA_FIELDS="$(quota_fields vertex-quota-before.json)"
+          AFTER_QUOTA_FIELDS="$(quota_fields vertex-quota-after.json)"
+          BEFORE_DESCRIPTOR_COUNT="$(descriptor_count vertex-metric-descriptors-before.json)"
+          AFTER_DESCRIPTOR_COUNT="$(descriptor_count vertex-metric-descriptors-after.json)"
+          BEFORE_SERIES_COUNT="$(find . -maxdepth 1 -name 'vertex-series-before-*.json' -type f | wc -l | tr -d ' ')"
+          AFTER_SERIES_COUNT="$(find . -maxdepth 1 -name 'vertex-series-after-*.json' -type f | wc -l | tr -d ' ')"
+          BEFORE_POINTS="$(series_points vertex-series-before-*.json)"
+          AFTER_POINTS="$(series_points vertex-series-after-*.json)"
+          jq -n \
+            --arg region "$REGION" --arg model "$MODEL" --arg revision "${{ steps.deploy.outputs.revision }}" \
+            --arg health "${{ steps.readiness.outputs.health_status }}" --arg readiness "${{ steps.readiness.outputs.readiness_status }}" \
+            --arg aClass "$A_CLASS" --arg aCode "${A_CODE:-}" --arg aStatus "${A_STATUS:-}" --arg aRequestId "$A_REQUEST_ID_CAPTURED" \
+            --arg bClass "$B_CLASS" --arg bCode "${B_CODE:-}" --arg bStatus "${B_STATUS:-}" --arg bRequestId "$B_REQUEST_ID_CAPTURED" \
+            --arg beforeQuota "$(jq -r '.quotaHttp // "unknown"' observability-before-status.json 2>/dev/null)" \
+            --arg afterQuota "$(jq -r '.quotaHttp // "unknown"' observability-after-status.json 2>/dev/null)" \
+            --arg beforeDescriptors "$(jq -r '.metricDescriptorsHttp // "unknown"' observability-before-status.json 2>/dev/null)" \
+            --arg afterDescriptors "$(jq -r '.metricDescriptorsHttp // "unknown"' observability-after-status.json 2>/dev/null)" \
+            --arg beforeQuotaFields "$BEFORE_QUOTA_FIELDS" --arg afterQuotaFields "$AFTER_QUOTA_FIELDS" \
+            --arg beforeDescriptorCount "$BEFORE_DESCRIPTOR_COUNT" --arg afterDescriptorCount "$AFTER_DESCRIPTOR_COUNT" \
+            --arg beforeSeriesCount "$BEFORE_SERIES_COUNT" --arg afterSeriesCount "$AFTER_SERIES_COUNT" \
+            --arg beforePoints "$BEFORE_POINTS" --arg afterPoints "$AFTER_POINTS" \
+            '{scope:"P0 diagnostics only",region:$region,model:$model,upstreamRevision:$revision,healthHttp:$health,readinessHttp:$readiness,testA:{classification:$aClass,providerCode:$aCode,providerStatus:$aStatus,requestIdCaptured:($aRequestId == "true")},testB:{classification:$bClass,providerCode:$bCode,providerStatus:$bStatus,requestIdCaptured:($bRequestId == "true")},observability:{quotaBeforeHttp:$beforeQuota,quotaAfterHttp:$afterQuota,quotaFieldsBefore:($beforeQuotaFields|tonumber),quotaFieldsAfter:($afterQuotaFields|tonumber),metricDescriptorsBeforeHttp:$beforeDescriptors,metricDescriptorsAfterHttp:$afterDescriptors,metricDescriptorCountBefore:($beforeDescriptorCount|tonumber),metricDescriptorCountAfter:($afterDescriptorCount|tonumber),metricSeriesFilesBefore:($beforeSeriesCount|tonumber),metricSeriesFilesAfter:($afterSeriesCount|tonumber),metricSeriesPointsBefore:($beforePoints|tonumber),metricSeriesPointsAfter:($afterPoints|tonumber)},sensitiveValuesOmitted:true}' \
+            > provider-rca-summary.json
+          echo "P0 RCA sanitized summary (raw provider details, request IDs, task IDs, and references intentionally omitted):"
+          cat provider-rca-summary.json
