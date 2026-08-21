@@ -14,6 +14,7 @@ import {
   assertIdentitySafeCompletion,
   normalizeProviderFailureReason,
   type MvpStructuredError,
+  type MvpProviderDiagnostics,
   type MvpVideoTask,
 } from './src/mvp/mvpContract';
 import {
@@ -130,7 +131,44 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
 }
 
 class ProviderHttpError extends Error {
-  constructor(message: string, public httpStatus: number, public providerStatus: string | null, public rawBody: string) { super(message); }
+  constructor(
+    message: string,
+    public httpStatus: number,
+    public providerStatus: string | null,
+    public rawBody: string,
+    public providerDiagnostics: MvpProviderDiagnostics,
+  ) { super(message); }
+}
+
+function providerRequestId(headers: Headers): string | null {
+  for (const name of ['x-request-id', 'x-goog-request-id', 'x-google-request-id', 'x-cloud-trace-context']) {
+    const value = headers.get(name)?.trim();
+    if (value) return value;
+  }
+  return null;
+}
+
+function redactProviderValue(value: unknown): unknown {
+  if (value === null || value === undefined) return null;
+  const serialized = redactSecrets(typeof value === 'string' ? value : JSON.stringify(value));
+  try { return JSON.parse(serialized); } catch { return serialized; }
+}
+
+function providerDiagnostics(response: Response, parsed: any, raw: string): MvpProviderDiagnostics {
+  const providerError = parsed?.error;
+  const rawMessage = providerError?.message || raw || `HTTP ${response.status}`;
+  const rawStatus = providerError?.status ?? providerError?.code ?? response.status;
+  const rawErrorDetails = (providerError?.details ?? providerError ?? raw) || null;
+  return {
+    provider: MVP_PROVIDER,
+    model: MVP_VIDEO_MODEL,
+    projectId: PROJECT_ID,
+    region: REGION,
+    requestId: providerRequestId(response.headers),
+    rawStatus: typeof rawStatus === 'string' || typeof rawStatus === 'number' ? rawStatus : null,
+    rawMessage: redactSecrets(String(rawMessage)),
+    rawErrorDetails: redactProviderValue(rawErrorDetails),
+  };
 }
 
 async function submitVeoOnce(params: {
@@ -166,11 +204,13 @@ async function submitVeoOnce(params: {
   let parsed: any = null;
   try { parsed = JSON.parse(raw); } catch {}
   if (!response.ok) {
+    const diagnostics = providerDiagnostics(response, parsed, raw);
     throw new ProviderHttpError(
       redactSecrets(parsed?.error?.message || raw || `HTTP ${response.status}`),
       response.status,
       parsed?.error?.status || null,
       redactSecrets(raw),
+      diagnostics,
     );
   }
   const operationName = parsed?.name;
@@ -204,12 +244,21 @@ async function pollProvider(operationName: string): Promise<any> {
   let parsed: any = null;
   try { parsed = JSON.parse(raw); } catch {}
   if (!response.ok) {
+    const diagnostics = providerDiagnostics(response, parsed, raw);
     throw new ProviderHttpError(
       redactSecrets(parsed?.error?.message || raw || `HTTP ${response.status}`),
       response.status,
       parsed?.error?.status || null,
       redactSecrets(raw),
+      diagnostics,
     );
+  }
+  if (parsed && typeof parsed === 'object') {
+    Object.defineProperty(parsed, '__providerDiagnostics', {
+      value: providerDiagnostics(response, parsed, raw),
+      enumerable: false,
+      configurable: false,
+    });
   }
   return parsed;
 }
@@ -364,11 +413,11 @@ async function createTaskIdempotently(params: {
 function classifySubmitFailure(error: unknown): { status: 'FAILED' | 'SUBMISSION_OUTCOME_UNKNOWN'; detail: MvpStructuredError } {
   if (error instanceof ProviderHttpError) {
     if (error.httpStatus === 429 || error.providerStatus === 'RESOURCE_EXHAUSTED') {
-      return { status: 'FAILED', detail: { code: 'RATE_LIMITED', stage: 'submit', message: error.message, retryable: true, recommendedAction: '稍后创建新任务；本任务未获得 Operation Name。', providerHttpStatus: error.httpStatus, providerStatus: error.providerStatus, technicalMessage: error.rawBody } };
+      return { status: 'FAILED', detail: { code: 'RATE_LIMITED', stage: 'submit', message: error.message, retryable: true, recommendedAction: '稍后创建新任务；本任务未获得 Operation Name。', providerHttpStatus: error.httpStatus, providerStatus: error.providerStatus, technicalMessage: error.rawBody, ...error.providerDiagnostics } };
     }
     if ([400, 401, 403, 404].includes(error.httpStatus)) {
       const code = [401, 403].includes(error.httpStatus) ? 'AUTH_FAILED' : 'REQUEST_REJECTED';
-      return { status: 'FAILED', detail: { code, stage: code === 'AUTH_FAILED' ? 'auth' : 'submit', message: error.message, retryable: false, recommendedAction: code === 'AUTH_FAILED' ? '检查 Cloud Run Runtime Service Account / IAM。' : '检查输入、模型和 Vertex 路由配置。', providerHttpStatus: error.httpStatus, providerStatus: error.providerStatus, technicalMessage: error.rawBody } };
+      return { status: 'FAILED', detail: { code, stage: code === 'AUTH_FAILED' ? 'auth' : 'submit', message: error.message, retryable: false, recommendedAction: code === 'AUTH_FAILED' ? '检查 Cloud Run Runtime Service Account / IAM。' : '检查输入、模型和 Vertex 路由配置。', providerHttpStatus: error.httpStatus, providerStatus: error.providerStatus, technicalMessage: error.rawBody, ...error.providerDiagnostics } };
     }
   }
   const message = redactSecrets(error instanceof Error ? error.message : String(error));
@@ -481,7 +530,25 @@ async function processGeneratedBuffer(task: MvpVideoTask, buffer: Buffer, allowI
       }
       return await updateTask(task.taskId, {
         status: 'FAILED', stage: 'submit',
-        error: { code: 'IDENTITY_RETRY_FAILED', stage: 'submit', message: classified.detail.message, retryable: classified.detail.retryable, recommendedAction: '身份保守重试提交失败；不要自动进行第二次身份重试。', providerHttpStatus: classified.detail.providerHttpStatus, providerStatus: classified.detail.providerStatus, technicalMessage: classified.detail.technicalMessage },
+        error: {
+          code: 'IDENTITY_RETRY_FAILED',
+          stage: 'submit',
+          message: classified.detail.message,
+          retryable: classified.detail.retryable,
+          recommendedAction: '身份保守重试提交失败；不要自动进行第二次身份重试。',
+          providerHttpStatus: classified.detail.providerHttpStatus,
+          providerCode: classified.detail.providerCode,
+          providerStatus: classified.detail.providerStatus,
+          technicalMessage: classified.detail.technicalMessage,
+          provider: classified.detail.provider,
+          model: classified.detail.model,
+          projectId: classified.detail.projectId,
+          region: classified.detail.region,
+          requestId: classified.detail.requestId,
+          rawStatus: classified.detail.rawStatus,
+          rawMessage: classified.detail.rawMessage,
+          rawErrorDetails: classified.detail.rawErrorDetails,
+        },
       });
     }
   }
@@ -618,11 +685,12 @@ export async function createMvpAppV02() {
       try { providerResponse = await pollProvider(task.operationName); }
       catch (error: any) {
         const status = error instanceof ProviderHttpError ? error.httpStatus : null;
+        const providerRca = error instanceof ProviderHttpError ? error.providerDiagnostics : {};
         if (status === 401 || status === 403 || status === 404) {
-          task = await updateTask(task.taskId, { status: 'FAILED', stage: status === 401 || status === 403 ? 'auth' : 'polling', error: { code: status === 401 || status === 403 ? 'AUTH_FAILED' : 'GENERATION_FAILED', stage: status === 401 || status === 403 ? 'auth' : 'polling', message: redactSecrets(error?.message || String(error)), retryable: false, recommendedAction: status === 404 ? '核对 Operation Name、区域和模型。' : '检查 Runtime Service Account IAM。', providerHttpStatus: status, providerStatus: error.providerStatus || null } });
+          task = await updateTask(task.taskId, { status: 'FAILED', stage: status === 401 || status === 403 ? 'auth' : 'polling', error: { code: status === 401 || status === 403 ? 'AUTH_FAILED' : 'GENERATION_FAILED', stage: status === 401 || status === 403 ? 'auth' : 'polling', message: redactSecrets(error?.message || String(error)), retryable: false, recommendedAction: status === 404 ? '核对 Operation Name、区域和模型。' : '检查 Runtime Service Account IAM。', providerHttpStatus: status, providerStatus: error.providerStatus || null, ...providerRca } });
           return res.status(502).json(publicTask(task));
         }
-        task = await updateTask(task.taskId, { pollAttempt: (task.pollAttempt || 0) + 1, error: { code: 'GENERATION_TIMEOUT', stage: 'polling', message: redactSecrets(error?.message || String(error)), retryable: true, recommendedAction: '继续轮询同一 Operation；不要重新提交 Veo。', providerHttpStatus: status, providerStatus: error?.providerStatus || null } });
+        task = await updateTask(task.taskId, { pollAttempt: (task.pollAttempt || 0) + 1, error: { code: 'GENERATION_TIMEOUT', stage: 'polling', message: redactSecrets(error?.message || String(error)), retryable: true, recommendedAction: '继续轮询同一 Operation；不要重新提交 Veo。', providerHttpStatus: status, providerStatus: error?.providerStatus || null, ...providerRca } });
         return res.status(503).json(publicTask(task));
       }
 
@@ -630,7 +698,21 @@ export async function createMvpAppV02() {
       if (!providerResponse?.done) return res.status(202).json(publicTask(task));
       if (providerResponse.error) {
         const safety = VideoGenerator.checkSafetyBlock(null, providerResponse.error);
-        const normalized = normalizeProviderFailureReason({ failureReason: safety.isBlocked ? 'output_rai_filtered' : 'upstream_failed', message: safety.reason || redactSecrets(JSON.stringify(providerResponse.error)), providerStatus: providerResponse?.error?.status || null, httpStatus: providerResponse?.error?.code || null });
+        const providerRca = providerResponse.__providerDiagnostics || {};
+        const normalized = normalizeProviderFailureReason({
+          failureReason: safety.isBlocked ? 'output_rai_filtered' : 'upstream_failed',
+          message: safety.reason || redactSecrets(JSON.stringify(providerResponse.error)),
+          providerStatus: providerResponse?.error?.status || null,
+          httpStatus: null,
+          rawStatus: providerRca.rawStatus ?? providerResponse?.error?.code ?? null,
+          ...providerRca,
+          provider: providerRca.provider || MVP_PROVIDER,
+          model: providerRca.model || task.model || MVP_VIDEO_MODEL,
+          projectId: providerRca.projectId || task.projectId || PROJECT_ID,
+          region: providerRca.region || task.region || REGION,
+          rawMessage: providerRca.rawMessage || providerResponse?.error?.message || null,
+          rawErrorDetails: providerRca.rawErrorDetails ?? redactProviderValue(providerResponse.error),
+        });
         task = await updateTask(task.taskId, { status: 'FAILED', stage: normalized.stage, error: normalized }); return res.status(502).json(publicTask(task));
       }
       const responseBody = providerResponse.response || providerResponse;
