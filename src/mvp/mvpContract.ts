@@ -47,6 +47,17 @@ export type MvpErrorCode =
   | 'STORAGE_CONFIG_INVALID'
   | 'INTERNAL_ERROR';
 
+export interface MvpProviderDiagnostics {
+  provider?: string | null;
+  model?: string | null;
+  projectId?: string | null;
+  region?: string | null;
+  requestId?: string | null;
+  rawStatus?: string | number | null;
+  rawMessage?: string | null;
+  rawErrorDetails?: unknown;
+}
+
 export interface MvpStructuredError {
   code: MvpErrorCode;
   stage: MvpFailureStage;
@@ -57,6 +68,14 @@ export interface MvpStructuredError {
   providerCode?: number | null;
   providerStatus?: string | null;
   technicalMessage?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  projectId?: string | null;
+  region?: string | null;
+  requestId?: string | null;
+  rawStatus?: string | number | null;
+  rawMessage?: string | null;
+  rawErrorDetails?: unknown;
 }
 
 export interface MvpVideoTask {
@@ -157,19 +176,31 @@ export function normalizeProviderFailureReason(input: {
   failureReason?: string | null;
   message?: string | null;
   httpStatus?: number | null;
+  rawStatus?: string | number | null;
   providerStatus?: string | null;
-}): MvpStructuredError {
+} & MvpProviderDiagnostics): MvpStructuredError {
   const failureReason = String(input.failureReason || '').toLowerCase();
   const originalMessage = String(input.message || 'Video generation failed.');
   const message = unwrapProviderMessage(originalMessage);
-  const rawNumericCode = input.httpStatus ?? null;
+  const rawStatus = input.rawStatus ?? input.httpStatus ?? null;
+  const rawNumericCode = typeof rawStatus === 'number' ? rawStatus : null;
   const providerCode = typeof rawNumericCode === 'number' && (rawNumericCode < 100 || rawNumericCode > 599)
     ? rawNumericCode
     : null;
-  const httpStatus = typeof rawNumericCode === 'number' && rawNumericCode >= 100 && rawNumericCode <= 599
-    ? rawNumericCode
+  const httpStatus = typeof input.httpStatus === 'number' && input.httpStatus >= 100 && input.httpStatus <= 599
+    ? input.httpStatus
     : null;
   const suppliedProviderStatus = input.providerStatus || null;
+  const providerDiagnostics: MvpProviderDiagnostics = {
+    provider: input.provider || null,
+    model: input.model || null,
+    projectId: input.projectId || null,
+    region: input.region || null,
+    requestId: input.requestId || null,
+    rawStatus,
+    rawMessage: input.rawMessage || null,
+    rawErrorDetails: input.rawErrorDetails ?? null,
+  };
   const deadlineExceeded =
     failureReason === 'polling_timeout' ||
     suppliedProviderStatus === 'DEADLINE_EXCEEDED' ||
@@ -186,6 +217,7 @@ export function normalizeProviderFailureReason(input: {
       providerCode,
       providerStatus: suppliedProviderStatus,
       technicalMessage: originalMessage !== message ? originalMessage : null,
+      ...providerDiagnostics,
     };
   }
 
@@ -200,6 +232,7 @@ export function normalizeProviderFailureReason(input: {
       providerCode,
       providerStatus: suppliedProviderStatus || 'DEADLINE_EXCEEDED',
       technicalMessage: originalMessage !== message ? originalMessage : null,
+      ...providerDiagnostics,
     };
   }
 
@@ -213,6 +246,7 @@ export function normalizeProviderFailureReason(input: {
       providerHttpStatus: httpStatus,
       providerCode,
       providerStatus: suppliedProviderStatus,
+      ...providerDiagnostics,
     };
   }
 
@@ -226,6 +260,7 @@ export function normalizeProviderFailureReason(input: {
       providerHttpStatus: httpStatus,
       providerCode,
       providerStatus: suppliedProviderStatus,
+      ...providerDiagnostics,
     };
   }
 
@@ -239,6 +274,7 @@ export function normalizeProviderFailureReason(input: {
       providerHttpStatus: httpStatus,
       providerCode,
       providerStatus: suppliedProviderStatus,
+      ...providerDiagnostics,
     };
   }
 
@@ -252,6 +288,7 @@ export function normalizeProviderFailureReason(input: {
       providerHttpStatus: httpStatus,
       providerCode,
       providerStatus: suppliedProviderStatus,
+      ...providerDiagnostics,
     };
   }
 
@@ -265,5 +302,6 @@ export function normalizeProviderFailureReason(input: {
     providerCode,
     providerStatus: suppliedProviderStatus,
     technicalMessage: originalMessage !== message ? originalMessage : null,
+    ...providerDiagnostics,
   };
 }
