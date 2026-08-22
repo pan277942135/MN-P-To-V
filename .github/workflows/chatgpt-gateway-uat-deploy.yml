@@ -12,6 +12,7 @@ on:
       - 'mvp-server-v02.ts'
       - 'src/mvp/**'
       - 'src/__tests__/chatgptGatewayContract.test.ts'
+      - 'src/__tests__/chatgptGatewayStream.test.ts'
       - '.github/workflows/chatgpt-gateway-uat-deploy.yml'
   workflow_dispatch:
 

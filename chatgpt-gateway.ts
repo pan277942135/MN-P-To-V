@@ -465,7 +465,15 @@ async function lookupUpstreamTask(idempotencyKey: string): Promise<any | null> {
   return body?.taskId ? body : null;
 }
 
-function actionTask(task: any) {
+function videoDeliveryUrls(task: any, publicUrl: string | null = PUBLIC_URL) {
+  const ready = task?.status === 'COMPLETED' && task?.artifactPersisted === true && task?.artifactVerified === true && Boolean(task?.taskId) && Boolean(publicUrl);
+  if (!ready) return { videoUrl: null, downloadUrl: null };
+  const base = String(publicUrl).replace(/\/+$/, '');
+  const streamPath = '/v1/videos/' + encodeURIComponent(String(task.taskId)) + '/stream';
+  return { videoUrl: base + streamPath, downloadUrl: base + streamPath + '?download=1' };
+}
+
+function actionTask(task: any, publicUrl: string | null = PUBLIC_URL) {
   return {
     taskId: task?.taskId || null,
     status: task?.status || null,
@@ -481,6 +489,7 @@ function actionTask(task: any) {
     sizeBytes: task?.sizeBytes || null,
     videoReady: task?.status === 'COMPLETED',
     error: task?.error || null,
+    ...videoDeliveryUrls(task, publicUrl),
   };
 }
 
@@ -813,11 +822,37 @@ export function createChatGptGatewayApp() {
 
   app.get('/v1/videos/:taskId', async (req, res) => {
     try {
-      const response = await upstream(`/api/mvp/videos/${encodeURIComponent(req.params.taskId)}`);
+      const response = await upstream('/api/mvp/videos/' + encodeURIComponent(req.params.taskId));
       const body = await responseJson(response);
       const binding = await getTaskInputBinding(req.params.taskId);
-      return res.status(response.status).json({ ...actionTask(body), inputSource: binding?.inputSource || null });
+      const publicUrl = PUBLIC_URL || req.protocol + '://' + req.get('host');
+      return res.status(response.status).json({ ...actionTask(body, publicUrl), inputSource: binding?.inputSource || null });
     } catch (error: any) { return res.status(502).json({ error: 'get_video_failed', detail: String(error?.message || error) }); }
+  });
+
+  app.get('/v1/videos/:taskId/stream', async (req, res) => {
+    try {
+      const download = req.query.download === '1' || req.query.download === 'true';
+      const query = download ? '?download=1' : '';
+      const headers: Record<string, string> = {};
+      if (req.headers.range) headers.Range = String(req.headers.range);
+      const upstreamPath = '/api/mvp/videos/' + encodeURIComponent(req.params.taskId) + '/stream' + query;
+      const response = await upstream(upstreamPath, { headers });
+      const body = Buffer.from(await response.arrayBuffer());
+      if (!response.ok) {
+        const contentType = response.headers.get('content-type');
+        if (contentType) res.setHeader('Content-Type', contentType);
+        return res.status(response.status).end(body);
+      }
+      for (const header of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'content-disposition']) {
+        const value = response.headers.get(header);
+        if (value) res.setHeader(header, value);
+      }
+      if (!response.headers.get('content-length')) res.setHeader('Content-Length', String(body.length));
+      return res.status(response.status).end(body);
+    } catch (error: any) {
+      return res.status(502).json({ error: 'stream_video_failed', detail: String(error?.message || error) });
+    }
   });
 
   app.post('/v1/videos/:taskId/recover', async (req, res) => {

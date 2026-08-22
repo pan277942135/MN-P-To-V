@@ -1,0 +1,152 @@
+name: ChatGPT Gateway Delivery Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: Existing completed task ID to verify read-only video delivery
+        required: true
+        type: string
+        default: mvp_9264d39d-5519-4ddc-baf1-1ac80585610e
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  GAR_REPO: zaojing
+  GATEWAY_SERVICE: zaojing-chatgpt-gateway-uat
+  CHATGPT_UPSTREAM_SERVICE: zaojing-chatgpt-upstream-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  BOOTSTRAP_KEY_HASH: 2eb32be8da4af88e0d9dc19b8fa642977394a7021e91ca24e61ea667417f44f2
+  UAT_DIRECT_DAILY_LIMIT: '12'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TASK_ID: ${{ inputs.task_id }}
+    steps:
+      - id: checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Set up gcloud
+        id: setup
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Artifact Registry auth
+        shell: bash
+        run: gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+
+      - name: Run Gateway contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bunx vitest run src/__tests__/chatgptGatewayContract.test.ts src/__tests__/chatgptGatewayStream.test.ts
+
+      - name: Resolve existing private upstream
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="$(gcloud run services describe "$CHATGPT_UPSTREAM_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          REV="$(gcloud run services describe "$CHATGPT_UPSTREAM_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          test -n "$URL"
+          test -n "$REV"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REV" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Gateway-only image
+        id: gateway_image
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD)"
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$GATEWAY_SERVICE:$SHA"
+          docker build -f Dockerfile.chatgpt-gateway -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Gateway-only revision
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          UPSTREAM_URL='${{ steps.upstream.outputs.url }}'
+          gcloud run deploy "$GATEWAY_SERVICE" \
+            --project="$PROJECT_ID" --region="$REGION" --platform=managed \
+            --image='${{ steps.gateway_image.outputs.image }}' \
+            --service-account="$RUNTIME_SA" \
+            --allow-unauthenticated --no-iap \
+            --cpu=1 --memory=1Gi --timeout=300 --concurrency=20 --min-instances=0 --max-instances=2 \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,ZAOJING_MVP_UPSTREAM_URL=$UPSTREAM_URL,ZAOJING_UPSTREAM_AUTH_MODE=cloud-run-id-token,ZAOJING_CHATGPT_BOOTSTRAP_KEY_HASH=$BOOTSTRAP_KEY_HASH,ZAOJING_CHATGPT_UAT_DIRECT=true,ZAOJING_CHATGPT_UAT_DAILY_LIMIT=$UAT_DIRECT_DAILY_LIMIT" \
+            --quiet
+          URL="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          gcloud run services update "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --update-env-vars="ZAOJING_CHATGPT_PUBLIC_URL=$URL" --quiet >/dev/null
+          REV="$(gcloud run services describe "$GATEWAY_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          test -n "$URL"
+          test -n "$REV"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REV" >> "$GITHUB_OUTPUT"
+
+      - name: Read-only verify existing task video delivery
+        id: verify
+        shell: bash
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          set -euo pipefail
+          TASK_JSON="$(curl -fsS "$URL/v1/videos/$TASK_ID")"
+          printf '%s' "$TASK_JSON" > task.json
+          VIDEO_URL="$(jq -r '.videoUrl // empty' task.json)"
+          DOWNLOAD_URL="$(jq -r '.downloadUrl // empty' task.json)"
+          test -n "$VIDEO_URL"
+          test -n "$DOWNLOAD_URL"
+          test "$VIDEO_URL" = "$URL/v1/videos/$TASK_ID/stream"
+          test "$DOWNLOAD_URL" = "$URL/v1/videos/$TASK_ID/stream?download=1"
+          jq -e '.taskId == $task and .status == "COMPLETED" and .videoReady == true and .artifactPersisted == true and .artifactVerified == true' --arg task "$TASK_ID" task.json >/dev/null
+          STREAM_STATUS="$(curl -sS -D stream.headers -o stream.mp4 -w '%{http_code}' "$VIDEO_URL")"
+          DOWNLOAD_STATUS="$(curl -sS -D download.headers -o download.mp4 -w '%{http_code}' "$DOWNLOAD_URL")"
+          RANGE_STATUS="$(curl -sS -H 'Range: bytes=0-15' -D range.headers -o range.mp4 -w '%{http_code}' "$VIDEO_URL")"
+          test "$STREAM_STATUS" = '200'
+          test "$DOWNLOAD_STATUS" = '200'
+          test "$RANGE_STATUS" = '206'
+          grep -qi '^content-type: video/mp4' stream.headers
+          grep -qi '^content-type: video/mp4' download.headers
+          grep -qi '^accept-ranges: bytes' range.headers
+          grep -qi '^content-range: bytes 0-15/' range.headers
+          test -s stream.mp4
+          test -s download.mp4
+          test -s range.mp4
+          echo "Existing task: $TASK_ID" >> "$GITHUB_STEP_SUMMARY"
+          echo "Gateway URL: $URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "videoUrl: $VIDEO_URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "downloadUrl: $DOWNLOAD_URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "Stream HTTP: $STREAM_STATUS; download HTTP: $DOWNLOAD_STATUS; range HTTP: $RANGE_STATUS" >> "$GITHUB_STEP_SUMMARY"
+          echo "No Veo task creation was called; verification used GET and stream requests only." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Print deployment outputs
+        if: always()
+        run: |
+          echo "gateway_revision=${{ steps.deploy.outputs.revision }}"
+          echo "gateway_url=${{ steps.deploy.outputs.url }}"
+          echo "upstream_revision=${{ steps.upstream.outputs.revision }}"
+          echo "task_id=$TASK_ID"

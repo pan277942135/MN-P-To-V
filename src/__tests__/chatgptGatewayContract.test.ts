@@ -206,6 +206,19 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(schema).toContain('openaiFileIdRefs');
   });
 
+  it('exposes verified video delivery URLs and a non-creating MP4 stream path', () => {
+    expect(gateway).toContain('videoUrl');
+    expect(gateway).toContain('downloadUrl');
+    expect(gateway).toContain('artifactPersisted');
+    expect(gateway).toContain('artifactVerified');
+    expect(gateway).toContain("app.get('/v1/videos/:taskId/stream'");
+    expect(gateway).toContain('req.headers.range');
+    expect(gateway).toContain('download=1');
+    expect(schema).toContain('version: 1.3.0');
+    expect(schema).toContain('/v1/videos/{taskId}/stream:');
+    expect(schema).toContain('operationId: streamIdentitySafeVideo');
+  });
+
   it('stays within ChatGPT Actions editor schema validation constraints', () => {
     expect(schema).toContain('components:\n  schemas: {}');
     for (const match of schema.matchAll(/^\s+description:\s+(.+)$/gm)) {
