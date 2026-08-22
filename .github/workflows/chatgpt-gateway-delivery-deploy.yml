@@ -1,6 +1,16 @@
 name: ChatGPT Gateway Delivery Deploy
 
 on:
+  push:
+    branches:
+      - e2e-04-character-reference-final
+    paths:
+      - 'chatgpt-gateway.ts'
+      - 'chatgpt-action-openapi.yaml'
+      - 'Dockerfile.chatgpt-gateway'
+      - 'src/__tests__/chatgptGatewayContract.test.ts'
+      - 'src/__tests__/chatgptGatewayStream.test.ts'
+      - '.github/workflows/chatgpt-gateway-delivery-deploy.yml'
   workflow_dispatch:
     inputs:
       task_id:
