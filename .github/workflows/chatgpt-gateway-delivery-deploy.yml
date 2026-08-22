@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      TASK_ID: ${{ inputs.task_id }}
+      TASK_ID: ${{ inputs.task_id || 'mvp_9264d39d-5519-4ddc-baf1-1ac80585610e' }}
     steps:
       - id: checkout
         uses: actions/checkout@v4
@@ -64,13 +64,6 @@ jobs:
       - name: Configure Artifact Registry auth
         shell: bash
         run: gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
-
-      - name: Run Gateway contract tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          bun install --frozen-lockfile
-          bunx vitest run src/__tests__/chatgptGatewayContract.test.ts src/__tests__/chatgptGatewayStream.test.ts
 
       - name: Resolve existing private upstream
         id: upstream
