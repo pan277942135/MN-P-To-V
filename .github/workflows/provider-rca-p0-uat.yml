@@ -141,7 +141,7 @@ jobs:
           set +e
           A_PROMPT='A domestic cat sits quietly on a windowsill beside a softly lit window, fixed camera, natural breathing, subtle ear movement, realistic motion, no people, no text.'
           jq -nc --arg prompt "$A_PROMPT" '{instances:[{prompt:$prompt}],parameters:{sampleCount:1,aspectRatio:"9:16",durationSeconds:4,resolution:"1080p",generateAudio:false,storageUri:"gs://ai-studio-bucket-89614354864-asia-south1/provider-rca-test-a/"}}' > test-a-request.json
-          ACCESS_TOKEN="$(gcloud auth print-access-token 2>/dev/null)"
+          ACCESS_TOKEN="$(gcloud auth print-access-token --impersonate-service-account="$RUNTIME_SA" 2>/dev/null)"
           A_SUBMIT_HTTP="$(curl -sS -D test-a-submit.headers -o test-a-submit.json -w '%{http_code}' \
             -X POST -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json' \
             --data-binary @test-a-request.json \
