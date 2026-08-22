@@ -1,0 +1,135 @@
+name: Provider RCA P0 Isolation Diagnostic
+
+on:
+  push:
+    branches: [provider-rca-p0]
+    paths:
+      - '.github/workflows/provider-rca-p0-isolation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  MODEL: veo-3.1-fast-generate-001
+  UPSTREAM_SERVICE: zaojing-chatgpt-upstream-uat
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  GATEWAY_URL: https://zaojing-chatgpt-gateway-uat-i7lns3auvq-uc.a.run.app
+
+jobs:
+  provider-rca-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout current P0 branch
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Run one original-image minimal-prompt isolation diagnostic
+        id: isolation
+        shell: bash
+        run: |
+          set +e
+          UPSTREAM_URL="$(gcloud run services describe "$UPSTREAM_SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)' 2>/dev/null)"
+          RUNTIME_TOKEN="$(gcloud auth print-identity-token --impersonate-service-account="$RUNTIME_SA" --audiences="$UPSTREAM_URL" 2>/dev/null)"
+
+          curl -sS --get --data-urlencode 'q=梅凝' "$GATEWAY_URL/v1/characters" -o isolation-characters.json
+          CHARACTER_ID="$(jq -r '.characters[0].characterId // empty' isolation-characters.json 2>/dev/null)"
+          curl -sS "$GATEWAY_URL/v1/characters/$CHARACTER_ID" -o isolation-package.json
+          REFERENCE_ID="$(jq -r '[.rolePackage.references[] | select(.angle == "front")][0].referenceId // .rolePackage.references[0].referenceId // empty' isolation-package.json 2>/dev/null)"
+          REFERENCE_URL="$GATEWAY_URL/v1/characters/$CHARACTER_ID/references/$REFERENCE_ID"
+          REFERENCE_HTTP="$(curl -sS -D isolation-reference.headers -o isolation-reference.bin -w '%{http_code}' "$REFERENCE_URL" 2>/dev/null)"
+          REFERENCE_MIME="$(awk -F': *' 'tolower($1)=="content-type" {gsub("\r", "", $2); sub(/;.*/, "", $2); print tolower($2); exit}' isolation-reference.headers 2>/dev/null)"
+          case "$REFERENCE_MIME" in
+            image/png) REFERENCE_EXT=png;;
+            image/webp) REFERENCE_EXT=webp;;
+            image/jpeg) REFERENCE_EXT=jpg;;
+            *) REFERENCE_EXT=bin;;
+          esac
+          mv isolation-reference.bin "isolation-reference.$REFERENCE_EXT" 2>/dev/null || true
+
+          IDEMPOTENCY_KEY="provider-rca-isolation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          MINIMAL_PROMPT='固定镜头，保持当前姿势，只发生自然轻微呼吸。'
+          if [ -n "$RUNTIME_TOKEN" ] && [ -s "isolation-reference.$REFERENCE_EXT" ] && [ "$REFERENCE_HTTP" = '200' ]; then
+            CREATE_HTTP="$(curl -sS -D isolation-create.headers -X POST \
+              -H "Authorization: Bearer $RUNTIME_TOKEN" \
+              -H "x-idempotency-key: $IDEMPOTENCY_KEY" \
+              -F "image=@isolation-reference.$REFERENCE_EXT;type=$REFERENCE_MIME" \
+              --form-string "prompt=$MINIMAL_PROMPT" \
+              -F 'durationSeconds=4' -F 'identitySafeMode=false' \
+              -o isolation-create.json -w '%{http_code}' \
+              "$UPSTREAM_URL/api/mvp/videos/start" 2>/dev/null)"
+          else
+            CREATE_HTTP='not_submitted'
+            printf '{"status":"DIAGNOSTIC_SETUP_FAILED"}\n' > isolation-create.json
+          fi
+
+          TASK_ID="$(jq -r '.taskId // empty' isolation-create.json 2>/dev/null)"
+          if [ -n "$TASK_ID" ]; then
+            cp isolation-create.json isolation-final.json
+            for i in $(seq 1 36); do
+              POLL_HTTP="$(curl -sS -D isolation-poll.headers -o isolation-final.json -w '%{http_code}' \
+                -H "Authorization: Bearer $RUNTIME_TOKEN" \
+                "$UPSTREAM_URL/api/mvp/videos/$TASK_ID" 2>/dev/null)"
+              STATUS="$(jq -r '.status // empty' isolation-final.json 2>/dev/null)"
+              case "$STATUS" in COMPLETED|FAILED|SUBMISSION_OUTCOME_UNKNOWN) break;; esac
+              sleep 10
+            done
+          else
+            cp isolation-create.json isolation-final.json
+            POLL_HTTP='not_polled'
+          fi
+
+          REQUEST_ID="$(awk -F': *' 'tolower($1)=="x-request-id" || tolower($1)=="x-goog-request-id" || tolower($1)=="x-google-request-id" {gsub("\r", "", $2); print $2; exit}' isolation-poll.headers isolation-create.headers 2>/dev/null)"
+          STATUS="$(jq -r '.status // empty' isolation-final.json 2>/dev/null)"
+          PROVIDER_CODE="$(jq -r '.error.providerCode // .error.rawStatus // empty' isolation-final.json 2>/dev/null)"
+          PROVIDER_STATUS="$(jq -r '.error.providerStatus // .error.status // empty' isolation-final.json 2>/dev/null)"
+          RAW_TEXT="$(jq -r '[.. | scalars] | map(tostring) | join(" ")' isolation-final.json 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+          if [[ "$RAW_TEXT" == *quotafailure* || "$RAW_TEXT" == *quota_exceeded* || "$RAW_TEXT" == *rate_limit* || "$RAW_TEXT" == *rate\ limit* ]]; then
+            PROVIDER_CLASS='quota_signal'
+          elif [[ "$PROVIDER_CODE" == '8' || "$PROVIDER_STATUS" == 'RESOURCE_EXHAUSTED' ]] && [[ "$RAW_TEXT" == *high\ load* || "$RAW_TEXT" == *capacity* || "$RAW_TEXT" == *overload* || "$RAW_TEXT" == *try\ again\ later* ]]; then
+            PROVIDER_CLASS='shared_capacity_signal'
+          elif [[ "$PROVIDER_CODE" == '8' || "$PROVIDER_STATUS" == 'RESOURCE_EXHAUSTED' ]]; then
+            PROVIDER_CLASS='resource_exhausted_unresolved'
+          elif [ "$STATUS" = 'COMPLETED' ]; then
+            PROVIDER_CLASS='none_observed'
+          else
+            PROVIDER_CLASS='other_or_setup_failure'
+          fi
+          if [ "$STATUS" = 'COMPLETED' ]; then
+            ISOLATION_INFERENCE='PROMPT_SUSPECTED'
+          elif [ "$STATUS" = 'FAILED' ] && [ "$PROVIDER_CLASS" = 'none_observed' ]; then
+            ISOLATION_INFERENCE='IMAGE_SUSPECTED'
+          else
+            ISOLATION_INFERENCE='PROVIDER_OR_REQUEST_UNRESOLVED'
+          fi
+          jq -n \
+            --arg region "$REGION" --arg model "$MODEL" --arg createHttp "$CREATE_HTTP" --arg pollHttp "${POLL_HTTP:-not_started}" \
+            --arg referenceHttp "$REFERENCE_HTTP" --arg status "$STATUS" --arg code "$PROVIDER_CODE" --arg providerStatus "$PROVIDER_STATUS" \
+            --arg providerClass "$PROVIDER_CLASS" --arg inference "$ISOLATION_INFERENCE" --arg requestId "$REQUEST_ID" \
+            --arg taskCreated "$( [ -n "$TASK_ID" ] && echo true || echo false )" \
+            --arg operationPresent "$(jq -r 'if .operationNamePresent == true then "true" else "false" end' isolation-final.json 2>/dev/null)" \
+            --arg artifactPersisted "$(jq -r 'if .artifactPersisted == true then "true" else "false" end' isolation-final.json 2>/dev/null)" \
+            --arg artifactVerified "$(jq -r 'if .artifactVerified == true then "true" else "false" end' isolation-final.json 2>/dev/null)" \
+            --arg rawDetailsPresent "$(jq -r 'if (.error.rawErrorDetails // null) != null then "true" else "false" end' isolation-final.json 2>/dev/null)" \
+            '{scope:"P0 isolation only",region:$region,model:$model,referenceHttp:$referenceHttp,createHttp:$createHttp,pollHttp:$pollHttp,status:$status,taskCreated:($taskCreated=="true"),operationNamePresent:($operationPresent=="true"),artifactPersisted:($artifactPersisted=="true"),artifactVerified:($artifactVerified=="true"),providerCode:$code,providerStatus:$providerStatus,providerClass:$providerClass,isolationInference:$inference,requestIdCaptured:($requestId!=""),rawErrorDetailsPresent:($rawDetailsPresent=="true"),sensitiveValuesOmitted:true}' \
+            > provider-rca-isolation-summary.json
+          echo 'P0 isolation sanitized summary (raw provider details, request IDs, task IDs, and image bytes omitted):'
+          cat provider-rca-isolation-summary.json
