@@ -1,4 +1,4 @@
-export const HEAD_ONLY_IMAGE_VERSION = 'head-only-v1';
+export const HEAD_ONLY_IMAGE_VERSION = 'head-only-v1.1-mime-authority';
 export const DEFAULT_TARGET_HEAD_BODY_RATIO = 9;
 
 export type HeadOnlyQaIssue = {
@@ -73,7 +73,9 @@ Everything below the base of the neck must remain visually unchanged from the OR
 Do not redesign the body. Do not change body shape, body volume, clothing fit, exposed skin area, pose, hand position, scene geometry, or background details.
 
 IDENTITY REQUIREMENT:
-Replace the source person's head identity with the exact supplied target character identity. Remove residual source-person facial identity. Preserve realistic pores, facial anatomy, eye direction compatible with the source pose, and physically plausible hair integration.
+Replace the source person's head identity with the exact supplied target character identity. The target-character masters are authoritative for face geometry, eyes, skin appearance, hair color, hairline and visible hair. Remove residual source-person facial identity and incompatible source-person head traits. If the source hair color or facial traits conflict with the target masters, the editable head/hair region MUST visibly adopt the target traits while the body and scene remain unchanged.
+An unchanged or near-unchanged copy of the ORIGINAL SOURCE IMAGE is an invalid result. Do not return the source person's original face as the final head.
+Preserve realistic pores, facial anatomy, eye direction compatible with the source pose, and physically plausible hair integration.
 
 PROPORTION REQUIREMENT:
 The target aesthetic is a harmonious approximately 1:${targetRatio} head-to-full-body proportion when the full body is visible. Achieve this ONLY by natural head scale and head placement inside the editable head region. Never stretch, shrink, lengthen, reshape, reposition, or regenerate the body to force the ratio. If the body is cropped and an exact full-body ratio cannot be measured, preserve the original crop and perspective and choose a naturally proportioned head scale consistent with an approximately ${targetRatio}-head-tall adult figure.
