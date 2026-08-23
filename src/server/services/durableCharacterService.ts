@@ -37,6 +37,27 @@ export interface HydratedDurableCharacter {
 const CHARACTER_REFERENCE_DOWNLOAD_TIMEOUT_MS = 10_000;
 const characterReferenceStorage = new Storage();
 
+function detectImageMime(buffer: Buffer): string | null {
+  if (!buffer || buffer.length < 12) return null;
+  const jpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  if (jpeg) return 'image/jpeg';
+  const png =
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0d &&
+    buffer[5] === 0x0a &&
+    buffer[6] === 0x1a &&
+    buffer[7] === 0x0a;
+  if (png) return 'image/png';
+  const webp =
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP';
+  if (webp) return 'image/webp';
+  return null;
+}
+
 function safeExtension(mimeType: string): string {
   if (mimeType === 'image/png') return 'png';
   if (mimeType === 'image/webp') return 'webp';
@@ -100,7 +121,10 @@ export class DurableCharacterService {
       try {
         for (let i = 0; i < params.images.length; i++) {
           const image = params.images[i];
-          const mimeType = image.mimeType || 'image/jpeg';
+          // Magic bytes are authoritative. Older MN masters were recorded as JPEG in
+          // Firestore even though the durable GCS bytes are PNG; trusting metadata here
+          // causes multimodal providers to misread or ignore the identity references.
+          const mimeType = detectImageMime(image.buffer) || image.mimeType || 'image/jpeg';
           const objectPath = `characters/${params.id}/masters/${now}_${i}_${crypto.randomUUID().slice(0, 8)}.${safeExtension(mimeType)}`;
           const artifact = await gcsArtifactStore.uploadImageArtifact({
             objectPath,
@@ -170,14 +194,18 @@ export class DurableCharacterService {
   public async hydrate(record: DurableCharacterRecord): Promise<HydratedDurableCharacter> {
     const refs = [...(record.referenceImages || [])].sort((a, b) => a.sortOrder - b.sortOrder);
     const hydratedRefs = await Promise.all(
-      refs.map(async (ref) => ({
-        id: ref.id,
-        buffer: await this.fetchReferenceImageBuffer(ref),
-        mimeType: ref.mimeType || 'image/jpeg',
-        width: ref.width || 1080,
-        height: ref.height || 1080,
-        angle: ref.angle,
-      }))
+      refs.map(async (ref) => {
+        const buffer = await this.fetchReferenceImageBuffer(ref);
+        const mimeType = detectImageMime(buffer) || ref.mimeType || 'image/jpeg';
+        return {
+          id: ref.id,
+          buffer,
+          mimeType,
+          width: ref.width || 1080,
+          height: ref.height || 1080,
+          angle: ref.angle,
+        };
+      })
     );
     return {
       id: record.id,
@@ -204,7 +232,7 @@ export class DurableCharacterService {
     if (!ref) return null;
 
     const buffer = await this.fetchReferenceImageBuffer(ref);
-    return { buffer, mimeType: ref.mimeType || 'image/jpeg' };
+    return { buffer, mimeType: detectImageMime(buffer) || ref.mimeType || 'image/jpeg' };
   }
 
   public async delete(id: string): Promise<boolean> {

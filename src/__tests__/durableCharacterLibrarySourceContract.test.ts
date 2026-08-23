@@ -39,8 +39,9 @@ describe('durable character library contract', () => {
     expect(durableServiceSource).toContain('file.download({ timeout: CHARACTER_REFERENCE_DOWNLOAD_TIMEOUT_MS } as any)');
     expect(durableServiceSource).toContain("gcsArtifactStore.useMock || process.env.NODE_ENV === 'test'");
     expect(durableServiceSource).toContain('must never pass');
-    expect(durableServiceSource).toContain('buffer: await this.fetchReferenceImageBuffer(ref)');
     expect(durableServiceSource).toContain('const buffer = await this.fetchReferenceImageBuffer(ref)');
+    expect(durableServiceSource).toContain("const mimeType = detectImageMime(buffer) || ref.mimeType || 'image/jpeg'");
+    expect(durableServiceSource).toContain("return { buffer, mimeType: detectImageMime(buffer) || ref.mimeType || 'image/jpeg' }");
   });
 
   it('hydrates durable character masters before prompt suggestion and Veo start', () => {
