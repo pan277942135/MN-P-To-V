@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
-  title: Zaojing Identity Safe Video API
-  version: 1.1.0
-  description: Read durable Zaojing character packages and create or monitor Identity Safe image-to-video tasks from ChatGPT.
+  title: Zaojing Identity Safe Image + Video API
+  version: 1.2.0
+  description: Read durable Zaojing character packages, create QA-gated head-only character images, and create or monitor Identity Safe image-to-video tasks from ChatGPT.
 servers:
   - url: https://zaojing-chatgpt-gateway-uat-REPLACE.run.app
 security:
@@ -58,7 +58,7 @@ paths:
       operationId: preflightIdentityImage
       security: []
       summary: Verify that one ChatGPT conversation image reaches Zaojing as valid image bytes.
-      description: Validate one ChatGPT image reference without creating a task or calling Veo. Handled file-bridge failures return HTTP 200 with ok=false and diagnostics.
+      description: Validate one ChatGPT image reference without creating a task or calling a generation model. Handled file-bridge failures return HTTP 200 with ok=false and diagnostics.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -77,7 +77,61 @@ paths:
                   description: Exactly one JPG, PNG or WebP uploaded by the user in this conversation.
       responses:
         '200':
-          description: Action-safe preflight result. Inspect ok, status, error and diagnostics; no video task or Veo call is created.
+          description: Action-safe preflight result. Inspect ok, status, error and diagnostics; no generation task is created.
+  /v1/images/head-swap:
+    post:
+      operationId: createHeadOnlyCharacterImage
+      security: []
+      summary: Replace only the source person's head with an existing Zaojing character and return a QA-passed image.
+      description: Head-only edit from one uploaded source photo and one durable character. Body, pose, outfit, scene, crop and lighting remain immutable. Target proportion is about nine heads tall by scaling/placing the head only. One repair may run from the original source; failed candidates are never exposed.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [characterId, idempotencyKey, openaiFileIdRefs]
+              properties:
+                characterId:
+                  type: string
+                  minLength: 1
+                  maxLength: 160
+                  description: Exact durable characterId returned by listZaojingCharacters. For a request such as 基于角色梅凝换头, resolve 梅凝 first and use its exact characterId.
+                targetHeadBodyRatio:
+                  type: integer
+                  enum: [9]
+                  default: 9
+                  description: UAT fixed target. The body must never be changed to force the ratio; only natural head scale/placement may be adjusted.
+                idempotencyKey:
+                  type: string
+                  minLength: 16
+                  maxLength: 200
+                  description: Stable random key for one image-edit intent. Reuse the exact same key if the same intent is retried after a transport error.
+                openaiFileIdRefs:
+                  type: array
+                  minItems: 1
+                  maxItems: 1
+                  items:
+                    type: string
+                  description: Exactly one JPG, PNG or WebP uploaded by the user in this conversation. This is the immutable source image for every generation/repair attempt.
+      responses:
+        '200':
+          description: Action-safe result. imageUrl appears only when status=COMPLETED, qaPassed=true, and the artifact is durably persisted and verified.
+  /v1/images/{taskId}:
+    get:
+      operationId: getHeadOnlyImageTask
+      security: []
+      summary: Read the current status and QA evidence for a head-only image task.
+      x-openai-isConsequential: false
+      parameters:
+        - in: path
+          name: taskId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Current image task state. imageUrl is returned only for a QA-passed completed artifact.
   /v1/videos/resolve:
     post:
       operationId: resolveIdentitySafeVideoIntent

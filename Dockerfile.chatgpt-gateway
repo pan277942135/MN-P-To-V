@@ -3,7 +3,7 @@ WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 COPY . .
-RUN bunx esbuild chatgpt-gateway.ts \
+RUN bunx esbuild chatgpt-gateway-v12.ts \
   --bundle \
   --platform=node \
   --format=cjs \
