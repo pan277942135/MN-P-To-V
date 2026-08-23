@@ -81,6 +81,14 @@ function orderedReferences(record: any): DurableCharacterReference[] {
     .sort((a: DurableCharacterReference, b: DurableCharacterReference) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
 }
 
+function detectImageMime(bytes: Buffer): 'image/jpeg' | 'image/png' | 'image/webp' | null {
+  if (!bytes || bytes.length < 12) return null;
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return 'image/png';
+  if (bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return null;
+}
+
 async function getCharacterRecord(characterId: string): Promise<any | null> {
   const db = getFirestoreInstance();
   if (!db) throw new Error('FIRESTORE_UNAVAILABLE');
@@ -190,10 +198,10 @@ export function createChatGptCharacterRouter(deps: CharacterRouterDeps): express
 
       const bucket = String(ref.outputBucket || '').trim();
       const objectPath = String(ref.outputObjectPath || '').trim();
-      const mimeType = String(ref.mimeType || 'image/jpeg').split(';')[0].toLowerCase();
+      const declaredMimeType = String(ref.mimeType || 'image/jpeg').split(';')[0].toLowerCase();
       if (!bucket || !objectPath) return res.status(502).json({ error: 'character_reference_storage_pointer_missing' });
-      if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
-        return res.status(502).json({ error: 'character_reference_invalid_mime', mimeType });
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(declaredMimeType)) {
+        return res.status(502).json({ error: 'character_reference_invalid_mime', mimeType: declaredMimeType });
       }
       if (Number(ref.sizeBytes || 0) > CHARACTER_REFERENCE_MAX_BYTES) {
         return res.status(413).json({ error: 'character_reference_too_large' });
@@ -205,6 +213,11 @@ export function createChatGptCharacterRouter(deps: CharacterRouterDeps): express
       const bytes = Buffer.from(downloaded);
       if (!bytes.length) return res.status(502).json({ error: 'character_reference_empty' });
       if (bytes.length > CHARACTER_REFERENCE_MAX_BYTES) return res.status(413).json({ error: 'character_reference_too_large' });
+
+      // Durable metadata may contain a historical MIME value. The bytes are authoritative
+      // so ChatGPT always receives a decodable image with the correct content type.
+      const mimeType = detectImageMime(bytes);
+      if (!mimeType) return res.status(502).json({ error: 'character_reference_invalid_image_bytes' });
 
       res.setHeader('Content-Type', mimeType);
       res.setHeader('Content-Length', String(bytes.length));
