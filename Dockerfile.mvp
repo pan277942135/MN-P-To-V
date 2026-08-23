@@ -7,7 +7,7 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
 COPY . .
-RUN bunx esbuild mvp-server-v022.ts \
+RUN bunx esbuild mvp-server-v021.ts \
   --bundle \
   --platform=node \
   --format=cjs \
