@@ -4,7 +4,10 @@ import { evaluateHeadOnlyQaGate, type HeadOnlyQaReport } from './headOnlyImagePo
 function passingReport(): HeadOnlyQaReport {
   return {
     identityScore: 98,
+    targetIdentitySimilarity: 98,
     sourceIdentityResidualScore: 1,
+    hairOnlyChangeDetected: false,
+    faceGeometryReplacementScore: 98,
     headOnlyPreservationScore: 99,
     bodyPreservationScore: 99,
     outfitPreservationScore: 99,
@@ -34,7 +37,7 @@ describe('evaluateHeadOnlyQaGate', () => {
 
   it('fails identity below 95', () => {
     const report = { ...passingReport(), identityScore: 94 };
-    expect(evaluateHeadOnlyQaGate(report).failedChecks).toContain('identityScore<95');
+    expect(evaluateHeadOnlyQaGate(report).failedChecks).toContain('TARGET_IDENTITY_TOO_WEAK');
   });
 
   it('fails a non-harmonious head/body proportion', () => {

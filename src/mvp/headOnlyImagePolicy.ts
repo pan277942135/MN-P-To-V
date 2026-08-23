@@ -1,4 +1,4 @@
-export const HEAD_ONLY_IMAGE_VERSION = 'head-only-v1.1-mime-authority';
+export const HEAD_ONLY_IMAGE_VERSION = 'head-only-v1.2-identity-takeover-gate';
 export const DEFAULT_TARGET_HEAD_BODY_RATIO = 9;
 
 export type HeadOnlyQaIssue = {
@@ -10,7 +10,10 @@ export type HeadOnlyQaIssue = {
 
 export type HeadOnlyQaReport = {
   identityScore: number;
+  targetIdentitySimilarity: number;
   sourceIdentityResidualScore: number;
+  hairOnlyChangeDetected: boolean;
+  faceGeometryReplacementScore: number;
   headOnlyPreservationScore: number;
   bodyPreservationScore: number;
   outfitPreservationScore: number;
@@ -32,8 +35,10 @@ export type HeadOnlyQaGate = {
 
 export function evaluateHeadOnlyQaGate(report: HeadOnlyQaReport): HeadOnlyQaGate {
   const failedChecks: string[] = [];
-  if (report.identityScore < 95) failedChecks.push('identityScore<95');
-  if (report.sourceIdentityResidualScore > 5) failedChecks.push('sourceIdentityResidualScore>5');
+  if (report.targetIdentitySimilarity < 95 || report.identityScore < 95) failedChecks.push('TARGET_IDENTITY_TOO_WEAK');
+  if (report.sourceIdentityResidualScore > 5) failedChecks.push('SOURCE_FACE_RESIDUAL_TOO_HIGH');
+  if (report.hairOnlyChangeDetected) failedChecks.push('HAIR_ONLY_CHANGE_DETECTED');
+  if (report.faceGeometryReplacementScore < 95) failedChecks.push('FACE_GEOMETRY_NOT_REPLACED');
   if (report.headOnlyPreservationScore < 97) failedChecks.push('headOnlyPreservationScore<97');
   if (report.bodyPreservationScore < 97) failedChecks.push('bodyPreservationScore<97');
   if (report.outfitPreservationScore < 97) failedChecks.push('outfitPreservationScore<97');
@@ -73,7 +78,10 @@ Everything below the base of the neck must remain visually unchanged from the OR
 Do not redesign the body. Do not change body shape, body volume, clothing fit, exposed skin area, pose, hand position, scene geometry, or background details.
 
 IDENTITY REQUIREMENT:
-Replace the source person's head identity with the exact supplied target character identity. The target-character masters are authoritative for face geometry, eyes, skin appearance, hair color, hairline and visible hair. Remove residual source-person facial identity and incompatible source-person head traits. If the source hair color or facial traits conflict with the target masters, the editable head/hair region MUST visibly adopt the target traits while the body and scene remain unchanged.
+Replace the source person's COMPLETE HEAD IDENTITY with the exact supplied target character identity. The target-character masters are the absolute and sole authority for face shape and proportions, eye shape and eye structure, nose shape, lip shape, jawline, skin texture and tone, skull contour, ears, hair color, hairline and all visible hair. Reconstruct these identity-bearing facial geometries inside the editable region; do not merely restyle the source face. Remove residual source-person facial identity and incompatible source-person head traits. If the source hair color or facial traits conflict with the target masters, the editable head/hair region MUST visibly adopt the target traits while the body and scene remain unchanged.
+Preserving the original body does NOT mean preserving the original face. Changing only hairstyle, hair color, makeup, skin color, or superficial texture is an invalid result.
+If the output still looks primarily like the source person and only the hair has changed, the result is invalid.
+The observer must unmistakably recognize ${params.characterName}'s head identity combined with the ORIGINAL SOURCE IMAGE's unchanged body, clothing, pose, framing, lighting and scene.
 An unchanged or near-unchanged copy of the ORIGINAL SOURCE IMAGE is an invalid result. Do not return the source person's original face as the final head.
 Preserve realistic pores, facial anatomy, eye direction compatible with the source pose, and physically plausible hair integration.
 
