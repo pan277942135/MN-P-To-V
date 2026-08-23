@@ -36,6 +36,8 @@ type ImageTaskRecord = {
   status: ImageTaskStatus;
   mode: 'HEAD_ONLY_CHARACTER_SWAP';
   version: string;
+  sourceImageSha256?: string;
+  characterMasterEvidence?: Array<{ referenceId: string; mimeType: string; sha256: string }>;
   characterId: string;
   characterName: string;
   targetHeadBodyRatio: number;
@@ -53,6 +55,8 @@ type ImageTaskRecord = {
   generatorAttempt: number;
   qaReport?: (HeadOnlyQaReport & { pass: boolean; failedChecks: string[] }) | null;
   firstAttemptQaReport?: (HeadOnlyQaReport & { pass: boolean; failedChecks: string[] }) | null;
+  repairAttemptQaReport?: (HeadOnlyQaReport & { pass: boolean; failedChecks: string[] }) | null;
+  finalGateReason?: string[];
   error?: { code: string; stage: string; message: string; retryable: boolean; recommendedAction?: string } | null;
   createdAt: number;
   updatedAt: number;
@@ -198,6 +202,7 @@ function publicTask(task: ImageTaskRecord) {
     status: task.status,
     mode: task.mode,
     version: task.version,
+    pipelineVersion: task.version,
     characterId: task.characterId,
     characterName: task.characterName,
     targetHeadBodyRatio: task.targetHeadBodyRatio,
@@ -208,6 +213,10 @@ function publicTask(task: ImageTaskRecord) {
     qaPassed: task.status === 'COMPLETED' && task.qaReport?.pass === true,
     qaReport: task.qaReport || null,
     firstAttemptQaReport: task.firstAttemptQaReport || null,
+    repairAttemptQaReport: task.repairAttemptQaReport || null,
+    sourceImageSha256: task.sourceImageSha256 || null,
+    characterMasterEvidence: task.characterMasterEvidence || [],
+    finalGateReason: task.finalGateReason || [],
     artifactPersisted: task.artifactPersisted,
     artifactVerified: task.artifactVerified,
     sizeBytes: task.sizeBytes || null,
@@ -290,8 +299,10 @@ IdentitySpec: ${JSON.stringify(params.identitySpec || {})}
 Target full-body proportion: approximately 1:${params.targetHeadBodyRatio} head-to-body when full body is visible.
 
 Score 0-100 with these strict meanings:
-- identityScore: target-character facial identity accuracy. Pass >=95.
-- sourceIdentityResidualScore: residual original-person facial identity. Pass <=5.
+- targetIdentitySimilarity and identityScore: candidate facial identity accuracy against the target masters, based primarily on facial geometry rather than hair/style. Pass >=95.
+- sourceIdentityResidualScore: residual original-person facial identity in face shape, eyes, nose, lips, jawline and proportions. Pass <=5.
+- faceGeometryReplacementScore: evidence that face shape, eye structure, nose, lips, jawline and facial proportions were actually replaced by the target geometry. Pass >=95.
+- hairOnlyChangeDetected: true when the principal change is hair style/color, makeup, skin tone or other superficial styling while source facial geometry remains substantially intact. true is a hard failure.
 - headOnlyPreservationScore: pixel-semantic preservation outside head/minimal neck seam. Pass >=97.
 - bodyPreservationScore: shoulders and every body region below neck unchanged. Pass >=97.
 - outfitPreservationScore: clothing/shoes/jewelry/accessories unchanged. Pass >=97.
@@ -304,6 +315,7 @@ Set alteredOutsideHead=true if ANY meaningful change is visible below the base o
 Set fullBodyVisible accurately. If full body is visible, estimatedHeadBodyRatio is the estimated number of head-heights in the full figure. If not measurable, return 0.
 Issues must identify only observable failures and give a precise repairInstruction. Any body/outfit/pose/background alteration should be severity critical.
 Do not reward beautification or scene improvement. The goal is minimal edit, target identity, correct head scale, and otherwise unchanged source.
+The target identity must dominate the face. A candidate that mainly preserves the source person's facial geometry must fail even if its hair perfectly matches the target.
 Return strict JSON only.` });
 
   const response = await params.ai.models.generateContent({
@@ -315,7 +327,10 @@ Return strict JSON only.` });
         type: Type.OBJECT,
         properties: {
           identityScore: { type: Type.INTEGER },
+          targetIdentitySimilarity: { type: Type.INTEGER },
           sourceIdentityResidualScore: { type: Type.INTEGER },
+          hairOnlyChangeDetected: { type: Type.BOOLEAN },
+          faceGeometryReplacementScore: { type: Type.INTEGER },
           headOnlyPreservationScore: { type: Type.INTEGER },
           bodyPreservationScore: { type: Type.INTEGER },
           outfitPreservationScore: { type: Type.INTEGER },
@@ -342,7 +357,8 @@ Return strict JSON only.` });
           summary: { type: Type.STRING },
         },
         required: [
-          'identityScore', 'sourceIdentityResidualScore', 'headOnlyPreservationScore', 'bodyPreservationScore',
+          'identityScore', 'targetIdentitySimilarity', 'sourceIdentityResidualScore', 'hairOnlyChangeDetected',
+          'faceGeometryReplacementScore', 'headOnlyPreservationScore', 'bodyPreservationScore',
           'outfitPreservationScore', 'backgroundPreservationScore', 'posePreservationScore', 'headBodyProportionScore',
           'anatomyScore', 'fullBodyVisible', 'estimatedHeadBodyRatio', 'alteredOutsideHead', 'issues', 'summary',
         ],
@@ -352,7 +368,10 @@ Return strict JSON only.` });
   const parsed = JSON.parse(response.text?.trim() || '{}');
   const report: HeadOnlyQaReport = {
     identityScore: Number(parsed.identityScore),
+    targetIdentitySimilarity: Number(parsed.targetIdentitySimilarity),
     sourceIdentityResidualScore: Number(parsed.sourceIdentityResidualScore),
+    hairOnlyChangeDetected: parsed.hairOnlyChangeDetected === true,
+    faceGeometryReplacementScore: Number(parsed.faceGeometryReplacementScore),
     headOnlyPreservationScore: Number(parsed.headOnlyPreservationScore),
     bodyPreservationScore: Number(parsed.bodyPreservationScore),
     outfitPreservationScore: Number(parsed.outfitPreservationScore),
@@ -367,7 +386,8 @@ Return strict JSON only.` });
     summary: String(parsed.summary || ''),
   };
   const numericFields = [
-    report.identityScore, report.sourceIdentityResidualScore, report.headOnlyPreservationScore,
+    report.identityScore, report.targetIdentitySimilarity, report.sourceIdentityResidualScore,
+    report.faceGeometryReplacementScore, report.headOnlyPreservationScore,
     report.bodyPreservationScore, report.outfitPreservationScore, report.backgroundPreservationScore,
     report.posePreservationScore, report.headBodyProportionScore, report.anatomyScore,
   ];
@@ -381,7 +401,13 @@ function repairFromQa(report: HeadOnlyQaReport & { failedChecks: string[] }): st
   const immutableReminder = report.alteredOutsideHead
     ? 'Restore every pixel-semantic detail below the base of the neck and all background/pose/outfit regions to the ORIGINAL SOURCE IMAGE; do not reconstruct the body.'
     : '';
-  return [...issueInstructions, immutableReminder, `Failed QA checks: ${(report.failedChecks || []).join(', ')}`].filter(Boolean).join(' ');
+  const identityTakeover = (report.failedChecks || []).some((check) => [
+    'TARGET_IDENTITY_TOO_WEAK', 'SOURCE_FACE_RESIDUAL_TOO_HIGH',
+    'HAIR_ONLY_CHANGE_DETECTED', 'FACE_GEOMETRY_NOT_REPLACED',
+  ].includes(check))
+    ? 'Previous result retained the source face or changed only superficial hair/style. From the ORIGINAL SOURCE IMAGE, fully replace face shape, eye structure, nose, lips, jawline and facial proportions with the authoritative target-master geometry. Do not preserve source facial geometry.'
+    : '';
+  return [...issueInstructions, identityTakeover, immutableReminder, `Failed QA checks: ${(report.failedChecks || []).join(', ')}`].filter(Boolean).join(' ');
 }
 
 export function createHeadOnlyImageRouter() {
@@ -414,7 +440,12 @@ export function createHeadOnlyImageRouter() {
 
       const hydrated = await durableCharacterService.getHydrated(characterId);
       if (!hydrated || hydrated.referenceImages.length === 0) throw new Error('CHARACTER_MASTERS_UNAVAILABLE');
-      const masters = hydrated.referenceImages.slice(0, 4).map((ref) => ({ buffer: ref.buffer, mimeType: ref.mimeType, angle: ref.angle }));
+      const selectedMasters = hydrated.referenceImages.slice(0, 4);
+      const masters = selectedMasters.map((ref) => ({ buffer: ref.buffer, mimeType: ref.mimeType, angle: ref.angle }));
+      task = await updateTask(task.taskId, {
+        sourceImageSha256: sha256(file.buffer),
+        characterMasterEvidence: selectedMasters.map((ref) => ({ referenceId: ref.id, mimeType: ref.mimeType, sha256: sha256(ref.buffer) })),
+      });
       const ai = await getAiClient();
 
       let lastQa: (HeadOnlyQaReport & { pass: boolean; failedChecks: string[] }) | null = null;
@@ -443,7 +474,12 @@ export function createHeadOnlyImageRouter() {
         });
         lastQa = qa;
         if (attempt === 1) firstQa = qa;
-        task = await updateTask(task.taskId, { qaReport: qa, firstAttemptQaReport: firstQa });
+        task = await updateTask(task.taskId, {
+          qaReport: qa,
+          firstAttemptQaReport: firstQa,
+          repairAttemptQaReport: attempt === 2 ? qa : null,
+          finalGateReason: qa.failedChecks,
+        });
         if (!qa.pass) continue;
 
         const artifact = await persistOutput(task.taskId, candidate.buffer, candidate.mimeType);
@@ -454,6 +490,8 @@ export function createHeadOnlyImageRouter() {
           artifactVerified: true,
           qaReport: qa,
           firstAttemptQaReport: firstQa,
+          repairAttemptQaReport: attempt === 2 ? qa : null,
+          finalGateReason: [],
           completedAt: now(),
           error: null,
         });
@@ -466,6 +504,8 @@ export function createHeadOnlyImageRouter() {
         artifactVerified: false,
         qaReport: lastQa,
         firstAttemptQaReport: firstQa,
+        repairAttemptQaReport: task.repairAttemptQaReport || null,
+        finalGateReason: lastQa?.failedChecks || ['HEAD_ONLY_QA_FAILED'],
         error: {
           code: 'HEAD_ONLY_QA_FAILED',
           stage: 'qa_image',
