@@ -5,7 +5,9 @@ on:
     branches: [main]
     paths:
       - 'chatgpt-gateway.ts'
+      - 'chatgpt-character-router.ts'
       - 'chatgpt-action-openapi.yaml'
+      - 'GPT_HEAD_ONLY_IMAGE_INSTRUCTIONS.md'
       - 'Dockerfile.chatgpt-gateway'
       - 'Dockerfile.mvp'
       - 'mvp-server-v021.ts'

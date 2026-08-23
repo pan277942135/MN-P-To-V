@@ -5,6 +5,9 @@ const gateway = fs.readFileSync('chatgpt-gateway.ts', 'utf8');
 const schema = fs.readFileSync('chatgpt-action-openapi.yaml', 'utf8');
 const wrapper = fs.readFileSync('mvp-server-v021.ts', 'utf8');
 const deploy = fs.readFileSync('.github/workflows/chatgpt-gateway-uat-deploy.yml', 'utf8');
+const dockerGateway = fs.readFileSync('Dockerfile.chatgpt-gateway', 'utf8');
+const dockerMvp = fs.readFileSync('Dockerfile.mvp', 'utf8');
+const instructions = fs.readFileSync('GPT_HEAD_ONLY_IMAGE_INSTRUCTIONS.md', 'utf8');
 
 describe('ChatGPT Actions gateway contract', () => {
   it('keeps hashed Bearer auth as the default while allowing an explicit bounded UAT direct override', () => {
@@ -197,5 +200,27 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(deploy).toContain('DIRECT_STATUS=');
     expect(deploy).toContain("test \"$DIRECT_STATUS\" = '200'");
     expect(deploy).toContain('uatDirectMode');
+  });
+
+  it('keeps final HEAD-ONLY image editing in ChatGPT and exposes only Zaojing character assets', () => {
+    expect(schema).not.toContain('createHeadOnlyCharacterImage');
+    expect(schema).not.toContain('/v1/images/head-swap');
+    expect(schema).not.toContain('getHeadOnlyImageTask');
+    expect(gateway).toContain("app.use('/v1/characters', createChatGptCharacterRouter");
+    expect(instructions).toContain('使用 ChatGPT 自身图像生成/编辑能力');
+    expect(instructions).toContain('不要调用任何 /v1/images/head-swap');
+    expect(instructions).toContain('从用户原图重新进行一次 ChatGPT 图像编辑');
+    expect(dockerGateway).toContain('esbuild chatgpt-gateway.ts');
+    expect(dockerGateway).not.toContain('chatgpt-gateway-v12.ts');
+    expect(dockerMvp).toContain('esbuild mvp-server-v021.ts');
+    expect(dockerMvp).not.toContain('mvp-server-v022.ts');
+  });
+
+  it('serves character master bytes with magic-byte MIME authority', () => {
+    const characterRouter = fs.readFileSync('chatgpt-character-router.ts', 'utf8');
+    expect(characterRouter).toContain('function detectImageMime(bytes: Buffer)');
+    expect(characterRouter).toContain('const mimeType = detectImageMime(bytes)');
+    expect(characterRouter).toContain('character_reference_invalid_image_bytes');
+    expect(characterRouter).toContain("res.setHeader('Content-Type', mimeType)");
   });
 });
