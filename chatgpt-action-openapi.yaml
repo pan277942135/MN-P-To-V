@@ -83,7 +83,7 @@ paths:
       operationId: createHeadOnlyCharacterImage
       security: []
       summary: Replace only the source person's head with an existing Zaojing character and return a QA-passed image.
-      description: Use exactly one user-uploaded source photo and an existing durable characterId. The execution layer may edit only the head, hair, ears, hairline and the minimum neck seam. Everything below the base of the neck, including body, pose, clothing, accessories, props, background, crop, camera and lighting, is immutable. UAT targets a harmonious approximately nine-head-tall adult proportion by scaling/placing the head only. The system performs strict QA and at most one repair generated again from the original source image. A failed candidate is never exposed as the final image.
+      description: Head-only edit from one uploaded source photo and one durable character. Body, pose, outfit, scene, crop and lighting remain immutable. Target proportion is about nine heads tall by scaling/placing the head only. One repair may run from the original source; failed candidates are never exposed.
       x-openai-isConsequential: true
       requestBody:
         required: true
@@ -117,7 +117,7 @@ paths:
                   description: Exactly one JPG, PNG or WebP uploaded by the user in this conversation. This is the immutable source image for every generation/repair attempt.
       responses:
         '200':
-          description: Action-safe result. imageUrl is present only when status=COMPLETED, qaPassed=true, and the artifact has been durably persisted and verified. Otherwise inspect qaReport/error and do not claim an image was delivered.
+          description: Action-safe result. imageUrl appears only when status=COMPLETED, qaPassed=true, and the artifact is durably persisted and verified.
   /v1/images/{taskId}:
     get:
       operationId: getHeadOnlyImageTask
