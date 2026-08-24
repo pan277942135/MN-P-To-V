@@ -39,7 +39,7 @@ paths:
       operationId: getZaojingCharacterPackage
       security: []
       summary: Get one durable Zaojing character package for generation planning.
-      description: Returns identitySpec plus stable reference asset URLs from the existing Firestore and GCS character library. ChatGPT uses these read-only assets as image-edit references; Zaojing does not generate the final edited image.
+      description: Returns identitySpec, reference asset URLs, and editContract. Bind only the current user upload as source, use references as identity inputs, invoke ChatGPT native image editing, and reject unchanged output. Zaojing never generates final images.
       x-openai-isConsequential: false
       parameters:
         - in: path
