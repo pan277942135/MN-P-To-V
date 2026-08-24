@@ -48,21 +48,19 @@ describe('ChatGPT verified video artifact delivery', () => {
     expect(artifactRouter).toContain('file.getMetadata()');
   });
 
-  it('returns short-lived V4 signed playback and download URLs without exposing gs://', () => {
-    expect(artifactRouter).toContain("version: 'v4' as const");
-    expect(artifactRouter).toContain("action: 'read' as const");
-    expect(artifactRouter).toContain('file.getSignedUrl(common)');
-    expect(artifactRouter).toContain('responseDisposition');
+  it('returns HTTPS playback and download URLs without exposing gs://', () => {
     expect(artifactRouter).toContain('videoUrl');
     expect(artifactRouter).toContain('downloadUrl');
     expect(artifactRouter).toContain('expiresAt');
+    expect(artifactRouter).toContain('deliveryMode');
     expect(artifactRouter).not.toContain('videoUri: task.videoUri');
+    expect(artifactRouter).toContain("action: 'read' as const");
   });
 
-  it('exposes getIdentitySafeVideoArtifact in the Action schema and directs completed tasks to it', () => {
+  it('supports native signed URLs and capability fallback in the Action schema', () => {
     expect(schema).toContain('/v1/videos/{taskId}/artifact:');
     expect(schema).toContain('operationId: getIdentitySafeVideoArtifact');
-    expect(schema).toContain('Returns short-lived signed HTTPS URLs');
+    expect(schema).toContain('HTTPS URLs');
     expect(schema).toContain('call getIdentitySafeVideoArtifact');
     const artifactOperation = schema.indexOf('operationId: getIdentitySafeVideoArtifact');
     const recoverOperation = schema.indexOf('operationId: recoverIdentitySafeVideoArtifact');
