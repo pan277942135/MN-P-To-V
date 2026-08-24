@@ -1,0 +1,79 @@
+name: Video Artifact Delivery Smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/video-artifact-delivery-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GATEWAY_URL: https://zaojing-chatgpt-gateway-uat-i7lns3auvq-uc.a.run.app
+  VERIFIED_TASK_ID: mvp_9264d39d-5519-4ddc-baf1-1ac80585610e
+
+jobs:
+  live-artifact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify deployed OpenAPI exposes artifact action
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS "$GATEWAY_URL/openapi.yaml" -o openapi.yaml
+          grep -q 'operationId: getIdentitySafeVideoArtifact' openapi.yaml
+
+      - name: Resolve signed playback and download URLs from verified completed task
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATUS="$(curl -sS -o artifact.json -w '%{http_code}' \
+            "$GATEWAY_URL/v1/videos/$VERIFIED_TASK_ID/artifact" || true)"
+          cat artifact.json || true
+          echo "http_status=$STATUS" >> "$GITHUB_OUTPUT"
+          test "$STATUS" = '200'
+          jq -e '.ok == true and .status == "COMPLETED" and .videoReady == true and .artifactPersisted == true and .artifactVerified == true' artifact.json >/dev/null
+          jq -e '.videoUrl | startswith("https://")' artifact.json >/dev/null
+          jq -e '.downloadUrl | startswith("https://")' artifact.json >/dev/null
+          jq -e '.expiresAt != null and .expiresInSeconds >= 300 and .expiresInSeconds <= 3600' artifact.json >/dev/null
+          jq -e '.sizeBytes >= 1000 and (.contentType | startswith("video/"))' artifact.json >/dev/null
+          echo "video_url=$(jq -r '.videoUrl' artifact.json)" >> "$GITHUB_OUTPUT"
+          echo "download_url=$(jq -r '.downloadUrl' artifact.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify signed playback URL serves MP4 bytes
+        shell: bash
+        env:
+          VIDEO_URL: ${{ steps.artifact.outputs.video_url }}
+        run: |
+          set -euo pipefail
+          STATUS="$(curl -sS -L -H 'Range: bytes=0-1023' -o first-kb.bin -w '%{http_code}' "$VIDEO_URL" || true)"
+          test "$STATUS" = '200' -o "$STATUS" = '206'
+          test "$(wc -c < first-kb.bin)" -gt 0
+          xxd -p -l 32 first-kb.bin | tr -d '\n' | grep -qi '66747970'
+
+      - name: Verify signed download URL serves video bytes
+        shell: bash
+        env:
+          DOWNLOAD_URL: ${{ steps.artifact.outputs.download_url }}
+        run: |
+          set -euo pipefail
+          STATUS="$(curl -sS -L -H 'Range: bytes=0-1023' -o download-first-kb.bin -w '%{http_code}' "$DOWNLOAD_URL" || true)"
+          test "$STATUS" = '200' -o "$STATUS" = '206'
+          test "$(wc -c < download-first-kb.bin)" -gt 0
+
+      - name: Summary
+        if: success()
+        run: |
+          {
+            echo '## Video Artifact Gateway live acceptance passed'
+            echo "- Gateway: $GATEWAY_URL"
+            echo "- Verified existing task: $VERIFIED_TASK_ID"
+            echo '- getIdentitySafeVideoArtifact: HTTP 200'
+            echo '- Signed playback URL: served MP4 bytes'
+            echo '- Signed download URL: served video bytes'
+            echo '- No Veo generation or retry was submitted by this workflow.'
+          } >> "$GITHUB_STEP_SUMMARY"
