@@ -207,6 +207,9 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(schema).not.toContain('/v1/images/head-swap');
     expect(schema).not.toContain('getHeadOnlyImageTask');
     expect(gateway).toContain("app.use('/v1/characters', createChatGptCharacterRouter");
+    expect(schema).toContain('editContract');
+    expect(schema).toContain('Bind only the current user upload as source');
+    expect(fs.readFileSync('chatgpt-character-router.ts', 'utf8')).toContain("finalEditor: 'chatgpt_native_image_edit'");
     expect(instructions).toContain('使用 ChatGPT 自身图像生成/编辑能力');
     expect(instructions).toContain('不要调用任何 /v1/images/head-swap');
     expect(instructions).toContain('从用户原图重新进行一次 ChatGPT 图像编辑');
@@ -214,6 +217,18 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(dockerGateway).not.toContain('chatgpt-gateway-v12.ts');
     expect(dockerMvp).toContain('esbuild mvp-server-v021.ts');
     expect(dockerMvp).not.toContain('mvp-server-v022.ts');
+  });
+
+  it('binds ChatGPT editing to the current source image and fails closed on unchanged output', () => {
+    expect(instructions).toContain('EDIT_TARGET');
+    expect(instructions).toContain('IDENTITY_REFERENCES');
+    expect(instructions).toContain('FORBIDDEN_AS_INPUT');
+    expect(instructions).toContain('本次用户消息中明确要处理的那一张新上传源图');
+    expect(instructions).toContain('不能按“最近图片”猜测');
+    expect(instructions).toContain('必须调用 ChatGPT 自身图像生成/编辑能力');
+    expect(instructions).toContain('IMAGE_EDIT_FAILED');
+    expect(instructions).toContain('失败重试时必须重新使用原始 `EDIT_TARGET`');
+    expect(instructions).toContain('最多从原图重试一次');
   });
 
   it('serves character master bytes with magic-byte MIME authority', () => {

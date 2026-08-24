@@ -30,6 +30,19 @@ const CHARACTER_REFERENCE_MAX_BYTES = 20 * 1024 * 1024;
 const CHARACTER_REFERENCE_DOWNLOAD_TIMEOUT_MS = 10_000;
 const storage = new Storage();
 
+// This contract is returned with the read-only character package so the ChatGPT
+// Action receives the source-binding rules at runtime. It does not authorize
+// Zaojing to generate or QA the final image.
+const CHATGPT_EDIT_CONTRACT = {
+  finalEditor: 'chatgpt_native_image_edit',
+  sourceBinding: 'current_user_upload_only',
+  identityReferences: 'role_package_references_only',
+  forbiddenSources: ['previous_outputs', 'failed_candidates', 'historical_images'],
+  unchangedOutput: 'reject_and_retry_from_original',
+  maxRetriesFromOriginal: 1,
+  scope: 'head_only',
+};
+
 function normalizeQuery(value: unknown): string {
   return String(value || '').trim().toLocaleLowerCase();
 }
@@ -172,6 +185,7 @@ export function createChatGptCharacterRouter(deps: CharacterRouterDeps): express
           status: record?.status || 'ready',
           references,
           referenceCount: references.length,
+          editContract: CHATGPT_EDIT_CONTRACT,
           createdAt: record?.createdAt || null,
           updatedAt: record?.updatedAt || null,
           evidenceSource: 'firestore',
