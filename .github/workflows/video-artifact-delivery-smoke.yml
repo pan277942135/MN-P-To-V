@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
     paths:
+      - 'chatgpt-video-artifact-router.ts'
+      - 'chatgpt-action-openapi.yaml'
       - '.github/workflows/video-artifact-delivery-smoke.yml'
   workflow_dispatch:
 
@@ -27,7 +29,7 @@ jobs:
           curl -fsS "$GATEWAY_URL/openapi.yaml" -o openapi.yaml
           grep -q 'operationId: getIdentitySafeVideoArtifact' openapi.yaml
 
-      - name: Resolve signed playback and download URLs from verified completed task
+      - name: Resolve temporary playback and download URLs from verified completed task
         id: artifact
         shell: bash
         run: |
@@ -41,12 +43,13 @@ jobs:
           jq -e '.ok == true and .status == "COMPLETED" and .videoReady == true and .artifactPersisted == true and .artifactVerified == true' artifact.json >/dev/null
           jq -e '.videoUrl | startswith("https://")' artifact.json >/dev/null
           jq -e '.downloadUrl | startswith("https://")' artifact.json >/dev/null
+          jq -e '.deliveryMode == "gcs_v4_signed_url" or .deliveryMode == "gateway_capability_url"' artifact.json >/dev/null
           jq -e '.expiresAt != null and .expiresInSeconds >= 300 and .expiresInSeconds <= 3600' artifact.json >/dev/null
           jq -e '.sizeBytes >= 1000 and (.contentType | startswith("video/"))' artifact.json >/dev/null
           echo "video_url=$(jq -r '.videoUrl' artifact.json)" >> "$GITHUB_OUTPUT"
           echo "download_url=$(jq -r '.downloadUrl' artifact.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Verify signed playback URL serves MP4 bytes
+      - name: Verify playback URL serves MP4 bytes
         shell: bash
         env:
           VIDEO_URL: ${{ steps.artifact.outputs.video_url }}
@@ -58,7 +61,7 @@ jobs:
           test "$(wc -c < first-kb.bin)" -gt 0
           xxd -p -l 32 first-kb.bin | tr -d '\n' | grep -qi '66747970'
 
-      - name: Verify signed download URL serves video bytes
+      - name: Verify download URL serves video bytes
         shell: bash
         env:
           DOWNLOAD_URL: ${{ steps.artifact.outputs.download_url }}
@@ -88,8 +91,8 @@ jobs:
           - Gateway: $GATEWAY_URL
           - Existing verified task: \`$VERIFIED_TASK_ID\`
           - Artifact resolver HTTP: \`$ARTIFACT_HTTP\`
-          - Signed playback Range GET: \`$PLAYBACK_HTTP\`
-          - Signed download Range GET: \`$DOWNLOAD_HTTP\`
+          - Playback Range GET: \`$PLAYBACK_HTTP\`
+          - Download Range GET: \`$DOWNLOAD_HTTP\`
           - Veo submissions performed: \`0\`
 
           Artifact response with temporary URLs removed:
@@ -108,7 +111,7 @@ jobs:
             echo "- Gateway: $GATEWAY_URL"
             echo "- Verified existing task: $VERIFIED_TASK_ID"
             echo '- getIdentitySafeVideoArtifact: HTTP 200'
-            echo '- Signed playback URL: served MP4 bytes'
-            echo '- Signed download URL: served video bytes'
+            echo '- Playback URL: served MP4 bytes'
+            echo '- Download URL: served video bytes'
             echo '- No Veo generation or retry was submitted by this workflow.'
           } >> "$GITHUB_STEP_SUMMARY"
