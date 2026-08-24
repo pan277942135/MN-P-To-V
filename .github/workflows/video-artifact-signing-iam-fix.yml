@@ -43,13 +43,17 @@ jobs:
         id: iam
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
             --project="$PROJECT_ID" \
             --member="serviceAccount:$RUNTIME_SA" \
             --role="roles/iam.serviceAccountTokenCreator" \
-            --quiet > iam-result.txt
+            --quiet > iam-result.txt 2>&1
+          STATUS=$?
+          printf '%s' "$STATUS" > iam-exit-status.txt
           cat iam-result.txt
+          if [ "$STATUS" -ne 0 ]; then exit "$STATUS"; fi
+          set -euo pipefail
           POLICY="$(gcloud iam service-accounts get-iam-policy "$RUNTIME_SA" \
             --project="$PROJECT_ID" --format=json)"
           printf '%s' "$POLICY" > iam-policy.json
@@ -101,6 +105,8 @@ jobs:
         run: |
           set -euo pipefail
           JOB_STATUS='${{ job.status }}'
+          IAM_EXIT="$(cat iam-exit-status.txt 2>/dev/null || echo unavailable)"
+          IAM_RESULT="$(cat iam-result.txt 2>/dev/null | tail -c 4000 || echo unavailable)"
           ARTIFACT_HTTP="$(cat artifact-http-status.txt 2>/dev/null || echo unavailable)"
           PLAYBACK_HTTP="$(cat playback-http-status.txt 2>/dev/null || echo unavailable)"
           DOWNLOAD_HTTP="$(cat download-http-status.txt 2>/dev/null || echo unavailable)"
@@ -114,11 +120,17 @@ jobs:
           - Role: \`roles/iam.serviceAccountTokenCreator\`
           - Purpose: \`iam.serviceAccounts.signBlob for GCS V4 Signed URLs\`
           - Project-level Token Creator grant: \`not used\`
+          - IAM command exit: \`$IAM_EXIT\`
           - Existing verified task: \`$VERIFIED_TASK_ID\`
           - Artifact resolver HTTP: \`$ARTIFACT_HTTP\`
           - Signed playback Range GET: \`$PLAYBACK_HTTP\`
           - Signed download Range GET: \`$DOWNLOAD_HTTP\`
           - Veo submissions performed: \`0\`
+
+          IAM command output:
+          \`\`\`text
+          $IAM_RESULT
+          \`\`\`
 
           Artifact response with temporary URLs removed:
           \`\`\`json
