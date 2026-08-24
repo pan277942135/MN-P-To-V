@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { GoogleAuth } from 'google-auth-library';
 import { getFirestoreInstance } from './src/server/db/firestore';
 import { createChatGptCharacterRouter } from './chatgpt-character-router';
+import { createChatGptVideoArtifactRouter } from './chatgpt-video-artifact-router';
 
 const PORT = Number(process.env.PORT || 8080);
 const UPSTREAM_URL = String(process.env.ZAOJING_MVP_UPSTREAM_URL || '').replace(/\/+$/, '');
@@ -432,6 +433,7 @@ export function createChatGptGatewayApp() {
   if (!UAT_DIRECT_MODE) app.use('/v1', authenticateApiKey);
 
   app.use('/v1/characters', createChatGptCharacterRouter({ upstream, publicUrl: PUBLIC_URL }));
+  app.use('/v1/videos', createChatGptVideoArtifactRouter());
 
   app.post('/v1/videos/resolve', async (req, res) => {
     const idempotencyKey = String(req.body?.idempotencyKey || '').trim();

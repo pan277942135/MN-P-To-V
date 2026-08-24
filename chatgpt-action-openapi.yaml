@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Zaojing Identity Safe Image + Video API
-  version: 1.3.0
-  description: Read durable Zaojing character packages and master images for ChatGPT image editing, and create or monitor Identity Safe image-to-video tasks.
+  version: 1.4.0
+  description: Read durable Zaojing character packages and master images for ChatGPT image editing, and create, monitor, and retrieve Identity Safe image-to-video artifacts.
 servers:
   - url: https://zaojing-chatgpt-gateway-uat-REPLACE.run.app
 security:
@@ -145,6 +145,8 @@ paths:
       operationId: getIdentitySafeVideoTask
       security: []
       summary: Get current generation and Identity QA status for a task.
+      description: When status is COMPLETED and videoReady is true, call getIdentitySafeVideoArtifact to obtain temporary HTTPS playback and download URLs.
+      x-openai-isConsequential: false
       parameters:
         - in: path
           name: taskId
@@ -154,6 +156,27 @@ paths:
         '200': { description: Current task state. }
         '202': { description: Task is still running. }
         '404': { description: Task not found. }
+  /v1/videos/{taskId}/artifact:
+    get:
+      operationId: getIdentitySafeVideoArtifact
+      security: []
+      summary: Get temporary HTTPS playback and download URLs for a completed Identity Safe video.
+      description: Call only after the task is COMPLETED. Returns short-lived signed HTTPS URLs for the verified persisted MP4 and never exposes the internal gs:// URI.
+      x-openai-isConsequential: false
+      parameters:
+        - in: path
+          name: taskId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+      responses:
+        '200':
+          description: Verified artifact is ready; use videoUrl for playback and downloadUrl for direct download before expiresAt.
+        '404': { description: Task or persisted artifact not found. }
+        '409': { description: Task or verified artifact is not ready. }
+        '503': { description: Signed URL could not be generated; retry this read-only action without regenerating the video. }
   /v1/videos/{taskId}/recover:
     post:
       operationId: recoverIdentitySafeVideoArtifact
