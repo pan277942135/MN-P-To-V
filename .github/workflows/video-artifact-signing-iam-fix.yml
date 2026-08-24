@@ -1,0 +1,129 @@
+name: Video Artifact Signed URL IAM Fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/video-artifact-signing-iam-fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  GATEWAY_URL: https://zaojing-chatgpt-gateway-uat-i7lns3auvq-uc.a.run.app
+  VERIFIED_TASK_ID: mvp_9264d39d-5519-4ddc-baf1-1ac80585610e
+
+jobs:
+  self-signing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Grant runtime service account permission to sign only as itself
+        id: iam
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
+            --project="$PROJECT_ID" \
+            --member="serviceAccount:$RUNTIME_SA" \
+            --role="roles/iam.serviceAccountTokenCreator" \
+            --quiet > iam-result.txt
+          cat iam-result.txt
+          POLICY="$(gcloud iam service-accounts get-iam-policy "$RUNTIME_SA" \
+            --project="$PROJECT_ID" --format=json)"
+          printf '%s' "$POLICY" > iam-policy.json
+          jq -e --arg member "serviceAccount:$RUNTIME_SA" '
+            any(.bindings[]?;
+              .role == "roles/iam.serviceAccountTokenCreator" and
+              any(.members[]?; . == $member)
+            )
+          ' iam-policy.json >/dev/null
+
+      - name: Verify artifact resolver now signs HTTPS URLs
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATUS="$(curl -sS -o artifact.json -w '%{http_code}' \
+            "$GATEWAY_URL/v1/videos/$VERIFIED_TASK_ID/artifact" || true)"
+          printf '%s' "$STATUS" > artifact-http-status.txt
+          jq 'del(.videoUrl,.downloadUrl)' artifact.json 2>/dev/null || cat artifact.json || true
+          test "$STATUS" = '200'
+          jq -e '.ok == true and .status == "COMPLETED" and .videoReady == true and .artifactPersisted == true and .artifactVerified == true' artifact.json >/dev/null
+          jq -e '.videoUrl | startswith("https://")' artifact.json >/dev/null
+          jq -e '.downloadUrl | startswith("https://")' artifact.json >/dev/null
+          echo "video_url=$(jq -r '.videoUrl' artifact.json)" >> "$GITHUB_OUTPUT"
+          echo "download_url=$(jq -r '.downloadUrl' artifact.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify playback and download signed URLs serve video bytes
+        shell: bash
+        env:
+          VIDEO_URL: ${{ steps.artifact.outputs.video_url }}
+          DOWNLOAD_URL: ${{ steps.artifact.outputs.download_url }}
+        run: |
+          set -euo pipefail
+          PLAYBACK_STATUS="$(curl -sS -L -H 'Range: bytes=0-1023' -o playback.bin -w '%{http_code}' "$VIDEO_URL" || true)"
+          DOWNLOAD_STATUS="$(curl -sS -L -H 'Range: bytes=0-1023' -o download.bin -w '%{http_code}' "$DOWNLOAD_URL" || true)"
+          printf '%s' "$PLAYBACK_STATUS" > playback-http-status.txt
+          printf '%s' "$DOWNLOAD_STATUS" > download-http-status.txt
+          test "$PLAYBACK_STATUS" = '200' -o "$PLAYBACK_STATUS" = '206'
+          test "$DOWNLOAD_STATUS" = '200' -o "$DOWNLOAD_STATUS" = '206'
+          test "$(wc -c < playback.bin)" -gt 0
+          test "$(wc -c < download.bin)" -gt 0
+          xxd -p -l 32 playback.bin | tr -d '\n' | grep -qi '66747970'
+
+      - name: Record remediation evidence
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          JOB_STATUS='${{ job.status }}'
+          ARTIFACT_HTTP="$(cat artifact-http-status.txt 2>/dev/null || echo unavailable)"
+          PLAYBACK_HTTP="$(cat playback-http-status.txt 2>/dev/null || echo unavailable)"
+          DOWNLOAD_HTTP="$(cat download-http-status.txt 2>/dev/null || echo unavailable)"
+          ARTIFACT_SUMMARY="$(jq -c 'del(.videoUrl,.downloadUrl,.detail)' artifact.json 2>/dev/null || echo unavailable)"
+          BODY=$(cat <<EOF
+          ### Video Artifact Signed URL IAM remediation
+          - Job status: \`$JOB_STATUS\`
+          - Source SHA: \`$GITHUB_SHA\`
+          - Runtime service account: \`$RUNTIME_SA\`
+          - IAM scope: \`service-account resource only; runtime SA -> itself\`
+          - Role: \`roles/iam.serviceAccountTokenCreator\`
+          - Purpose: \`iam.serviceAccounts.signBlob for GCS V4 Signed URLs\`
+          - Project-level Token Creator grant: \`not used\`
+          - Existing verified task: \`$VERIFIED_TASK_ID\`
+          - Artifact resolver HTTP: \`$ARTIFACT_HTTP\`
+          - Signed playback Range GET: \`$PLAYBACK_HTTP\`
+          - Signed download Range GET: \`$DOWNLOAD_HTTP\`
+          - Veo submissions performed: \`0\`
+
+          Artifact response with temporary URLs removed:
+          \`\`\`json
+          $ARTIFACT_SUMMARY
+          \`\`\`
+          EOF
+          )
+          gh api "repos/$GITHUB_REPOSITORY/issues/47/comments" -f body="$BODY" >/dev/null
