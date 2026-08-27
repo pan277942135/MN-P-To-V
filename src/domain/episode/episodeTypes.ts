@@ -1,5 +1,6 @@
 export const EPISODE_SCHEMA_VERSION = 'episode-v0.1' as const;
 export const SHOT_SCHEMA_VERSION = 'shot-v0.1' as const;
+export const KEYFRAME_QA_VERSION = 'keyframe-qa-v0.1' as const;
 
 export type EpisodeStatus =
   | 'DRAFT'
@@ -27,6 +28,33 @@ export type ShotStatus =
 export type KeyframeProvider = 'CHATGPT_UPLOAD' | 'GEMINI_GENERATED' | 'MANUAL_IMPORT';
 export type KeyframeStatus = 'NOT_REQUESTED' | 'READY' | 'QA_PENDING' | 'PASS' | 'REVIEW' | 'FAIL';
 export type VideoStatus = 'NOT_REQUESTED' | 'PENDING' | 'GENERATING' | 'QA_PENDING' | 'PASS' | 'REVIEW' | 'FAIL';
+export type KeyframeQaGate = 'PASS' | 'REVIEW' | 'FAIL';
+export type KeyframeRetryAction = 'CONTINUE_VIDEO' | 'REGENERATE_KEYFRAME' | 'REQUEST_NEW_KEYFRAME' | 'HUMAN_REVIEW';
+
+export interface KeyframeQaIssue {
+  code: string;
+  severity: 'critical' | 'major' | 'minor';
+  description: string;
+  repairInstruction: string;
+}
+
+export interface KeyframeQaResult {
+  version: typeof KEYFRAME_QA_VERSION;
+  gate: KeyframeQaGate;
+  failureCode?: string;
+  identityScore: number;
+  scenePreservationScore: number;
+  posePreservationScore: number;
+  outfitPreservationScore: number;
+  anatomyScore: number;
+  issues: KeyframeQaIssue[];
+  summary: string;
+  repairInstruction?: string;
+  retryAction: KeyframeRetryAction;
+  automaticRetryEligible: boolean;
+  nextVersion?: number;
+  evaluatedAt: number;
+}
 
 export interface CharacterSnapshotRef {
   characterId: string;
@@ -83,6 +111,7 @@ export interface ShotKeyframeSpec {
   providerModel?: string;
   promptHash?: string;
   persistedAt?: number;
+  qa?: KeyframeQaResult;
   version: number;
   generationAttempt: number;
   qaAttempt: number;
