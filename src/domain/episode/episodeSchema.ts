@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   EPISODE_SCHEMA_VERSION,
+  KEYFRAME_QA_VERSION,
   SHOT_SCHEMA_VERSION,
   type EpisodeSpec,
   type ShotSpec,
@@ -9,9 +10,9 @@ import {
 const idSchema = z.string().trim().min(1).max(160).refine((value) => !value.includes('/'), {
   message: 'IDs must not contain slash characters',
 });
-
 const timestampSchema = z.number().int().nonnegative();
 const moneySchema = z.number().finite().nonnegative();
+const scoreSchema = z.number().finite().min(0).max(100);
 
 export const CharacterSnapshotRefSchema = z.object({
   characterId: idSchema,
@@ -28,24 +29,11 @@ export const EpisodeBudgetSchema = z.object({
   currency: z.literal('USD').default('USD'),
 }).superRefine((budget, ctx) => {
   if (budget.spentUsd + budget.reservedUsd > budget.limitUsd) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'spentUsd + reservedUsd must not exceed limitUsd',
-      path: ['reservedUsd'],
-    });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'spentUsd + reservedUsd must not exceed limitUsd', path: ['reservedUsd'] });
   }
 });
 
-export const EpisodeStatusSchema = z.enum([
-  'DRAFT',
-  'PLANNED',
-  'PRODUCTION',
-  'REVIEW',
-  'COMPOSING',
-  'COMPLETED',
-  'FAILED',
-  'CANCELLED',
-]);
+export const EpisodeStatusSchema = z.enum(['DRAFT', 'PLANNED', 'PRODUCTION', 'REVIEW', 'COMPOSING', 'COMPLETED', 'FAILED', 'CANCELLED']);
 
 export const EpisodeSpecSchema = z.object({
   id: idSchema,
@@ -65,41 +53,49 @@ export const EpisodeSpecSchema = z.object({
   updatedAt: timestampSchema,
   completedAt: timestampSchema.optional(),
 }).superRefine((episode, ctx) => {
-  if (new Set(episode.shotIds).size !== episode.shotIds.length) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'shotIds must be unique', path: ['shotIds'] });
-  }
-  if (episode.characterSnapshot.characterId !== episode.characterId) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'characterSnapshot.characterId must match characterId', path: ['characterSnapshot', 'characterId'] });
-  }
-  if (episode.characterSnapshot.characterVersion !== episode.characterVersion) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'characterSnapshot.characterVersion must match characterVersion', path: ['characterSnapshot', 'characterVersion'] });
-  }
-  if (episode.currentShotId && !episode.shotIds.includes(episode.currentShotId)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'currentShotId must exist in shotIds', path: ['currentShotId'] });
-  }
-  if (episode.status === 'COMPLETED' && !episode.completedAt) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'completedAt is required when status is COMPLETED', path: ['completedAt'] });
-  }
+  if (new Set(episode.shotIds).size !== episode.shotIds.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'shotIds must be unique', path: ['shotIds'] });
+  if (episode.characterSnapshot.characterId !== episode.characterId) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'characterSnapshot.characterId must match characterId', path: ['characterSnapshot', 'characterId'] });
+  if (episode.characterSnapshot.characterVersion !== episode.characterVersion) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'characterSnapshot.characterVersion must match characterVersion', path: ['characterSnapshot', 'characterVersion'] });
+  if (episode.currentShotId && !episode.shotIds.includes(episode.currentShotId)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'currentShotId must exist in shotIds', path: ['currentShotId'] });
+  if (episode.status === 'COMPLETED' && !episode.completedAt) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'completedAt is required when status is COMPLETED', path: ['completedAt'] });
 });
 
-export const ShotStatusSchema = z.enum([
-  'DRAFT',
-  'KEYFRAME_PENDING',
-  'KEYFRAME_QA',
-  'KEYFRAME_REVIEW',
-  'VIDEO_PENDING',
-  'VIDEO_GENERATING',
-  'VIDEO_QA',
-  'VIDEO_REVIEW',
-  'COMPLETED',
-  'FAILED',
-  'CANCELLED',
-]);
+export const ShotStatusSchema = z.enum(['DRAFT', 'KEYFRAME_PENDING', 'KEYFRAME_QA', 'KEYFRAME_REVIEW', 'VIDEO_PENDING', 'VIDEO_GENERATING', 'VIDEO_QA', 'VIDEO_REVIEW', 'COMPLETED', 'FAILED', 'CANCELLED']);
 
 export const ShotSceneSpecSchema = z.object({
   location: z.string().trim().min(1).max(300),
   time: z.string().trim().max(120).optional(),
   description: z.string().trim().max(2000).optional(),
+});
+
+export const KeyframeQaIssueSchema = z.object({
+  code: z.string().trim().min(1).max(160),
+  severity: z.enum(['critical', 'major', 'minor']),
+  description: z.string().trim().min(1).max(2000),
+  repairInstruction: z.string().trim().max(3000),
+});
+
+export const KeyframeQaResultSchema = z.object({
+  version: z.literal(KEYFRAME_QA_VERSION),
+  gate: z.enum(['PASS', 'REVIEW', 'FAIL']),
+  failureCode: z.string().trim().min(1).max(160).optional(),
+  identityScore: scoreSchema,
+  scenePreservationScore: scoreSchema,
+  posePreservationScore: scoreSchema,
+  outfitPreservationScore: scoreSchema,
+  anatomyScore: scoreSchema,
+  issues: z.array(KeyframeQaIssueSchema).max(50),
+  summary: z.string().trim().max(4000),
+  repairInstruction: z.string().trim().max(4000).optional(),
+  retryAction: z.enum(['CONTINUE_VIDEO', 'REGENERATE_KEYFRAME', 'REQUEST_NEW_KEYFRAME', 'HUMAN_REVIEW']),
+  automaticRetryEligible: z.boolean(),
+  nextVersion: z.number().int().min(2).optional(),
+  evaluatedAt: timestampSchema,
+}).superRefine((qa, ctx) => {
+  if (qa.gate === 'PASS' && qa.retryAction !== 'CONTINUE_VIDEO') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'PASS QA must continue to video', path: ['retryAction'] });
+  if (qa.gate !== 'PASS' && qa.retryAction === 'CONTINUE_VIDEO') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Non-PASS QA cannot continue to video', path: ['retryAction'] });
+  if ((qa.retryAction === 'REGENERATE_KEYFRAME' || qa.retryAction === 'REQUEST_NEW_KEYFRAME') && !qa.nextVersion) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Retrying a keyframe requires nextVersion', path: ['nextVersion'] });
+  if (qa.automaticRetryEligible && qa.retryAction !== 'REGENERATE_KEYFRAME') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Only server-side keyframe regeneration may be automatic', path: ['automaticRetryEligible'] });
 });
 
 export const ShotKeyframeSpecSchema = z.object({
@@ -117,30 +113,19 @@ export const ShotKeyframeSpecSchema = z.object({
   providerModel: z.string().trim().min(1).max(240).optional(),
   promptHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
   persistedAt: timestampSchema.optional(),
+  qa: KeyframeQaResultSchema.optional(),
   version: z.number().int().min(1).default(1),
   generationAttempt: z.number().int().nonnegative().default(0),
   qaAttempt: z.number().int().nonnegative().default(0),
 }).superRefine((keyframe, ctx) => {
-  if ((keyframe.status === 'PASS' || keyframe.status === 'REVIEW') && !keyframe.assetId) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: `assetId is required for ${keyframe.status} keyframe`,
-      path: ['assetId'],
-    });
-  }
-  const newPersistedStates = new Set(['READY', 'QA_PENDING']);
-  if (newPersistedStates.has(keyframe.status)) {
-    const required: Array<keyof typeof keyframe> = [
-      'assetId', 'outputBucket', 'outputObjectPath', 'contentSha256', 'mimeType', 'sizeBytes', 'persistedAt',
-    ];
+  if ((keyframe.status === 'PASS' || keyframe.status === 'REVIEW') && !keyframe.assetId) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `assetId is required for ${keyframe.status} keyframe`, path: ['assetId'] });
+  if (keyframe.status === 'PASS' && keyframe.qa && keyframe.qa.gate !== 'PASS') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'PASS keyframe QA gate must be PASS', path: ['qa', 'gate'] });
+  if (keyframe.status === 'REVIEW' && keyframe.qa && keyframe.qa.gate !== 'REVIEW') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'REVIEW keyframe QA gate must be REVIEW', path: ['qa', 'gate'] });
+  if (keyframe.status === 'FAIL' && keyframe.qa && keyframe.qa.gate !== 'FAIL') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'FAIL keyframe QA gate must be FAIL', path: ['qa', 'gate'] });
+  if (new Set(['READY', 'QA_PENDING']).has(keyframe.status)) {
+    const required: Array<keyof typeof keyframe> = ['assetId', 'outputBucket', 'outputObjectPath', 'contentSha256', 'mimeType', 'sizeBytes', 'persistedAt'];
     for (const field of required) {
-      if (keyframe[field] === undefined || keyframe[field] === '') {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `${String(field)} is required for persisted keyframe status ${keyframe.status}`,
-          path: [field],
-        });
-      }
+      if (keyframe[field] === undefined || keyframe[field] === '') ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${String(field)} is required for persisted keyframe status ${keyframe.status}`, path: [field] });
     }
   }
 });
@@ -155,13 +140,8 @@ export const ShotVideoSpecSchema = z.object({
   providerAttempt: z.number().int().nonnegative().default(0),
   qaAttempt: z.number().int().nonnegative().default(0),
 }).superRefine((video, ctx) => {
-  const taskStates = new Set(['GENERATING', 'QA_PENDING', 'PASS', 'REVIEW', 'FAIL']);
-  if (taskStates.has(video.status) && !video.generationTaskId) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'generationTaskId is required once video execution has started', path: ['generationTaskId'] });
-  }
-  if (video.status === 'PASS' && !video.assetId) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'assetId is required for PASS video', path: ['assetId'] });
-  }
+  if (new Set(['GENERATING', 'QA_PENDING', 'PASS', 'REVIEW', 'FAIL']).has(video.status) && !video.generationTaskId) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'generationTaskId is required once video execution has started', path: ['generationTaskId'] });
+  if (video.status === 'PASS' && !video.assetId) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'assetId is required for PASS video', path: ['assetId'] });
 });
 
 export const ShotBudgetSchema = EpisodeBudgetSchema;
@@ -187,29 +167,14 @@ export const ShotSpecSchema = z.object({
   updatedAt: timestampSchema,
   completedAt: timestampSchema.optional(),
 }).superRefine((shot, ctx) => {
-  if (shot.status === 'KEYFRAME_QA' && shot.keyframe.status !== 'QA_PENDING') {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'KEYFRAME_QA shot requires keyframe QA_PENDING', path: ['keyframe', 'status'] });
-  }
-  if (shot.status === 'KEYFRAME_REVIEW' && shot.keyframe.status !== 'REVIEW') {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'KEYFRAME_REVIEW shot requires keyframe REVIEW', path: ['keyframe', 'status'] });
-  }
+  if (shot.status === 'KEYFRAME_QA' && shot.keyframe.status !== 'QA_PENDING') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'KEYFRAME_QA shot requires keyframe QA_PENDING', path: ['keyframe', 'status'] });
+  if (shot.status === 'KEYFRAME_REVIEW' && !new Set(['REVIEW', 'FAIL']).has(shot.keyframe.status)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'KEYFRAME_REVIEW shot requires keyframe REVIEW or FAIL', path: ['keyframe', 'status'] });
   if (shot.status === 'COMPLETED') {
-    if (shot.keyframe.status !== 'PASS') {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'completed shot requires keyframe PASS', path: ['keyframe', 'status'] });
-    }
-    if (shot.video.status !== 'PASS') {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'completed shot requires video PASS', path: ['video', 'status'] });
-    }
-    if (!shot.completedAt) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'completedAt is required when shot status is COMPLETED', path: ['completedAt'] });
-    }
+    if (shot.keyframe.status !== 'PASS') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'completed shot requires keyframe PASS', path: ['keyframe', 'status'] });
+    if (shot.video.status !== 'PASS') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'completed shot requires video PASS', path: ['video', 'status'] });
+    if (!shot.completedAt) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'completedAt is required when shot status is COMPLETED', path: ['completedAt'] });
   }
 });
 
-export function parseEpisodeSpec(input: unknown): EpisodeSpec {
-  return EpisodeSpecSchema.parse(input) as EpisodeSpec;
-}
-
-export function parseShotSpec(input: unknown): ShotSpec {
-  return ShotSpecSchema.parse(input) as ShotSpec;
-}
+export function parseEpisodeSpec(input: unknown): EpisodeSpec { return EpisodeSpecSchema.parse(input) as EpisodeSpec; }
+export function parseShotSpec(input: unknown): ShotSpec { return ShotSpecSchema.parse(input) as ShotSpec; }
