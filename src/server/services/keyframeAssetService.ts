@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import sharp from 'sharp';
 import type { KeyframeProvider, ShotSpec } from '../../domain/episode/episodeTypes';
-import { gcsArtifactStore } from '../storage/gcsArtifactStore';
+import { gcsArtifactStore, resolveVeoOutputBucket } from '../storage/gcsArtifactStore';
 import { firestoreShotRepository } from '../repositories/firestoreShotRepository';
 
 const MAX_KEYFRAME_BYTES = 20 * 1024 * 1024;
@@ -65,6 +65,13 @@ function assertProviderInput(provider: KeyframeProvider, sourceFileId?: string, 
   }
 }
 
+function buildAssetId(episodeId: string, shotId: string, version: number, contentSha256: string): string {
+  const identityHash = sha256(`${episodeId}|${shotId}|${version}|${contentSha256}`).slice(0, 32);
+  const readableEpisode = episodeId.slice(0, 48);
+  const readableShot = shotId.slice(0, 32);
+  return `kf_${readableEpisode}_${readableShot}_v${version}_${identityHash}`;
+}
+
 export class KeyframeAssetService {
   public static async persist(input: PersistKeyframeAssetInput): Promise<PersistKeyframeAssetResult> {
     if (!input.buffer || input.buffer.length === 0) {
@@ -99,7 +106,7 @@ export class KeyframeAssetService {
       throw new Error(`KEYFRAME_MIME_MISMATCH: declared=${input.declaredMimeType}, detected=${mimeType}`);
     }
 
-    let metadata: sharp.Metadata;
+    let metadata: { width?: number; height?: number };
     try {
       metadata = await sharp(input.buffer).metadata();
     } catch (error: any) {
@@ -111,7 +118,7 @@ export class KeyframeAssetService {
 
     const contentSha256 = sha256(input.buffer);
     const promptHash = input.prompt ? sha256(input.prompt) : undefined;
-    const assetId = `kf_${input.episodeId}_${input.shotId}_v${version}_${contentSha256.slice(0, 12)}`;
+    const assetId = buildAssetId(input.episodeId, input.shotId, version, contentSha256);
     const outputObjectPath = `episodes/${input.episodeId}/shots/${input.shotId}/keyframes/v${version}_${contentSha256.slice(0, 16)}.${extensionForMime(mimeType)}`;
 
     if (
@@ -134,10 +141,8 @@ export class KeyframeAssetService {
       };
     }
 
-    const bucketName = process.env.VEO_OUTPUT_BUCKET?.replace(/^gs:\/\//i, '').replace(/\/+$/, '').trim() || '';
-    const existedBefore = bucketName
-      ? await gcsArtifactStore.artifactExists(bucketName, outputObjectPath).catch(() => false)
-      : false;
+    const bucketName = resolveVeoOutputBucket();
+    const existedBefore = await gcsArtifactStore.artifactExists(bucketName, outputObjectPath).catch(() => false);
 
     const artifact = await gcsArtifactStore.uploadImageArtifact({
       objectPath: outputObjectPath,
