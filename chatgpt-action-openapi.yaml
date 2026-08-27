@@ -145,7 +145,7 @@ paths:
       operationId: getIdentitySafeVideoTask
       security: []
       summary: Get current generation and Identity QA status for a task.
-      description: When status is COMPLETED and videoReady is true, call getIdentitySafeVideoArtifact to obtain temporary HTTPS playback and download URLs.
+      description: When status is COMPLETED and videoReady is true, call getIdentitySafeVideoArtifact to obtain temporary HTTPS URLs for playback and download.
       x-openai-isConsequential: false
       parameters:
         - in: path
@@ -160,7 +160,7 @@ paths:
     get:
       operationId: getIdentitySafeVideoArtifact
       security: []
-      summary: Get temporary HTTPS playback and download URLs for a completed Identity Safe video.
+      summary: Get temporary HTTPS URLs for playback and download for a completed Identity Safe video.
       description: Call only after COMPLETED. Uses native GCS V4 Signed URLs when available, otherwise an expiring Gateway capability URL; internal gs:// locations are never exposed.
       x-openai-isConsequential: false
       parameters:
