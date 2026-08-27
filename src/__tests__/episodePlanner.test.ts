@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { EpisodePlanner, fitShotDurations, normalizeShotDuration, type EpisodePlanRequest } from '../services/episode/episodePlanner';
 
 function requestFixture(overrides: Partial<EpisodePlanRequest> = {}): EpisodePlanRequest {
@@ -92,5 +92,18 @@ describe('EpisodePlanner deterministic domain build', () => {
       sixDrafts().slice(0, 5),
       1_800_000_010_000
     )).toThrow(/PLANNER_SHOT_COUNT_MISMATCH/);
+  });
+
+  it('repairs one malformed planner result with a bounded second model call', async () => {
+    const generateContent = vi.fn()
+      .mockResolvedValueOnce({ text: JSON.stringify({ shots: sixDrafts().slice(0, 5) }) })
+      .mockResolvedValueOnce({ text: JSON.stringify({ shots: sixDrafts() }) });
+    const fakeAi = { models: { generateContent } } as any;
+
+    const result = await EpisodePlanner.plan(fakeAi, requestFixture(), 'gemini-test-model');
+
+    expect(result.repairAttempted).toBe(true);
+    expect(result.shots).toHaveLength(6);
+    expect(generateContent).toHaveBeenCalledTimes(2);
   });
 });
