@@ -75,6 +75,14 @@ export interface ShotKeyframeSpec {
   sourceFileId?: string;
   outputBucket?: string;
   outputObjectPath?: string;
+  contentSha256?: string;
+  mimeType?: 'image/jpeg' | 'image/png' | 'image/webp';
+  sizeBytes?: number;
+  width?: number;
+  height?: number;
+  providerModel?: string;
+  promptHash?: string;
+  persistedAt?: number;
   version: number;
   generationAttempt: number;
   qaAttempt: number;
