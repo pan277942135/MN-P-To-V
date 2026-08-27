@@ -1,4 +1,4 @@
-import type { ShotSpec } from '../../domain/episode/episodeTypes';
+import type { KeyframeProvider, ShotSpec } from '../../domain/episode/episodeTypes';
 import { buildShotDocumentId } from '../../domain/episode/episodeTypes';
 import { parseShotSpec } from '../../domain/episode/episodeSchema';
 import { getFirestoreInstance, isFirestoreAvailable, markFirestoreUnavailable } from '../db/firestore';
@@ -93,6 +93,78 @@ export class FirestoreShotRepository {
       const records: ShotSpec[] = [];
       snapshot.forEach((docSnap) => records.push(parseShotSpec(docSnap.data())));
       return records.sort((a, b) => a.order - b.order);
+    } catch (err) {
+      this.handleError(err);
+      throw err;
+    }
+  }
+
+  public async bindKeyframeAsset(params: {
+    episodeId: string;
+    shotId: string;
+    provider: KeyframeProvider;
+    expectedVersion: number;
+    asset: {
+      assetId: string;
+      sourceFileId?: string;
+      outputBucket: string;
+      outputObjectPath: string;
+      contentSha256: string;
+      mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
+      sizeBytes: number;
+      width: number;
+      height: number;
+      providerModel?: string;
+      promptHash?: string;
+      persistedAt: number;
+    };
+  }): Promise<ShotSpec> {
+    const db = getFirestoreInstance();
+    if (!db) throw new Error('[FirestoreShotRepository] Firestore is unavailable.');
+    const docId = buildShotDocumentId(params.episodeId, params.shotId);
+
+    try {
+      const ref = db.collection(this.collectionName).doc(docId);
+      let updated: ShotSpec | null = null;
+      await db.runTransaction(async (transaction) => {
+        const snap = await transaction.get(ref);
+        if (!snap.exists) throw new Error('[FirestoreShotRepository] Shot not found.');
+        const current = parseShotSpec(snap.data());
+
+        if (current.status === 'COMPLETED' || current.status === 'CANCELLED') {
+          throw new Error(`[FirestoreShotRepository] KEYFRAME_SHOT_IMMUTABLE: ${current.status}`);
+        }
+        if (current.keyframe.provider !== params.provider) {
+          throw new Error(
+            `[FirestoreShotRepository] KEYFRAME_PROVIDER_MISMATCH: planned=${current.keyframe.provider}, received=${params.provider}`
+          );
+        }
+        if (current.keyframe.version !== params.expectedVersion) {
+          throw new Error(
+            `[FirestoreShotRepository] KEYFRAME_VERSION_CONFLICT: expected=${params.expectedVersion}, current=${current.keyframe.version}`
+          );
+        }
+        if (current.video.generationTaskId || current.video.status !== 'NOT_REQUESTED') {
+          throw new Error('[FirestoreShotRepository] KEYFRAME_VIDEO_ALREADY_STARTED: cannot replace keyframe after video execution begins.');
+        }
+
+        const next = parseShotSpec({
+          ...current,
+          status: 'KEYFRAME_QA',
+          keyframe: {
+            ...current.keyframe,
+            ...params.asset,
+            provider: params.provider,
+            status: 'QA_PENDING',
+            generationAttempt: current.keyframe.generationAttempt + 1,
+          },
+          updatedAt: Date.now(),
+        });
+        transaction.set(ref, sanitizeForFirestore(next), { merge: false });
+        updated = next;
+      });
+      if (!updated) throw new Error('[FirestoreShotRepository] Failed to bind keyframe asset.');
+      return updated;
     } catch (err) {
       this.handleError(err);
       throw err;
