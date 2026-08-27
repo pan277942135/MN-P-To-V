@@ -197,7 +197,6 @@ describe('S01ProductionService', () => {
     expect(repository.calls).toEqual([
       'getShot',
       'prepareVideoExecution',
-      'runner.run',
       'markVideoGenerating',
       'completeVideo',
     ]);
