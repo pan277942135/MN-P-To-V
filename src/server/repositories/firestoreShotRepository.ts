@@ -117,11 +117,16 @@ export class FirestoreShotRepository {
         const snap = await transaction.get(ref);
         if (!snap.exists) throw new Error('[FirestoreShotRepository] Shot not found.');
         const current = parseShotSpec(snap.data());
+        if (current.keyframe.status !== 'PASS') {
+          throw new Error('[FirestoreShotRepository] KEYFRAME_GATE_BLOCKED: video task cannot start before keyframe PASS.');
+        }
+        if (current.video.generationTaskId && current.video.generationTaskId !== taskId) {
+          throw new Error('[FirestoreShotRepository] Shot is already linked to a different generation task.');
+        }
+
         const next: ShotSpec = parseShotSpec({
           ...current,
-          status: current.status === 'DRAFT' || current.status === 'KEYFRAME_PENDING'
-            ? 'VIDEO_PENDING'
-            : current.status,
+          status: current.status === 'COMPLETED' ? current.status : 'VIDEO_PENDING',
           video: {
             ...current.video,
             generationTaskId: taskId,
