@@ -95,6 +95,14 @@ export interface ShotVideoSpec {
   assetId?: string;
   outputBucket?: string;
   outputObjectPath?: string;
+  idempotencyKey?: string;
+  artifactUrl?: string;
+  downloadUrl?: string;
+  artifactExpiresAt?: string;
+  artifactPersisted?: boolean;
+  artifactVerified?: boolean;
+  failureCode?: string;
+  failureMessage?: string;
   providerAttempt: number;
   qaAttempt: number;
 }

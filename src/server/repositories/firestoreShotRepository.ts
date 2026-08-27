@@ -216,6 +216,268 @@ export class FirestoreShotRepository {
       throw err;
     }
   }
+
+  public async prepareVideoExecution(params: {
+    episodeId: string;
+    shotId: string;
+    idempotencyKey: string;
+  }): Promise<ShotSpec> {
+    const db = getFirestoreInstance();
+    if (!db) throw new Error('[FirestoreShotRepository] Firestore is unavailable.');
+    const idempotencyKey = String(params.idempotencyKey || '').trim();
+    if (idempotencyKey.length < 16 || idempotencyKey.length > 200) {
+      throw new Error('[FirestoreShotRepository] VIDEO_IDEMPOTENCY_KEY_INVALID');
+    }
+    const docId = buildShotDocumentId(params.episodeId, params.shotId);
+
+    try {
+      const ref = db.collection(this.collectionName).doc(docId);
+      let updated: ShotSpec | null = null;
+      await db.runTransaction(async (transaction) => {
+        const snap = await transaction.get(ref);
+        if (!snap.exists) throw new Error('[FirestoreShotRepository] Shot not found.');
+        const current = parseShotSpec(snap.data());
+
+        if (current.keyframe.status !== 'PASS') {
+          throw new Error('[FirestoreShotRepository] KEYFRAME_GATE_BLOCKED: video task cannot start before keyframe PASS.');
+        }
+        if (
+          current.video.idempotencyKey &&
+          current.video.idempotencyKey !== idempotencyKey &&
+          current.status !== 'FAILED'
+        ) {
+          throw new Error('[FirestoreShotRepository] VIDEO_IDEMPOTENCY_CONFLICT: a different video intent is already active.');
+        }
+        if (current.video.status === 'PASS' && current.status === 'COMPLETED') {
+          updated = current;
+          return;
+        }
+        if (current.video.status === 'GENERATING' && current.video.generationTaskId) {
+          updated = current;
+          return;
+        }
+
+        const isRetryAfterFailure = current.status === 'FAILED';
+        const next = parseShotSpec({
+          ...current,
+          status: 'VIDEO_PENDING',
+          video: {
+            ...current.video,
+            ...(isRetryAfterFailure
+              ? {
+                  generationTaskId: undefined,
+                  assetId: undefined,
+                  outputBucket: undefined,
+                  outputObjectPath: undefined,
+                  artifactUrl: undefined,
+                  downloadUrl: undefined,
+                  artifactExpiresAt: undefined,
+                  artifactPersisted: undefined,
+                  artifactVerified: undefined,
+                  failureCode: undefined,
+                  failureMessage: undefined,
+                }
+              : {}),
+            idempotencyKey,
+            status: 'PENDING',
+            providerAttempt: Math.max(1, current.video.providerAttempt + (isRetryAfterFailure ? 1 : 0)),
+          },
+          completedAt: undefined,
+          updatedAt: Date.now(),
+        });
+        transaction.set(ref, sanitizeForFirestore(next), { merge: false });
+        updated = next;
+      });
+      if (!updated) throw new Error('[FirestoreShotRepository] Failed to prepare video execution.');
+      return updated;
+    } catch (err) {
+      this.handleError(err);
+      throw err;
+    }
+  }
+
+  public async markVideoGenerating(params: {
+    episodeId: string;
+    shotId: string;
+    idempotencyKey: string;
+    generationTaskId: string;
+    providerAttempt?: number;
+  }): Promise<ShotSpec> {
+    const db = getFirestoreInstance();
+    if (!db) throw new Error('[FirestoreShotRepository] Firestore is unavailable.');
+    const taskId = String(params.generationTaskId || '').trim();
+    const idempotencyKey = String(params.idempotencyKey || '').trim();
+    if (!taskId) throw new Error('[FirestoreShotRepository] generationTaskId is required.');
+    if (idempotencyKey.length < 16 || idempotencyKey.length > 200) {
+      throw new Error('[FirestoreShotRepository] VIDEO_IDEMPOTENCY_KEY_INVALID');
+    }
+    const docId = buildShotDocumentId(params.episodeId, params.shotId);
+
+    try {
+      const ref = db.collection(this.collectionName).doc(docId);
+      let updated: ShotSpec | null = null;
+      await db.runTransaction(async (transaction) => {
+        const snap = await transaction.get(ref);
+        if (!snap.exists) throw new Error('[FirestoreShotRepository] Shot not found.');
+        const current = parseShotSpec(snap.data());
+        if (current.keyframe.status !== 'PASS') {
+          throw new Error('[FirestoreShotRepository] KEYFRAME_GATE_BLOCKED: video task cannot start before keyframe PASS.');
+        }
+        if (current.video.idempotencyKey && current.video.idempotencyKey !== idempotencyKey) {
+          throw new Error('[FirestoreShotRepository] VIDEO_IDEMPOTENCY_CONFLICT: idempotency key does not match the active video intent.');
+        }
+        if (current.video.generationTaskId && current.video.generationTaskId !== taskId) {
+          throw new Error('[FirestoreShotRepository] VIDEO_TASK_CONFLICT: shot is already linked to a different generation task.');
+        }
+        if (current.status === 'COMPLETED' && current.video.status === 'PASS') {
+          updated = current;
+          return;
+        }
+
+        const next = parseShotSpec({
+          ...current,
+          status: 'VIDEO_GENERATING',
+          video: {
+            ...current.video,
+            idempotencyKey,
+            generationTaskId: taskId,
+            status: 'GENERATING',
+            providerAttempt: Math.max(1, params.providerAttempt || current.video.providerAttempt),
+          },
+          updatedAt: Date.now(),
+        });
+        transaction.set(ref, sanitizeForFirestore(next), { merge: false });
+        updated = next;
+      });
+      if (!updated) throw new Error('[FirestoreShotRepository] Failed to mark video generating.');
+      return updated;
+    } catch (err) {
+      this.handleError(err);
+      throw err;
+    }
+  }
+
+  public async completeVideo(params: {
+    episodeId: string;
+    shotId: string;
+    idempotencyKey: string;
+    taskId: string;
+    videoUrl: string;
+    downloadUrl: string;
+    expiresAt?: string | null;
+    providerAttempt?: number;
+    artifactPersisted: boolean;
+    artifactVerified: boolean;
+  }): Promise<ShotSpec> {
+    const db = getFirestoreInstance();
+    if (!db) throw new Error('[FirestoreShotRepository] Firestore is unavailable.');
+    const taskId = String(params.taskId || '').trim();
+    const idempotencyKey = String(params.idempotencyKey || '').trim();
+    const videoUrl = String(params.videoUrl || '').trim();
+    const downloadUrl = String(params.downloadUrl || '').trim();
+    if (!taskId || !videoUrl || !downloadUrl) {
+      throw new Error('[FirestoreShotRepository] VIDEO_ARTIFACT_FIELDS_REQUIRED');
+    }
+    if (idempotencyKey.length < 16 || idempotencyKey.length > 200) {
+      throw new Error('[FirestoreShotRepository] VIDEO_IDEMPOTENCY_KEY_INVALID');
+    }
+    const docId = buildShotDocumentId(params.episodeId, params.shotId);
+
+    try {
+      const ref = db.collection(this.collectionName).doc(docId);
+      let updated: ShotSpec | null = null;
+      await db.runTransaction(async (transaction) => {
+        const snap = await transaction.get(ref);
+        if (!snap.exists) throw new Error('[FirestoreShotRepository] Shot not found.');
+        const current = parseShotSpec(snap.data());
+        if (current.video.idempotencyKey && current.video.idempotencyKey !== idempotencyKey) {
+          throw new Error('[FirestoreShotRepository] VIDEO_IDEMPOTENCY_CONFLICT: completion key does not match the active video intent.');
+        }
+        if (current.video.generationTaskId && current.video.generationTaskId !== taskId) {
+          throw new Error('[FirestoreShotRepository] VIDEO_TASK_CONFLICT: completion task does not match the active task.');
+        }
+
+        const next = parseShotSpec({
+          ...current,
+          status: 'COMPLETED',
+          video: {
+            ...current.video,
+            provider: 'VEO',
+            status: 'PASS',
+            generationTaskId: taskId,
+            assetId: current.video.assetId || taskId,
+            idempotencyKey,
+            artifactUrl: videoUrl,
+            downloadUrl,
+            ...(params.expiresAt ? { artifactExpiresAt: params.expiresAt } : {}),
+            artifactPersisted: params.artifactPersisted,
+            artifactVerified: params.artifactVerified,
+            providerAttempt: Math.max(1, params.providerAttempt || current.video.providerAttempt),
+            qaAttempt: current.video.qaAttempt + 1,
+            failureCode: undefined,
+            failureMessage: undefined,
+          },
+          completedAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+        transaction.set(ref, sanitizeForFirestore(next), { merge: false });
+        updated = next;
+      });
+      if (!updated) throw new Error('[FirestoreShotRepository] Failed to complete video.');
+      return updated;
+    } catch (err) {
+      this.handleError(err);
+      throw err;
+    }
+  }
+
+  public async failVideo(params: {
+    episodeId: string;
+    shotId: string;
+    idempotencyKey: string;
+    errorCode: string;
+    errorMessage: string;
+  }): Promise<ShotSpec> {
+    const db = getFirestoreInstance();
+    if (!db) throw new Error('[FirestoreShotRepository] Firestore is unavailable.');
+    const idempotencyKey = String(params.idempotencyKey || '').trim();
+    const docId = buildShotDocumentId(params.episodeId, params.shotId);
+
+    try {
+      const ref = db.collection(this.collectionName).doc(docId);
+      let updated: ShotSpec | null = null;
+      await db.runTransaction(async (transaction) => {
+        const snap = await transaction.get(ref);
+        if (!snap.exists) throw new Error('[FirestoreShotRepository] Shot not found.');
+        const current = parseShotSpec(snap.data());
+        if (current.video.idempotencyKey && current.video.idempotencyKey !== idempotencyKey) {
+          throw new Error('[FirestoreShotRepository] VIDEO_IDEMPOTENCY_CONFLICT: failure key does not match the active video intent.');
+        }
+
+        const hasTask = Boolean(current.video.generationTaskId);
+        const next = parseShotSpec({
+          ...current,
+          status: 'FAILED',
+          video: {
+            ...current.video,
+            idempotencyKey,
+            status: hasTask ? 'FAIL' : 'NOT_REQUESTED',
+            failureCode: String(params.errorCode || 'S01_PRODUCTION_FAILED').slice(0, 200),
+            failureMessage: String(params.errorMessage || '').slice(0, 2000),
+          },
+          updatedAt: Date.now(),
+        });
+        transaction.set(ref, sanitizeForFirestore(next), { merge: false });
+        updated = next;
+      });
+      if (!updated) throw new Error('[FirestoreShotRepository] Failed to record video failure.');
+      return updated;
+    } catch (err) {
+      this.handleError(err);
+      throw err;
+    }
+  }
+
 }
 
 export const firestoreShotRepository = new FirestoreShotRepository();

@@ -30,6 +30,10 @@ import { taskStateMachineService, InvalidStateTransitionError } from './src/serv
 import { isProviderTaskDeletionSafe } from './src/server/services/providerAdmissionPolicy';
 import { evaluateProviderOperationLinkage } from './src/server/services/providerOperationRecoveryPolicy';
 import { getStorageAuthority } from './src/server/db/firestore';
+import {
+  createDefaultS01ProductionService,
+  type S01ProductionServiceLike,
+} from './src/server/services/s01ProductionService';
 import { gcsArtifactStore, resolveVeoOutputBucket, resolveVeoStorageUri, getVeoBucketName, getVeoStorageUri, assertProductionStorageConfig, EXPECTED_PRODUCTION_VEO_BUCKET } from './src/server/storage/gcsArtifactStore';
 
 // Server Video Task Store & Ephemeral In-Memory Cache
@@ -416,7 +420,7 @@ async function settlePersistedVideoThroughQa(params: {
   });
 }
 
-export async function createApp() {
+export async function createApp(dependencies: { s01ProductionService?: S01ProductionServiceLike } = {}) {
   const app = express();
   const PORT = 3000;
 
@@ -425,6 +429,63 @@ export async function createApp() {
 
   const upload = multer({
     limits: { fileSize: 50 * 1024 * 1024, files: 10 },
+  });
+
+  const s01ProductionService =
+    dependencies.s01ProductionService || createDefaultS01ProductionService();
+
+  // EP001 S01 production entrypoint. The service owns the keyframe gate, durable
+  // Shot state transitions, runner idempotency and final artifact write-back.
+  app.post('/api/episodes/:episodeId/shots/:shotId/run', async (req, res) => {
+    const episodeId = String(req.params.episodeId || '').trim();
+    const shotId = String(req.params.shotId || '').trim();
+    const rawHeaderKey = req.headers['x-idempotency-key'];
+    const headerKey = Array.isArray(rawHeaderKey) ? rawHeaderKey[0] : rawHeaderKey;
+    const idempotencyKey = String(headerKey || req.body?.idempotencyKey || '').trim();
+    const openaiFileRef = req.body?.openaiFileRef ?? req.body?.openaiFileIdRef;
+
+    if (!openaiFileRef) {
+      return res.status(400).json({
+        ok: false,
+        error: 'OPENAI_FILE_REF_REQUIRED',
+        episodeId,
+        shotId,
+      });
+    }
+    if (!idempotencyKey) {
+      return res.status(400).json({
+        ok: false,
+        error: 'IDEMPOTENCY_KEY_REQUIRED',
+        episodeId,
+        shotId,
+      });
+    }
+
+    try {
+      const result = await s01ProductionService.run({
+        episodeId,
+        shotId,
+        openaiFileRef,
+        idempotencyKey,
+        prompt: typeof req.body?.prompt === 'string' ? req.body.prompt : undefined,
+      });
+      return res.status(200).json({ ok: true, ...result });
+    } catch (err: any) {
+      const statusCode = Number(err?.statusCode);
+      const status = Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599 ? statusCode : 502;
+      const errorCode =
+        typeof err?.code === 'string' && err.code.trim()
+          ? err.code.trim()
+          : String(err?.message || 'S01_PRODUCTION_FAILED').split(':')[0];
+      const { redactedMessage } = sanitizeError(err);
+      return res.status(status).json({
+        ok: false,
+        error: errorCode,
+        message: redactedMessage || 'S01 生产请求失败。',
+        episodeId,
+        shotId,
+      });
+    }
   });
 
   // Health Check

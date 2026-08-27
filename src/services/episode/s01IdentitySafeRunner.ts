@@ -48,9 +48,13 @@ export interface S01IdentitySafeRunResult {
 type FetchLike = typeof fetch;
 type SleepLike = (ms: number) => Promise<void>;
 
-interface RunnerDependencies {
+export interface RunnerDependencies {
   fetchImpl?: FetchLike;
   sleep?: SleepLike;
+  onTaskCreated?: (task: {
+    taskId: string;
+    providerAttempt: number;
+  }) => Promise<void>;
 }
 
 interface GatewayTask {
@@ -102,6 +106,7 @@ export class S01IdentitySafeRunner {
   private readonly maxPolls: number;
   private readonly fetchImpl: FetchLike;
   private readonly sleep: SleepLike;
+  private readonly onTaskCreated?: RunnerDependencies['onTaskCreated'];
 
   constructor(config: S01IdentitySafeRunnerConfig, deps: RunnerDependencies = {}) {
     this.gatewayBaseUrl = normalizeBaseUrl(config.gatewayBaseUrl);
@@ -110,6 +115,7 @@ export class S01IdentitySafeRunner {
     this.maxPolls = Math.max(1, Math.min(200, Number(config.maxPolls ?? 72)));
     this.fetchImpl = deps.fetchImpl || fetch;
     this.sleep = deps.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.onTaskCreated = deps.onTaskCreated;
   }
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
@@ -247,6 +253,12 @@ export class S01IdentitySafeRunner {
       durationSeconds,
       idempotencyKey,
     });
+    if (created.taskId && this.onTaskCreated) {
+      await this.onTaskCreated({
+        taskId: String(created.taskId),
+        providerAttempt: Number(created.providerAttempt || 1),
+      });
+    }
     const completed = await this.waitForCompletion(created);
     const artifact = await this.artifact(String(completed.taskId));
 
