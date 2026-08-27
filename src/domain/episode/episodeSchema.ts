@@ -121,8 +121,15 @@ export const ShotKeyframeSpecSchema = z.object({
   generationAttempt: z.number().int().nonnegative().default(0),
   qaAttempt: z.number().int().nonnegative().default(0),
 }).superRefine((keyframe, ctx) => {
-  const persistedStates = new Set(['READY', 'QA_PENDING', 'PASS', 'REVIEW']);
-  if (persistedStates.has(keyframe.status)) {
+  if ((keyframe.status === 'PASS' || keyframe.status === 'REVIEW') && !keyframe.assetId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `assetId is required for ${keyframe.status} keyframe`,
+      path: ['assetId'],
+    });
+  }
+  const newPersistedStates = new Set(['READY', 'QA_PENDING']);
+  if (newPersistedStates.has(keyframe.status)) {
     const required: Array<keyof typeof keyframe> = [
       'assetId', 'outputBucket', 'outputObjectPath', 'contentSha256', 'mimeType', 'sizeBytes', 'persistedAt',
     ];
