@@ -66,39 +66,19 @@ export const EpisodeSpecSchema = z.object({
   completedAt: timestampSchema.optional(),
 }).superRefine((episode, ctx) => {
   if (new Set(episode.shotIds).size !== episode.shotIds.length) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'shotIds must be unique',
-      path: ['shotIds'],
-    });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'shotIds must be unique', path: ['shotIds'] });
   }
   if (episode.characterSnapshot.characterId !== episode.characterId) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'characterSnapshot.characterId must match characterId',
-      path: ['characterSnapshot', 'characterId'],
-    });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'characterSnapshot.characterId must match characterId', path: ['characterSnapshot', 'characterId'] });
   }
   if (episode.characterSnapshot.characterVersion !== episode.characterVersion) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'characterSnapshot.characterVersion must match characterVersion',
-      path: ['characterSnapshot', 'characterVersion'],
-    });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'characterSnapshot.characterVersion must match characterVersion', path: ['characterSnapshot', 'characterVersion'] });
   }
   if (episode.currentShotId && !episode.shotIds.includes(episode.currentShotId)) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'currentShotId must exist in shotIds',
-      path: ['currentShotId'],
-    });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'currentShotId must exist in shotIds', path: ['currentShotId'] });
   }
   if (episode.status === 'COMPLETED' && !episode.completedAt) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'completedAt is required when status is COMPLETED',
-      path: ['completedAt'],
-    });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'completedAt is required when status is COMPLETED', path: ['completedAt'] });
   }
 });
 
@@ -129,17 +109,32 @@ export const ShotKeyframeSpecSchema = z.object({
   sourceFileId: z.string().trim().min(1).max(500).optional(),
   outputBucket: z.string().trim().min(1).max(240).optional(),
   outputObjectPath: z.string().trim().min(1).max(1000).optional(),
+  contentSha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+  mimeType: z.enum(['image/jpeg', 'image/png', 'image/webp']).optional(),
+  sizeBytes: z.number().int().positive().max(20 * 1024 * 1024).optional(),
+  width: z.number().int().positive().max(20000).optional(),
+  height: z.number().int().positive().max(20000).optional(),
+  providerModel: z.string().trim().min(1).max(240).optional(),
+  promptHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+  persistedAt: timestampSchema.optional(),
   version: z.number().int().min(1).default(1),
   generationAttempt: z.number().int().nonnegative().default(0),
   qaAttempt: z.number().int().nonnegative().default(0),
 }).superRefine((keyframe, ctx) => {
-  const persistedStates = new Set(['PASS', 'REVIEW']);
-  if (persistedStates.has(keyframe.status) && !keyframe.assetId) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'assetId is required for PASS or REVIEW keyframes',
-      path: ['assetId'],
-    });
+  const persistedStates = new Set(['READY', 'QA_PENDING', 'PASS', 'REVIEW']);
+  if (persistedStates.has(keyframe.status)) {
+    const required: Array<keyof typeof keyframe> = [
+      'assetId', 'outputBucket', 'outputObjectPath', 'contentSha256', 'mimeType', 'sizeBytes', 'persistedAt',
+    ];
+    for (const field of required) {
+      if (keyframe[field] === undefined || keyframe[field] === '') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${String(field)} is required for persisted keyframe status ${keyframe.status}`,
+          path: [field],
+        });
+      }
+    }
   }
 });
 
@@ -155,18 +150,10 @@ export const ShotVideoSpecSchema = z.object({
 }).superRefine((video, ctx) => {
   const taskStates = new Set(['GENERATING', 'QA_PENDING', 'PASS', 'REVIEW', 'FAIL']);
   if (taskStates.has(video.status) && !video.generationTaskId) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'generationTaskId is required once video execution has started',
-      path: ['generationTaskId'],
-    });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'generationTaskId is required once video execution has started', path: ['generationTaskId'] });
   }
   if (video.status === 'PASS' && !video.assetId) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'assetId is required for PASS video',
-      path: ['assetId'],
-    });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'assetId is required for PASS video', path: ['assetId'] });
   }
 });
 
@@ -193,27 +180,21 @@ export const ShotSpecSchema = z.object({
   updatedAt: timestampSchema,
   completedAt: timestampSchema.optional(),
 }).superRefine((shot, ctx) => {
+  if (shot.status === 'KEYFRAME_QA' && shot.keyframe.status !== 'QA_PENDING') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'KEYFRAME_QA shot requires keyframe QA_PENDING', path: ['keyframe', 'status'] });
+  }
+  if (shot.status === 'KEYFRAME_REVIEW' && shot.keyframe.status !== 'REVIEW') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'KEYFRAME_REVIEW shot requires keyframe REVIEW', path: ['keyframe', 'status'] });
+  }
   if (shot.status === 'COMPLETED') {
     if (shot.keyframe.status !== 'PASS') {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'completed shot requires keyframe PASS',
-        path: ['keyframe', 'status'],
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'completed shot requires keyframe PASS', path: ['keyframe', 'status'] });
     }
     if (shot.video.status !== 'PASS') {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'completed shot requires video PASS',
-        path: ['video', 'status'],
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'completed shot requires video PASS', path: ['video', 'status'] });
     }
     if (!shot.completedAt) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'completedAt is required when shot status is COMPLETED',
-        path: ['completedAt'],
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'completedAt is required when shot status is COMPLETED', path: ['completedAt'] });
     }
   }
 });
