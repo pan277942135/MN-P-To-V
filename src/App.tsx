@@ -3,6 +3,7 @@ import { ConnectionProvider } from './context/ConnectionContext';
 import { Navbar } from './components/Navbar';
 import { Sidebar, type NavTab } from './components/Sidebar';
 import { GeminiStoryboardDirectorPage } from './pages/GeminiStoryboardDirectorPage';
+import { KeyframeBlueprintPage } from './pages/KeyframeBlueprintPage';
 import { DirectorConsolePage } from './pages/DirectorConsolePage';
 import { StudioPage } from './pages/StudioPage';
 import { CharacterLibraryPage } from './pages/CharacterLibraryPage';
@@ -30,6 +31,10 @@ export function AppContent() {
         <main ref={mainRef} className="flex-1 overflow-y-auto bg-zinc-950/50 pb-20 md:pb-0">
           <div className={activeTab === 'director' ? 'block' : 'hidden'}>
             <GeminiStoryboardDirectorPage />
+          </div>
+
+          <div className={activeTab === 'keyframes' ? 'block' : 'hidden'}>
+            {activeTab === 'keyframes' && <KeyframeBlueprintPage />}
           </div>
 
           <div className={activeTab === 'monitor' ? 'block' : 'hidden'}>
