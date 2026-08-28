@@ -1,4 +1,5 @@
 import type { Server } from 'node:http';
+import express from 'express';
 import type { ShotProductionServiceLike } from './src/server/services/shotProductionService';
 import {
   createDefaultEpisodeProductionRunner,
@@ -31,13 +32,21 @@ async function loadBaseServerModule() {
 
 export async function createApp(dependencies: EpisodeServerDependencies = {}) {
   const baseServer = await loadBaseServerModule();
-  const app = await baseServer.createApp(
+  const baseApp = await baseServer.createApp(
     dependencies.shotProductionService
       ? { s01ProductionService: dependencies.shotProductionService }
       : {},
   );
   const episodeProductionRunner =
     dependencies.episodeProductionRunner || createDefaultEpisodeProductionRunner();
+
+  // The legacy base app owns a terminal API 404 handler, so the Episode route must be
+  // registered on an outer app before mounting the base app. This keeps the existing
+  // server untouched while preserving every legacy route and its terminal fallbacks.
+  const app = express();
+  app.disable('x-powered-by');
+  app.use(express.json({ limit: '100mb' }));
+  app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
   app.post('/api/episodes/:episodeId/run', async (req, res) => {
     const episodeId = String(req.params.episodeId || '').trim();
@@ -65,6 +74,10 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
       });
     }
   });
+
+  // Keep the established server as the complete fallback for all existing APIs,
+  // static assets, error semantics, and Vite development middleware.
+  app.use(baseApp);
 
   return app;
 }
