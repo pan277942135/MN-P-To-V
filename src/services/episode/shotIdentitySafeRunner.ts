@@ -8,6 +8,28 @@ export type ChatGptConversationFileRef =
     };
 
 export type ShotDurationSeconds = 4 | 6 | 8;
+export type SupportedKeyframeMime = 'image/jpeg' | 'image/png' | 'image/webp';
+
+export type ApprovedKeyframeInput =
+  | {
+      source: 'conversation_file';
+      openaiFileRef: ChatGptConversationFileRef;
+      sourceFileId?: string;
+      assetId?: string;
+      contentSha256?: string;
+      version: number;
+    }
+  | {
+      source: 'durable_gcs_asset';
+      buffer: Buffer;
+      mimeType: SupportedKeyframeMime;
+      fileName: string;
+      assetId: string;
+      contentSha256: string;
+      version: number;
+      outputBucket: string;
+      outputObjectPath: string;
+    };
 
 export const SHOT_DEFAULT_PROMPT = [
   'Use the approved starting image as the exact identity and composition anchor for this shot.',
@@ -24,7 +46,9 @@ export interface ShotIdentitySafeRunnerConfig {
 }
 
 export interface ShotIdentitySafeRunInput {
-  openaiFileRef: ChatGptConversationFileRef;
+  keyframeInput?: ApprovedKeyframeInput;
+  // Legacy compatibility for callers that still invoke the runner directly.
+  openaiFileRef?: ChatGptConversationFileRef;
   idempotencyKey: string;
   prompt?: string;
   durationSeconds: ShotDurationSeconds;
@@ -107,6 +131,15 @@ function requireDuration(value: number): ShotDurationSeconds {
   return value;
 }
 
+function legacyKeyframeInput(fileRef: ChatGptConversationFileRef): ApprovedKeyframeInput {
+  return {
+    source: 'conversation_file',
+    openaiFileRef: fileRef,
+    sourceFileId: typeof fileRef === 'string' ? fileRef : fileRef.id,
+    version: 1,
+  };
+}
+
 export class ShotIdentitySafeRunner {
   private readonly gatewayBaseUrl: string;
   private readonly apiKey?: string;
@@ -126,12 +159,21 @@ export class ShotIdentitySafeRunner {
     this.onTaskCreated = deps.onTaskCreated;
   }
 
-  private headers(extra: Record<string, string> = {}): Record<string, string> {
+  private headers(extra: Record<string, string> = {}, json = true): Record<string, string> {
     return {
-      'Content-Type': 'application/json',
+      ...(json ? { 'Content-Type': 'application/json' } : {}),
       ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
       ...extra,
     };
+  }
+
+  private async parseResponse(response: Response): Promise<any> {
+    const text = await response.text();
+    try {
+      return text ? JSON.parse(text) : null;
+    } catch {
+      throw new Error(`SHOT_GATEWAY_INVALID_JSON:${response.status}`);
+    }
   }
 
   private async json(path: string, init: RequestInit = {}): Promise<{ response: Response; body: any }> {
@@ -142,14 +184,7 @@ export class ShotIdentitySafeRunner {
         ...Object.fromEntries(new Headers(init.headers).entries()),
       },
     });
-    const text = await response.text();
-    let body: any = null;
-    try {
-      body = text ? JSON.parse(text) : null;
-    } catch {
-      throw new Error(`SHOT_GATEWAY_INVALID_JSON:${response.status}`);
-    }
-    return { response, body };
+    return { response, body: await this.parseResponse(response) };
   }
 
   private async preflight(fileRef: ChatGptConversationFileRef): Promise<void> {
@@ -174,22 +209,57 @@ export class ShotIdentitySafeRunner {
     return body as GatewayTask;
   }
 
-  private async createVideo(input: {
-    fileRef: ChatGptConversationFileRef;
+  private async submitCreateRequest(input: {
+    keyframeInput: ApprovedKeyframeInput;
     prompt: string;
     durationSeconds: ShotDurationSeconds;
     idempotencyKey: string;
-  }): Promise<GatewayTask> {
-    try {
-      const { response, body } = await this.json('/v1/videos', {
+  }): Promise<{ response: Response; body: any }> {
+    if (input.keyframeInput.source === 'conversation_file') {
+      return this.json('/v1/videos', {
         method: 'POST',
         body: JSON.stringify({
           prompt: input.prompt,
           durationSeconds: input.durationSeconds,
           idempotencyKey: input.idempotencyKey,
-          openaiFileIdRefs: [input.fileRef],
+          openaiFileIdRefs: [input.keyframeInput.openaiFileRef],
         }),
       });
+    }
+
+    const form = new FormData();
+    form.append(
+      'image',
+      new Blob([new Uint8Array(input.keyframeInput.buffer)], { type: input.keyframeInput.mimeType }),
+      input.keyframeInput.fileName,
+    );
+    form.append('prompt', input.prompt);
+    form.append('durationSeconds', String(input.durationSeconds));
+    form.append('idempotencyKey', input.idempotencyKey);
+    form.append('inputSource', 'durable_gcs_asset');
+    form.append('assetId', input.keyframeInput.assetId);
+    form.append('contentSha256', input.keyframeInput.contentSha256);
+    form.append('keyframeVersion', String(input.keyframeInput.version));
+    form.append('mimeType', input.keyframeInput.mimeType);
+    form.append('outputBucket', input.keyframeInput.outputBucket);
+    form.append('outputObjectPath', input.keyframeInput.outputObjectPath);
+
+    const response = await this.fetchImpl(`${this.gatewayBaseUrl}/v1/videos/durable`, {
+      method: 'POST',
+      headers: this.headers({}, false),
+      body: form,
+    });
+    return { response, body: await this.parseResponse(response) };
+  }
+
+  private async createVideo(input: {
+    keyframeInput: ApprovedKeyframeInput;
+    prompt: string;
+    durationSeconds: ShotDurationSeconds;
+    idempotencyKey: string;
+  }): Promise<GatewayTask> {
+    try {
+      const { response, body } = await this.submitCreateRequest(input);
 
       if (
         body?.status === 'UPSTREAM_OUTCOME_UNKNOWN' ||
@@ -256,9 +326,15 @@ export class ShotIdentitySafeRunner {
     const prompt = String(input.prompt || SHOT_DEFAULT_PROMPT).trim();
     if (!prompt) throw new Error('SHOT_PROMPT_REQUIRED');
 
-    await this.preflight(input.openaiFileRef);
+    const keyframeInput = input.keyframeInput || (input.openaiFileRef ? legacyKeyframeInput(input.openaiFileRef) : null);
+    if (!keyframeInput) throw new Error('SHOT_KEYFRAME_INPUT_REQUIRED');
+
+    if (keyframeInput.source === 'conversation_file') {
+      await this.preflight(keyframeInput.openaiFileRef);
+    }
+
     const created = await this.createVideo({
-      fileRef: input.openaiFileRef,
+      keyframeInput,
       prompt,
       durationSeconds,
       idempotencyKey,
