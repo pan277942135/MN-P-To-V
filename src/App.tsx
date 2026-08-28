@@ -4,6 +4,7 @@ import { Navbar } from './components/Navbar';
 import { Sidebar, type NavTab } from './components/Sidebar';
 import { GeminiStoryboardDirectorPage } from './pages/GeminiStoryboardDirectorPage';
 import { KeyframeBlueprintPage } from './pages/KeyframeBlueprintPage';
+import { KeyframeAssetPage } from './pages/KeyframeAssetPage';
 import { DirectorConsolePage } from './pages/DirectorConsolePage';
 import { StudioPage } from './pages/StudioPage';
 import { CharacterLibraryPage } from './pages/CharacterLibraryPage';
@@ -35,6 +36,10 @@ export function AppContent() {
 
           <div className={activeTab === 'keyframes' ? 'block' : 'hidden'}>
             {activeTab === 'keyframes' && <KeyframeBlueprintPage />}
+          </div>
+
+          <div className={activeTab === 'keyframe-assets' ? 'block' : 'hidden'}>
+            {activeTab === 'keyframe-assets' && <KeyframeAssetPage />}
           </div>
 
           <div className={activeTab === 'monitor' ? 'block' : 'hidden'}>
