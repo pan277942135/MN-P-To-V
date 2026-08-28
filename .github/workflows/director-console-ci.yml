@@ -5,12 +5,14 @@ on:
     paths:
       - 'src/App.tsx'
       - 'src/components/Sidebar.tsx'
+      - 'src/pages/ScriptDirectorPage.tsx'
       - 'src/pages/DirectorConsolePage.tsx'
       - 'episode-server.ts'
       - 'src/server/services/episodeProductionRunner.ts'
       - 'src/server/services/keyframeInputResolver.ts'
       - 'src/__tests__/episodeProductionApi.test.ts'
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
+      - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'Dockerfile'
       - '.github/workflows/director-console-ci.yml'
       - '.github/workflows/director-console-uat-deploy.yml'
@@ -20,12 +22,14 @@ on:
     paths:
       - 'src/App.tsx'
       - 'src/components/Sidebar.tsx'
+      - 'src/pages/ScriptDirectorPage.tsx'
       - 'src/pages/DirectorConsolePage.tsx'
       - 'episode-server.ts'
       - 'src/server/services/episodeProductionRunner.ts'
       - 'src/server/services/keyframeInputResolver.ts'
       - 'src/__tests__/episodeProductionApi.test.ts'
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
+      - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'Dockerfile'
       - '.github/workflows/director-console-ci.yml'
       - '.github/workflows/director-console-uat-deploy.yml'
@@ -56,6 +60,7 @@ jobs:
       - name: Director / Episode regression tests
         run: >-
           bunx vitest run
+          src/__tests__/scriptDirectorPage.test.tsx
           src/__tests__/episodeProductionApi.test.ts
           src/__tests__/episodeProductionRunner.test.ts
           src/__tests__/p07EpisodeDurableInput.test.ts

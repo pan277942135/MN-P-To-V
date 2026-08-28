@@ -6,20 +6,30 @@ const root = path.resolve(__dirname, '../..');
 const read = (file: string) => fs.readFileSync(path.join(root, file), 'utf8');
 
 describe('Director Console source contract', () => {
-  it('makes the Episode Director Console the default React surface without removing single-shot Studio', () => {
+  it('makes manual creative/script intake the default Director surface while preserving production monitor and single-shot Studio', () => {
     const app = read('src/App.tsx');
     const sidebar = read('src/components/Sidebar.tsx');
-    const director = read('src/pages/DirectorConsolePage.tsx');
+    const scriptDirector = read('src/pages/ScriptDirectorPage.tsx');
+    const monitor = read('src/pages/DirectorConsolePage.tsx');
 
     expect(app).toContain("useState<NavTab>('director')");
+    expect(app).toContain('<ScriptDirectorPage />');
+    expect(app).toContain("activeTab === 'monitor'");
     expect(app).toContain('<DirectorConsolePage />');
     expect(app).toContain('<StudioPage');
+
     expect(sidebar).toContain("label: '导演台'");
-    expect(sidebar).toContain("'director' | 'studio'");
-    expect(director).toContain('整集导演控制台');
-    expect(director).toContain('S01–S06 Production Board');
-    expect(director).toContain('Durable GCS');
-    expect(director).toContain('Preview 已锁定执行');
+    expect(sidebar).toContain("label: '生产监控'");
+    expect(sidebar).toContain("'director' | 'monitor' | 'studio'");
+
+    expect(scriptDirector).toContain('导演台｜创意与脚本录入');
+    expect(scriptDirector).toContain('STEP 1 · 可独立验收');
+    expect(scriptDirector).toContain('当前不做 AI 拆镜、不生成图片、不调用 Veo，也不自动创建 Episode');
+
+    expect(monitor).toContain('整集导演控制台');
+    expect(monitor).toContain('S01–S06 Production Board');
+    expect(monitor).toContain('Durable GCS');
+    expect(monitor).toContain('Preview 已锁定执行');
   });
 
   it('deploys the React/Episode server with the formal Dockerfile in a read-only public preview', () => {
