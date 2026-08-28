@@ -8,9 +8,11 @@ on:
       - 'src/pages/ScriptDirectorPage.tsx'
       - 'src/pages/AutoStoryboardDirectorPage.tsx'
       - 'src/pages/GeminiStoryboardDirectorPage.tsx'
+      - 'src/pages/KeyframeBlueprintPage.tsx'
       - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/services/director/geminiStoryboardClient.ts'
       - 'src/services/director/chatgptStoryboardImport.ts'
+      - 'src/services/director/keyframeBlueprint.ts'
       - 'src/server/services/geminiStoryboardService.ts'
       - 'src/pages/DirectorConsolePage.tsx'
       - 'episode-server.ts'
@@ -22,6 +24,8 @@ on:
       - 'src/__tests__/geminiStoryboardDirectorPage.test.tsx'
       - 'src/__tests__/chatgptStoryboardImport.test.ts'
       - 'src/__tests__/chatgptStoryboardImportDialog.test.tsx'
+      - 'src/__tests__/keyframeBlueprint.test.ts'
+      - 'src/__tests__/keyframeBlueprintPage.test.tsx'
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
       - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'src/__tests__/manualStoryboardDirectorPage.test.tsx'
@@ -39,9 +43,11 @@ on:
       - 'src/pages/ScriptDirectorPage.tsx'
       - 'src/pages/AutoStoryboardDirectorPage.tsx'
       - 'src/pages/GeminiStoryboardDirectorPage.tsx'
+      - 'src/pages/KeyframeBlueprintPage.tsx'
       - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/services/director/geminiStoryboardClient.ts'
       - 'src/services/director/chatgptStoryboardImport.ts'
+      - 'src/services/director/keyframeBlueprint.ts'
       - 'src/server/services/geminiStoryboardService.ts'
       - 'src/pages/DirectorConsolePage.tsx'
       - 'episode-server.ts'
@@ -53,6 +59,8 @@ on:
       - 'src/__tests__/geminiStoryboardDirectorPage.test.tsx'
       - 'src/__tests__/chatgptStoryboardImport.test.ts'
       - 'src/__tests__/chatgptStoryboardImportDialog.test.tsx'
+      - 'src/__tests__/keyframeBlueprint.test.ts'
+      - 'src/__tests__/keyframeBlueprintPage.test.tsx'
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
       - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'src/__tests__/manualStoryboardDirectorPage.test.tsx'
@@ -96,6 +104,8 @@ jobs:
           src/__tests__/geminiStoryboardDirectorPage.test.tsx
           src/__tests__/chatgptStoryboardImport.test.ts
           src/__tests__/chatgptStoryboardImportDialog.test.tsx
+          src/__tests__/keyframeBlueprint.test.ts
+          src/__tests__/keyframeBlueprintPage.test.tsx
           src/__tests__/geminiStoryboardApi.test.ts
           src/__tests__/episodeProductionApi.test.ts
           src/__tests__/episodeProductionRunner.test.ts
