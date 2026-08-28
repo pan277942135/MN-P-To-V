@@ -1,7 +1,7 @@
 import React from 'react';
-import { Clapperboard, Film, Users, History, Settings, Sparkles, ClipboardCheck, Activity, Images, Image as ImageIcon } from 'lucide-react';
+import { Clapperboard, Film, Users, History, Settings, Sparkles, ClipboardCheck, Activity, Images, Image as ImageIcon, ScanSearch } from 'lucide-react';
 
-export type NavTab = 'director' | 'keyframes' | 'keyframe-assets' | 'monitor' | 'studio' | 'characters' | 'review' | 'history' | 'settings';
+export type NavTab = 'director' | 'keyframes' | 'keyframe-assets' | 'keyframe-qa' | 'monitor' | 'studio' | 'characters' | 'review' | 'history' | 'settings';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -12,7 +12,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange }) => {
   const navItems = [
     { id: 'director' as NavTab, label: '导演台', icon: Clapperboard, desc: '从创意与脚本开始，逐环节人工验收' },
     { id: 'keyframes' as NavTab, label: '关键帧蓝图', icon: Images, desc: 'Storyboard PASS 后逐镜准备首帧生产蓝图' },
-    { id: 'keyframe-assets' as NavTab, label: '关键帧图片', icon: ImageIcon, desc: 'Blueprint PASS 后逐镜生成或上传，并人工确认' },
+    { id: 'keyframe-assets' as NavTab, label: '关键帧图片', icon: ImageIcon, desc: 'Blueprint PASS 后逐镜生成或上传图片资产' },
+    { id: 'keyframe-qa' as NavTab, label: '关键帧 QA', icon: ScanSearch, desc: '自动检查身份、解剖、Prompt 与跨镜连续性' },
     { id: 'monitor' as NavTab, label: '生产监控', icon: Activity, desc: '查看 Episode / Shot 门禁、资产与生产状态' },
     { id: 'studio' as NavTab, label: '创作工作台', icon: Film, desc: '单镜头场景、首帧与视频生成' },
     { id: 'characters' as NavTab, label: '角色库', icon: Users, desc: '建立并长期复用角色身份包' },
