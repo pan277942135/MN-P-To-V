@@ -124,9 +124,9 @@ function inferScene(beat: string) {
 function inferCamera(beat: string, index: number) {
   if (/手机|屏幕|短信|消息|拒信|邮件/.test(beat)) return '极近特写 → 人物中近景';
   if (/制作过程细节|手|裁|切|胶|EVA|泡棉|颜料/.test(beat)) return '手部细节特写 / 近景蒙太奇';
+  if (/最后|消失|回到|变回|现实/.test(beat)) return '中近景固定机位';
   if (/幻想|想象|变身|变成|魔法/.test(beat)) return '中广景 / 轻微低机位';
   if (/来到|走到|走向|进入|推开/.test(beat)) return '中景跟随 → 环境中广景';
-  if (/最后|消失|回到|变回|现实/.test(beat)) return '中近景固定机位';
   return index % 3 === 0 ? '中近景' : index % 3 === 1 ? '中景' : '细节近景';
 }
 
@@ -135,8 +135,8 @@ function inferTitle(beat: string, index: number) {
   if (/制作过程细节/.test(beat)) return '手作细节';
   if (/EVA|泡棉|手搓|制作|做法杖/.test(beat)) return '开始手搓法杖';
   if (/阳台/.test(beat) && /雨|夜/.test(beat) && !/幻想|变身|变成/.test(beat)) return '走进雨夜阳台';
-  if (/幻想|想象|变身|变成|魔法/.test(beat)) return '幻想变身';
   if (/最后|消失|回到|变回|现实/.test(beat)) return '回到现实';
+  if (/幻想|想象|变身|变成|魔法/.test(beat)) return '幻想变身';
   const shortened = cleanText(beat.replace(/制作过程细节：/g, '')).slice(0, 14);
   return shortened || `镜头 ${index + 1}`;
 }
@@ -151,11 +151,11 @@ function inferAction(beat: string) {
   if (/EVA|泡棉|手搓|制作|做法杖/.test(beat)) {
     return `人物在有限空间里摊开 EVA 与手工材料，开始制作道具。原始剧情：${beat}`;
   }
-  if (/幻想|想象|变身|变成|魔法/.test(beat)) {
-    return `以现实动作作为连续点进入幻想，人物与手中道具的位置保持连贯。原始剧情：${beat}`;
-  }
   if (/最后|消失|回到|变回|现实/.test(beat)) {
     return `幻想视觉逐渐退去，镜头明确回到真实人物状态。原始剧情：${beat}`;
+  }
+  if (/幻想|想象|变身|变成|魔法/.test(beat)) {
+    return `以现实动作作为连续点进入幻想，人物与手中道具的位置保持连贯。原始剧情：${beat}`;
   }
   return beat;
 }
