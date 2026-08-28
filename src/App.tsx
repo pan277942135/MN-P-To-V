@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { ConnectionProvider } from './context/ConnectionContext';
 import { Navbar } from './components/Navbar';
 import { Sidebar, type NavTab } from './components/Sidebar';
-import { AutoStoryboardDirectorPage } from './pages/AutoStoryboardDirectorPage';
+import { GeminiStoryboardDirectorPage } from './pages/GeminiStoryboardDirectorPage';
 import { DirectorConsolePage } from './pages/DirectorConsolePage';
 import { StudioPage } from './pages/StudioPage';
 import { CharacterLibraryPage } from './pages/CharacterLibraryPage';
@@ -29,7 +29,7 @@ export function AppContent() {
 
         <main ref={mainRef} className="flex-1 overflow-y-auto bg-zinc-950/50 pb-20 md:pb-0">
           <div className={activeTab === 'director' ? 'block' : 'hidden'}>
-            <AutoStoryboardDirectorPage />
+            <GeminiStoryboardDirectorPage />
           </div>
 
           <div className={activeTab === 'monitor' ? 'block' : 'hidden'}>

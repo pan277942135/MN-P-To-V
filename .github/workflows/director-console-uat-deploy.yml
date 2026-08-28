@@ -37,6 +37,8 @@ env:
   FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
   VEO_MODEL_ID: veo-3.1-fast-generate-001
   IDENTITY_QA_MODEL: gemini-2.5-flash
+  DIRECTOR_STORYBOARD_MODEL: gemini-2.5-flash
+  DIRECTOR_STORYBOARD_LOCATION: us-central1
 
 jobs:
   deploy:
@@ -74,7 +76,7 @@ jobs:
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy read-only Director Console preview
+      - name: Deploy Gemini Storyboard Director preview
         id: deploy
         shell: bash
         run: |
@@ -94,8 +96,8 @@ jobs:
             --timeout=900 \
             --concurrency=8 \
             --min-instances=0 \
-            --max-instances=2 \
-            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA,PUBLIC_PREVIEW_READ_ONLY=1,DIRECTOR_PRODUCTION_RUN_ENABLED=0,P0_DISABLE_STARTUP_RECOVERY=1" \
+            --max-instances=1 \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA,PUBLIC_PREVIEW_READ_ONLY=1,DIRECTOR_PRODUCTION_RUN_ENABLED=0,DIRECTOR_STORYBOARD_GEMINI_ENABLED=1,DIRECTOR_STORYBOARD_MODEL=$DIRECTOR_STORYBOARD_MODEL,DIRECTOR_STORYBOARD_LOCATION=$DIRECTOR_STORYBOARD_LOCATION,P0_DISABLE_STARTUP_RECOVERY=1" \
             --quiet
 
           SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
@@ -116,20 +118,26 @@ jobs:
           curl -fsS "$SERVICE_URL/api/director/capabilities" | tee capabilities.json
           grep -q '"readOnlyPreview":true' capabilities.json
           grep -q '"productionRunEnabled":false' capabilities.json
+          grep -q '"storyboardGeminiEnabled":true' capabilities.json
+          grep -q '"storyboardModel":"gemini-2.5-flash"' capabilities.json
 
           curl -fsS "$SERVICE_URL/api/episodes?limit=1" | tee episodes.json
           grep -q '"ok":true' episodes.json
+
+          # Intentionally do not call /api/director/storyboard/generate here:
+          # deployment smoke tests must not create recurring paid Gemini calls.
 
       - name: Deployment summary
         shell: bash
         run: |
           {
-            echo '## Director Console UAT ready'
+            echo '## Gemini Storyboard Director UAT ready'
             echo ''
             echo "- Source commit: \`${{ steps.image.outputs.source_sha }}\`"
             echo "- Cloud Run service: \`$SERVICE\`"
             echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
             echo "- Public URL: ${{ steps.deploy.outputs.service_url }}"
-            echo '- Image entrypoint: formal `Dockerfile` (`vite build` + `episode-server.ts`)'
-            echo '- Preview safety: read-only, provider execution disabled, startup recovery disabled'
+            echo "- Storyboard provider: Vertex AI Gemini / \`$DIRECTOR_STORYBOARD_MODEL\`"
+            echo '- Preview safety: Episode/Veo production disabled; Gemini Storyboard explicitly enabled with API rate limiting'
+            echo '- Deployment smoke does not invoke Gemini, avoiding paid calls on every deploy'
           } >> "$GITHUB_STEP_SUMMARY"

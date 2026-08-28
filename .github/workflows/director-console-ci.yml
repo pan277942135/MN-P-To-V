@@ -7,12 +7,18 @@ on:
       - 'src/components/Sidebar.tsx'
       - 'src/pages/ScriptDirectorPage.tsx'
       - 'src/pages/AutoStoryboardDirectorPage.tsx'
+      - 'src/pages/GeminiStoryboardDirectorPage.tsx'
       - 'src/services/director/localStoryboardGenerator.ts'
+      - 'src/services/director/geminiStoryboardClient.ts'
+      - 'src/server/services/geminiStoryboardService.ts'
       - 'src/pages/DirectorConsolePage.tsx'
       - 'episode-server.ts'
       - 'src/server/services/episodeProductionRunner.ts'
       - 'src/server/services/keyframeInputResolver.ts'
       - 'src/__tests__/episodeProductionApi.test.ts'
+      - 'src/__tests__/geminiStoryboardApi.test.ts'
+      - 'src/__tests__/geminiStoryboardService.test.ts'
+      - 'src/__tests__/geminiStoryboardDirectorPage.test.tsx'
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
       - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'src/__tests__/manualStoryboardDirectorPage.test.tsx'
@@ -29,12 +35,18 @@ on:
       - 'src/components/Sidebar.tsx'
       - 'src/pages/ScriptDirectorPage.tsx'
       - 'src/pages/AutoStoryboardDirectorPage.tsx'
+      - 'src/pages/GeminiStoryboardDirectorPage.tsx'
       - 'src/services/director/localStoryboardGenerator.ts'
+      - 'src/services/director/geminiStoryboardClient.ts'
+      - 'src/server/services/geminiStoryboardService.ts'
       - 'src/pages/DirectorConsolePage.tsx'
       - 'episode-server.ts'
       - 'src/server/services/episodeProductionRunner.ts'
       - 'src/server/services/keyframeInputResolver.ts'
       - 'src/__tests__/episodeProductionApi.test.ts'
+      - 'src/__tests__/geminiStoryboardApi.test.ts'
+      - 'src/__tests__/geminiStoryboardService.test.ts'
+      - 'src/__tests__/geminiStoryboardDirectorPage.test.tsx'
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
       - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'src/__tests__/manualStoryboardDirectorPage.test.tsx'
@@ -74,6 +86,9 @@ jobs:
           src/__tests__/manualStoryboardDirectorPage.test.tsx
           src/__tests__/autoStoryboardGenerator.test.ts
           src/__tests__/autoStoryboardDirectorPage.test.tsx
+          src/__tests__/geminiStoryboardService.test.ts
+          src/__tests__/geminiStoryboardDirectorPage.test.tsx
+          src/__tests__/geminiStoryboardApi.test.ts
           src/__tests__/episodeProductionApi.test.ts
           src/__tests__/episodeProductionRunner.test.ts
           src/__tests__/p07EpisodeDurableInput.test.ts

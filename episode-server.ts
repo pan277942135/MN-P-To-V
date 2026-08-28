@@ -10,6 +10,11 @@ import {
   type EpisodeProductionRunInput,
   type EpisodeProductionRunResult,
 } from './src/server/services/episodeProductionRunner';
+import {
+  createDefaultGeminiStoryboardService,
+  type StoryboardGeneratorLike,
+  type StoryboardGenerationInput,
+} from './src/server/services/geminiStoryboardService';
 import { taskStateMachineService } from './src/server/services/taskStateMachineService';
 
 export interface EpisodeProductionRunnerLike {
@@ -32,7 +37,10 @@ export interface EpisodeServerDependencies {
   shotProductionService?: ShotProductionServiceLike;
   episodeRepository?: EpisodeReadRepositoryLike;
   shotRepository?: ShotReadRepositoryLike;
+  storyboardGenerator?: StoryboardGeneratorLike;
 }
+
+const storyboardRateBuckets = new Map<string, number[]>();
 
 function isPublicPreviewReadOnly(): boolean {
   return process.env.PUBLIC_PREVIEW_READ_ONLY === '1';
@@ -42,11 +50,42 @@ function isProductionRunEnabled(): boolean {
   return !isPublicPreviewReadOnly() && process.env.DIRECTOR_PRODUCTION_RUN_ENABLED !== '0';
 }
 
+function isStoryboardGeminiEnabled(): boolean {
+  return process.env.DIRECTOR_STORYBOARD_GEMINI_ENABLED === '1';
+}
+
+function storyboardModel(): string {
+  return process.env.DIRECTOR_STORYBOARD_MODEL || 'gemini-2.5-flash';
+}
+
 function directorCapabilities() {
   return {
     readOnlyPreview: isPublicPreviewReadOnly(),
     productionRunEnabled: isProductionRunEnabled(),
+    storyboardGeminiEnabled: isStoryboardGeminiEnabled(),
+    storyboardModel: storyboardModel(),
   };
+}
+
+function isStoryboardGenerationRequest(req: express.Request) {
+  return req.method.toUpperCase() === 'POST' && req.path === '/api/director/storyboard/generate';
+}
+
+function consumeStoryboardRateLimit(_req: express.Request) {
+  // UAT is intentionally public, so use a conservative per-instance global budget
+  // instead of trusting client-supplied forwarding headers.
+  const bucket = 'uat-global';
+  const now = Date.now();
+  const windowMs = 10 * 60 * 1000;
+  const previous = storyboardRateBuckets.get(bucket) || [];
+  const active = previous.filter((timestamp) => now - timestamp < windowMs);
+  if (active.length >= 10) {
+    storyboardRateBuckets.set(bucket, active);
+    return false;
+  }
+  active.push(now);
+  storyboardRateBuckets.set(bucket, active);
+  return true;
 }
 
 function hasDurableLocation(shot: ShotSpec): boolean {
@@ -142,6 +181,8 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
     dependencies.episodeProductionRunner || createDefaultEpisodeProductionRunner();
   const episodeRepository = dependencies.episodeRepository || firestoreEpisodeRepository;
   const shotRepository = dependencies.shotRepository || firestoreShotRepository;
+  const storyboardGenerator =
+    dependencies.storyboardGenerator || createDefaultGeminiStoryboardService();
 
   const app = express();
   app.disable('x-powered-by');
@@ -150,11 +191,19 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
 
   app.use((req, res, next) => {
     const safeMethod = ['GET', 'HEAD', 'OPTIONS'].includes(req.method.toUpperCase());
-    if (isPublicPreviewReadOnly() && req.path.startsWith('/api/') && !safeMethod) {
+    const allowedStoryboardProviderCall =
+      isStoryboardGenerationRequest(req) && isStoryboardGeminiEnabled();
+
+    if (
+      isPublicPreviewReadOnly() &&
+      req.path.startsWith('/api/') &&
+      !safeMethod &&
+      !allowedStoryboardProviderCall
+    ) {
       return res.status(423).json({
         ok: false,
         error: 'PREVIEW_READ_ONLY',
-        message: '当前 Cloud Run 为公开只读 Preview；所有写操作和 Provider 调用均已锁定。',
+        message: '当前 Cloud Run 为公开 Preview；生产写操作与视频 Provider 调用已锁定，仅显式启用的 Gemini 分镜生成端点例外。',
       });
     }
     return next();
@@ -163,6 +212,66 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
   app.get('/api/director/capabilities', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({ ok: true, ...directorCapabilities() });
+  });
+
+  app.post('/api/director/storyboard/generate', async (req, res) => {
+    if (!isStoryboardGeminiEnabled()) {
+      return res.status(503).json({
+        ok: false,
+        error: 'GEMINI_STORYBOARD_DISABLED',
+        message: '当前环境未启用 Gemini Storyboard 生成。',
+      });
+    }
+
+    if (req.get('X-Director-Generation-Intent') !== 'storyboard-v0.2.2') {
+      return res.status(400).json({
+        ok: false,
+        error: 'STORYBOARD_GENERATION_INTENT_REQUIRED',
+        message: '缺少明确的 Storyboard 生成意图标记。',
+      });
+    }
+
+    if (!consumeStoryboardRateLimit(req)) {
+      return res.status(429).json({
+        ok: false,
+        error: 'STORYBOARD_RATE_LIMITED',
+        message: 'Gemini 分镜生成请求过于频繁，请稍后再试。',
+      });
+    }
+
+    const targetFormat = ['story_short', 'vlog', 'cosplay', 'other'].includes(
+      String(req.body?.targetFormat || ''),
+    )
+      ? req.body.targetFormat
+      : 'story_short';
+
+    const input: StoryboardGenerationInput = {
+      title: String(req.body?.title || ''),
+      creativeBrief: String(req.body?.creativeBrief || ''),
+      fullScript: String(req.body?.fullScript || ''),
+      productionNotes: String(req.body?.productionNotes || ''),
+      targetDurationSeconds: Number(req.body?.targetDurationSeconds || 30),
+      targetFormat,
+    };
+
+    try {
+      const result = await storyboardGenerator.generate(input);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(200).json({ ok: true, ...result });
+    } catch (error: any) {
+      const statusCode = Number(error?.statusCode);
+      const status = Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599
+        ? statusCode
+        : 502;
+      const code = typeof error?.code === 'string' && error.code.trim()
+        ? error.code.trim()
+        : 'GEMINI_STORYBOARD_REQUEST_FAILED';
+      return res.status(status).json({
+        ok: false,
+        error: code,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   });
 
   app.get('/api/episodes', async (req, res) => {
