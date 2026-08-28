@@ -6,12 +6,16 @@ const root = path.resolve(__dirname, '../..');
 const read = (file: string) => fs.readFileSync(path.join(root, file), 'utf8');
 
 describe('Director Console source contract', () => {
-  it('keeps Storyboard generation while adding gated Step 3.1 Keyframe Blueprint and preserving production monitor', () => {
+  it('keeps Storyboard and Step 3.1 while adding gated Step 3.2 keyframe images and preserving production monitor', () => {
     const app = read('src/App.tsx');
     const sidebar = read('src/components/Sidebar.tsx');
     const geminiDirector = read('src/pages/GeminiStoryboardDirectorPage.tsx');
     const keyframePage = read('src/pages/KeyframeBlueprintPage.tsx');
     const keyframeModel = read('src/services/director/keyframeBlueprint.ts');
+    const assetPage = read('src/pages/KeyframeAssetPage.tsx');
+    const assetModel = read('src/services/director/keyframeAsset.ts');
+    const assetClient = read('src/services/director/geminiKeyframeImageClient.ts');
+    const assetServer = read('src/server/services/geminiKeyframeImageService.ts');
     const geminiClient = read('src/services/director/geminiStoryboardClient.ts');
     const geminiServer = read('src/server/services/geminiStoryboardService.ts');
     const chatgptImport = read('src/services/director/chatgptStoryboardImport.ts');
@@ -24,14 +28,17 @@ describe('Director Console source contract', () => {
     expect(app).toContain('<GeminiStoryboardDirectorPage />');
     expect(app).toContain("activeTab === 'keyframes'");
     expect(app).toContain('<KeyframeBlueprintPage />');
+    expect(app).toContain("activeTab === 'keyframe-assets'");
+    expect(app).toContain('<KeyframeAssetPage />');
     expect(app).toContain("activeTab === 'monitor'");
     expect(app).toContain('<DirectorConsolePage />');
     expect(app).toContain('<StudioPage');
 
     expect(sidebar).toContain("label: '导演台'");
     expect(sidebar).toContain("label: '关键帧蓝图'");
+    expect(sidebar).toContain("label: '关键帧图片'");
     expect(sidebar).toContain("label: '生产监控'");
-    expect(sidebar).toContain("'director' | 'keyframes' | 'monitor' | 'studio'");
+    expect(sidebar).toContain("'director' | 'keyframes' | 'keyframe-assets' | 'monitor' | 'studio'");
 
     expect(geminiDirector).toContain('导演台｜Script / ChatGPT → Storyboard');
     expect(geminiDirector).toContain('Gemini 生成分镜');
@@ -53,6 +60,17 @@ describe('Director Console source contract', () => {
     expect(keyframeModel).toContain('《风从那年教室吹过》系列');
     expect(keyframeModel).toContain('shotUid: shot.uid');
 
+    expect(assetPage).toContain('关键帧图片｜生成 / 上传 / 人工确认');
+    expect(assetPage).toContain('生成关键帧');
+    expect(assetPage).toContain('上传 9:16 图片');
+    expect(assetPage).toContain('确认该镜 PASS');
+    expect(assetModel).toContain("'zaojing_director_v032_keyframe_assets'");
+    expect(assetModel).toContain("'zaojing_director_v032_keyframe_asset_approval'");
+    expect(assetClient).toContain("'/api/director/keyframes/generate'");
+    expect(assetClient).toContain("'keyframe-image-v0.3.2'");
+    expect(assetServer).toContain("'gemini-3.1-flash-image'");
+    expect(assetServer).toContain("aspectRatio: input.aspectRatio");
+
     expect(geminiClient).toContain("'/api/director/storyboard/generate'");
     expect(geminiClient).toContain("'X-Director-Generation-Intent'");
     expect(geminiServer).toContain("import { GoogleGenAI } from '@google/genai'");
@@ -73,7 +91,7 @@ describe('Director Console source contract', () => {
     expect(monitor).toContain('Preview 已锁定执行');
   });
 
-  it('deploys Director UAT while keeping Episode/Veo production disabled in public preview', () => {
+  it('deploys Director UAT while keeping Episode/Veo production disabled and paid image generation explicit', () => {
     const workflow = read('.github/workflows/director-console-uat-deploy.yml');
 
     expect(workflow).toContain('docker build -f Dockerfile');
@@ -83,8 +101,12 @@ describe('Director Console source contract', () => {
     expect(workflow).toContain('DIRECTOR_STORYBOARD_GEMINI_ENABLED=1');
     expect(workflow).toContain('DIRECTOR_STORYBOARD_MODEL: gemini-2.5-flash');
     expect(workflow).toContain('DIRECTOR_STORYBOARD_MODEL=$DIRECTOR_STORYBOARD_MODEL');
+    expect(workflow).toContain('DIRECTOR_KEYFRAME_IMAGE_ENABLED=1');
+    expect(workflow).toContain('DIRECTOR_KEYFRAME_IMAGE_MODEL: gemini-3.1-flash-image');
+    expect(workflow).toContain('DIRECTOR_KEYFRAME_IMAGE_LOCATION: global');
     expect(workflow).toContain('P0_DISABLE_STARTUP_RECOVERY=1');
     expect(workflow).toContain('/api/director/capabilities');
     expect(workflow).not.toContain('/api/director/storyboard/generate" | tee');
+    expect(workflow).not.toContain('/api/director/keyframes/generate" | tee');
   });
 });
