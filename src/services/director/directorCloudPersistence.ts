@@ -129,7 +129,7 @@ export function collectDirectorLocalSnapshot(): DirectorCloudSnapshot {
 
   const brief = stages.brief || {};
   const blueprint = stages.keyframeBlueprint || {};
-  const timestamps = Object.values(stages).map((stage) => scanTimestamp(stage));
+  const timestamps = STAGE_KEYS.map(([stageKey]) => scanTimestamp(stages[stageKey]));
   const clientUpdatedAt = Math.max(0, ...timestamps);
   return {
     schema: DIRECTOR_CLOUD_SCHEMA,
