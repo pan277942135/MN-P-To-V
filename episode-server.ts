@@ -20,6 +20,11 @@ import {
   type KeyframeImageGeneratorLike,
   type KeyframeImageGenerationInput,
 } from './src/server/services/geminiKeyframeImageService';
+import {
+  createDefaultGeminiKeyframeQaService,
+  type KeyframeQaGeneratorLike,
+  type KeyframeQaGenerationInput,
+} from './src/server/services/geminiKeyframeQaService';
 import { taskStateMachineService } from './src/server/services/taskStateMachineService';
 
 export interface EpisodeProductionRunnerLike {
@@ -44,10 +49,12 @@ export interface EpisodeServerDependencies {
   shotRepository?: ShotReadRepositoryLike;
   storyboardGenerator?: StoryboardGeneratorLike;
   keyframeImageGenerator?: KeyframeImageGeneratorLike;
+  keyframeQaGenerator?: KeyframeQaGeneratorLike;
 }
 
 const storyboardRateBuckets = new Map<string, number[]>();
 const keyframeImageRateBuckets = new Map<string, number[]>();
+const keyframeQaRateBuckets = new Map<string, number[]>();
 
 function isPublicPreviewReadOnly(): boolean {
   return process.env.PUBLIC_PREVIEW_READ_ONLY === '1';
@@ -73,6 +80,14 @@ function keyframeImageModel(): string {
   return process.env.DIRECTOR_KEYFRAME_IMAGE_MODEL || 'gemini-3.1-flash-image';
 }
 
+function isKeyframeQaEnabled(): boolean {
+  return process.env.DIRECTOR_KEYFRAME_QA_ENABLED === '1';
+}
+
+function keyframeQaModel(): string {
+  return process.env.DIRECTOR_KEYFRAME_QA_MODEL || process.env.IDENTITY_QA_MODEL || 'gemini-2.5-flash';
+}
+
 function directorCapabilities() {
   return {
     readOnlyPreview: isPublicPreviewReadOnly(),
@@ -81,6 +96,8 @@ function directorCapabilities() {
     storyboardModel: storyboardModel(),
     keyframeImageEnabled: isKeyframeImageEnabled(),
     keyframeImageModel: keyframeImageModel(),
+    keyframeQaEnabled: isKeyframeQaEnabled(),
+    keyframeQaModel: keyframeQaModel(),
   };
 }
 
@@ -90,6 +107,10 @@ function isStoryboardGenerationRequest(req: express.Request) {
 
 function isKeyframeImageGenerationRequest(req: express.Request) {
   return req.method.toUpperCase() === 'POST' && req.path === '/api/director/keyframes/generate';
+}
+
+function isKeyframeQaRequest(req: express.Request) {
+  return req.method.toUpperCase() === 'POST' && req.path === '/api/director/keyframes/qa';
 }
 
 function consumeRateLimit(bucketMap: Map<string, number[]>, maxCalls: number) {
@@ -113,6 +134,10 @@ function consumeStoryboardRateLimit(_req: express.Request) {
 
 function consumeKeyframeImageRateLimit(_req: express.Request) {
   return consumeRateLimit(keyframeImageRateBuckets, 20);
+}
+
+function consumeKeyframeQaRateLimit(_req: express.Request) {
+  return consumeRateLimit(keyframeQaRateBuckets, 30);
 }
 
 function hasDurableLocation(shot: ShotSpec): boolean {
@@ -212,6 +237,8 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
     dependencies.storyboardGenerator || createDefaultGeminiStoryboardService();
   const keyframeImageGenerator =
     dependencies.keyframeImageGenerator || createDefaultGeminiKeyframeImageService();
+  const keyframeQaGenerator =
+    dependencies.keyframeQaGenerator || createDefaultGeminiKeyframeQaService();
 
   const app = express();
   app.disable('x-powered-by');
@@ -224,18 +251,21 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
       isStoryboardGenerationRequest(req) && isStoryboardGeminiEnabled();
     const allowedKeyframeImageProviderCall =
       isKeyframeImageGenerationRequest(req) && isKeyframeImageEnabled();
+    const allowedKeyframeQaProviderCall =
+      isKeyframeQaRequest(req) && isKeyframeQaEnabled();
 
     if (
       isPublicPreviewReadOnly() &&
       req.path.startsWith('/api/') &&
       !safeMethod &&
       !allowedStoryboardProviderCall &&
-      !allowedKeyframeImageProviderCall
+      !allowedKeyframeImageProviderCall &&
+      !allowedKeyframeQaProviderCall
     ) {
       return res.status(423).json({
         ok: false,
         error: 'PREVIEW_READ_ONLY',
-        message: '当前 Cloud Run 为公开 Preview；生产写操作与视频 Provider 调用已锁定，仅显式启用的 Director 生成端点例外。',
+        message: '当前 Cloud Run 为公开 Preview；生产写操作与视频 Provider 调用已锁定，仅显式启用的 Director 生成/QA 端点例外。',
       });
     }
     return next();
@@ -353,6 +383,75 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
       const code = typeof error?.code === 'string' && error.code.trim()
         ? error.code.trim()
         : 'GEMINI_KEYFRAME_IMAGE_REQUEST_FAILED';
+      return res.status(status).json({
+        ok: false,
+        error: code,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  app.post('/api/director/keyframes/qa', async (req, res) => {
+    if (!isKeyframeQaEnabled()) {
+      return res.status(503).json({
+        ok: false,
+        error: 'GEMINI_KEYFRAME_QA_DISABLED',
+        message: '当前环境未启用 Gemini 关键帧自动 QA。',
+      });
+    }
+
+    if (req.get('X-Director-Generation-Intent') !== 'keyframe-qa-v0.3.3') {
+      return res.status(400).json({
+        ok: false,
+        error: 'KEYFRAME_QA_INTENT_REQUIRED',
+        message: '缺少明确的关键帧自动 QA 意图标记。',
+      });
+    }
+
+    if (!consumeKeyframeQaRateLimit(req)) {
+      return res.status(429).json({
+        ok: false,
+        error: 'KEYFRAME_QA_RATE_LIMITED',
+        message: 'Gemini 关键帧自动 QA 请求过于频繁，请稍后再试。',
+      });
+    }
+
+    const masterReferences = Array.isArray(req.body?.masterReferences)
+      ? req.body.masterReferences.slice(0, 4).map((item: any) => ({
+          imageBase64: String(item?.imageBase64 || ''),
+          mimeType: String(item?.mimeType || ''),
+        }))
+      : [];
+    const previousKeyframe = req.body?.previousKeyframe && typeof req.body.previousKeyframe === 'object'
+      ? {
+          imageBase64: String(req.body.previousKeyframe.imageBase64 || ''),
+          mimeType: String(req.body.previousKeyframe.mimeType || ''),
+        }
+      : null;
+
+    const input: KeyframeQaGenerationInput = {
+      shotLabel: String(req.body?.shotLabel || ''),
+      prompt: String(req.body?.prompt || ''),
+      continuity: String(req.body?.continuity || ''),
+      candidateImageBase64: String(req.body?.candidateImageBase64 || ''),
+      candidateMimeType: String(req.body?.candidateMimeType || ''),
+      characterHint: String(req.body?.characterHint || ''),
+      masterReferences,
+      previousKeyframe,
+    };
+
+    try {
+      const result = await keyframeQaGenerator.analyze(input);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(200).json({ ok: true, ...result });
+    } catch (error: any) {
+      const statusCode = Number(error?.statusCode);
+      const status = Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599
+        ? statusCode
+        : 502;
+      const code = typeof error?.code === 'string' && error.code.trim()
+        ? error.code.trim()
+        : 'GEMINI_KEYFRAME_QA_REQUEST_FAILED';
       return res.status(status).json({
         ok: false,
         error: code,

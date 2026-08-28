@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  CheckCircle2,
+  ArrowRight,
   Image as ImageIcon,
   LockKeyhole,
   RefreshCw,
@@ -22,10 +22,7 @@ import {
   KEYFRAME_ASSET_KEY,
   KEYFRAME_ASSET_VERSION,
   attachKeyframeAsset,
-  approveKeyframeAsset,
-  buildKeyframeAssetApproval,
   buildKeyframeAssetManifest,
-  isKeyframeAssetManifestComplete,
   isKeyframeBlueprintApprovalCurrent,
   manifestMatchesCurrentBlueprint,
   updateKeyframeAssetQa,
@@ -44,6 +41,7 @@ interface InitialState {
   blueprint: KeyframeBlueprintDraft | null;
   manifest: KeyframeAssetManifest | null;
   autoCreated: boolean;
+  migratedPassCount: number;
 }
 
 function safeParse<T>(key: string): T | null {
@@ -53,6 +51,22 @@ function safeParse<T>(key: string): T | null {
   } catch {
     return null;
   }
+}
+
+function removeLegacyAssetPass(manifest: KeyframeAssetManifest): { manifest: KeyframeAssetManifest; migratedPassCount: number } {
+  const migratedPassCount = manifest.assets.filter((asset) => asset.status === 'PASS').length;
+  if (migratedPassCount === 0) return { manifest, migratedPassCount: 0 };
+  const now = Date.now();
+  return {
+    migratedPassCount,
+    manifest: {
+      ...manifest,
+      assets: manifest.assets.map((asset) => asset.status === 'PASS'
+        ? { ...asset, status: asset.blobKey ? 'READY' as const : 'EMPTY' as const, approvedAt: null }
+        : asset),
+      savedAt: now,
+    },
+  };
 }
 
 function initializePage(): InitialState {
@@ -65,18 +79,31 @@ function initializePage(): InitialState {
       blueprint: null,
       manifest: null,
       autoCreated: false,
+      migratedPassCount: 0,
     };
   }
 
   const stored = safeParse<KeyframeAssetManifest>(KEYFRAME_ASSET_KEY);
   if (manifestMatchesCurrentBlueprint(stored, blueprint, approval)) {
-    return { ready: true, reason: '', blueprint, manifest: stored, autoCreated: false };
+    const migrated = removeLegacyAssetPass(stored);
+    if (migrated.migratedPassCount > 0) {
+      window.localStorage.setItem(KEYFRAME_ASSET_KEY, JSON.stringify(migrated.manifest));
+    }
+    window.localStorage.removeItem(KEYFRAME_ASSET_APPROVAL_KEY);
+    return {
+      ready: true,
+      reason: '',
+      blueprint,
+      manifest: migrated.manifest,
+      autoCreated: false,
+      migratedPassCount: migrated.migratedPassCount,
+    };
   }
 
   const manifest = buildKeyframeAssetManifest({ draft: blueprint, approval });
   window.localStorage.setItem(KEYFRAME_ASSET_KEY, JSON.stringify(manifest));
   window.localStorage.removeItem(KEYFRAME_ASSET_APPROVAL_KEY);
-  return { ready: true, reason: '', blueprint, manifest, autoCreated: true };
+  return { ready: true, reason: '', blueprint, manifest, autoCreated: true, migratedPassCount: 0 };
 }
 
 async function imageDimensions(blob: Blob): Promise<{ width: number; height: number }> {
@@ -132,9 +159,13 @@ export const KeyframeAssetPage: React.FC = () => {
   const [characters, setCharacters] = useState<CharacterProfile[]>([]);
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [busyShot, setBusyShot] = useState('');
-  const [message, setMessage] = useState(initial.autoCreated && initial.manifest
-    ? `Step 3.1 PASS 已读取，自动创建 ${initial.manifest.assets.length} 个关键帧图片槽位。`
-    : '');
+  const [message, setMessage] = useState(
+    initial.migratedPassCount > 0
+      ? `已迁移旧版 Step 3.2：${initial.migratedPassCount} 个旧人工 PASS 已撤销，最终 PASS 统一移至 Step 3.3 自动 QA + 人工复核。`
+      : initial.autoCreated && initial.manifest
+        ? `Step 3.1 PASS 已读取，自动创建 ${initial.manifest.assets.length} 个关键帧图片槽位。`
+        : '',
+  );
   const [error, setError] = useState('');
   const [capabilities, setCapabilities] = useState({
     keyframeImageEnabled: false,
@@ -146,13 +177,11 @@ export const KeyframeAssetPage: React.FC = () => {
   ), [initial.blueprint]);
 
   const persistManifest = (next: KeyframeAssetManifest) => {
-    window.localStorage.setItem(KEYFRAME_ASSET_KEY, JSON.stringify(next));
-    if (isKeyframeAssetManifestComplete(next)) {
-      window.localStorage.setItem(KEYFRAME_ASSET_APPROVAL_KEY, JSON.stringify(buildKeyframeAssetApproval(next)));
-    } else {
-      window.localStorage.removeItem(KEYFRAME_ASSET_APPROVAL_KEY);
-    }
-    setManifest(next);
+    const migrated = removeLegacyAssetPass(next).manifest;
+    window.localStorage.setItem(KEYFRAME_ASSET_KEY, JSON.stringify(migrated));
+    // Step 3.2 only prepares assets. Final keyframe approval is owned by Step 3.3.
+    window.localStorage.removeItem(KEYFRAME_ASSET_APPROVAL_KEY);
+    setManifest(migrated);
   };
 
   useEffect(() => {
@@ -235,7 +264,7 @@ export const KeyframeAssetPage: React.FC = () => {
       if (!file.type.startsWith('image/')) throw new Error('请选择图片文件。');
       if (file.size > 20 * 1024 * 1024) throw new Error('单张关键帧图片不能超过 20MB。');
       await replaceBlob(shotUid, file, { source: 'upload', fileName: file.name });
-      setMessage(`${manifest.assets.find((item) => item.shotUid === shotUid)?.shotLabel || ''} 已上传，等待人工确认。`);
+      setMessage(`${manifest.assets.find((item) => item.shotUid === shotUid)?.shotLabel || ''} 已上传；请进入 Step 3.3 自动 QA。`);
     } catch (cause: any) {
       setError(cause?.message || String(cause));
     } finally {
@@ -280,7 +309,7 @@ export const KeyframeAssetPage: React.FC = () => {
         model: result.model,
         createdAt: result.generatedAt,
       });
-      setMessage(`${asset.shotLabel} 已生成关键帧，等待人工确认。`);
+      setMessage(`${asset.shotLabel} 已生成关键帧；请进入 Step 3.3 自动 QA。`);
     } catch (cause: any) {
       setError(cause?.message || String(cause));
     } finally {
@@ -293,11 +322,12 @@ export const KeyframeAssetPage: React.FC = () => {
     const next: KeyframeAssetManifest = {
       ...manifest,
       assets: manifest.assets.map((asset) => asset.shotUid === shotUid
-        ? { ...asset, characterId, ...(asset.status === 'PASS' ? { status: 'READY' as const, approvedAt: null } : {}) }
+        ? { ...asset, characterId, status: asset.blobKey ? 'READY' as const : 'EMPTY' as const, approvedAt: null }
         : asset),
       savedAt: Date.now(),
     };
     persistManifest(next);
+    setMessage(`${next.assets.find((asset) => asset.shotUid === shotUid)?.shotLabel || ''} 角色参考已更新；旧 QA（如有）将在 Step 3.3 自动失效。`);
   };
 
   const handleQaChange = (shotUid: string, qaNote: string) => {
@@ -305,27 +335,12 @@ export const KeyframeAssetPage: React.FC = () => {
     persistManifest(updateKeyframeAssetQa(manifest, shotUid, qaNote));
   };
 
-  const handleApprove = (shotUid: string) => {
-    if (!manifest) return;
-    try {
-      const next = approveKeyframeAsset(manifest, shotUid);
-      persistManifest(next);
-      setError('');
-      setMessage(isKeyframeAssetManifestComplete(next)
-        ? 'Step 3.2 全部关键帧图片已人工确认 PASS。'
-        : `${next.assets.find((item) => item.shotUid === shotUid)?.shotLabel || ''} 已确认 PASS。`);
-    } catch (cause: any) {
-      setMessage('');
-      setError(cause?.message || String(cause));
-    }
-  };
-
   if (!initial.ready || !manifest || !initial.blueprint) {
     return (
       <div className="mx-auto max-w-[1380px] space-y-6 px-4 py-6 sm:px-6 lg:px-8">
         <header>
           <div className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-amber-400"><ImageIcon className="h-4 w-4" /> Director Console · Step 3.2</div>
-          <h1 className="text-2xl font-black text-white sm:text-3xl">关键帧图片｜生成 / 上传 / 人工确认</h1>
+          <h1 className="text-2xl font-black text-white sm:text-3xl">关键帧图片｜生成 / 上传</h1>
         </header>
         <section className="rounded-2xl border border-amber-500/25 bg-amber-500/5 p-6">
           <div className="flex items-start gap-3"><LockKeyhole className="mt-0.5 h-5 w-5 text-amber-300" /><div><div className="font-black text-amber-100">Step 3.2 尚未解锁</div><p className="mt-2 text-sm text-amber-100/70">{initial.reason}</p></div></div>
@@ -334,20 +349,20 @@ export const KeyframeAssetPage: React.FC = () => {
     );
   }
 
-  const passCount = manifest.assets.filter((asset) => asset.status === 'PASS').length;
-  const readyCount = manifest.assets.filter((asset) => asset.status === 'READY').length;
+  const preparedCount = manifest.assets.filter((asset) => Boolean(asset.blobKey)).length;
+  const missingCount = manifest.assets.length - preparedCount;
 
   return (
     <div className="mx-auto max-w-[1380px] space-y-6 px-4 py-6 sm:px-6 lg:px-8">
       <header className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <div className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-violet-400"><ImageIcon className="h-4 w-4" /> Director Console · Step 3.2</div>
-          <h1 className="text-2xl font-black text-white sm:text-3xl">关键帧图片｜生成 / 上传 / 人工确认</h1>
-          <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-400">每镜从已 PASS 的 Blueprint 进入同一个图片资产槽位：可上传现成关键帧，也可显式调用 Gemini 生成。图片替换、重新生成或 QA 修改都会取消该镜 PASS。</p>
+          <h1 className="text-2xl font-black text-white sm:text-3xl">关键帧图片｜生成 / 上传</h1>
+          <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-400">Step 3.2 只负责准备逐镜图片资产与角色参考。图片准备完成后进入 Step 3.3 自动 QA；这里不再直接授予关键帧 PASS。</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-bold text-emerald-300">STEP 3.1 · PASS</span>
-          <span className={`rounded-full border px-3 py-1.5 text-xs font-bold ${passCount === manifest.assets.length ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-violet-500/30 bg-violet-500/10 text-violet-300'}`}>STEP 3.2 · {passCount === manifest.assets.length ? 'PASS' : `${passCount}/${manifest.assets.length}`}</span>
+          <span className={`rounded-full border px-3 py-1.5 text-xs font-bold ${missingCount === 0 ? 'border-violet-500/30 bg-violet-500/10 text-violet-200' : 'border-amber-500/30 bg-amber-500/10 text-amber-200'}`}>STEP 3.2 · {missingCount === 0 ? 'ASSETS READY' : `${preparedCount}/${manifest.assets.length}`}</span>
         </div>
       </header>
 
@@ -357,8 +372,8 @@ export const KeyframeAssetPage: React.FC = () => {
 
       <section className="grid gap-3 sm:grid-cols-3">
         <div className="rounded-xl border border-[#2D2D33] bg-[#111114] p-4"><div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">总镜数</div><div data-testid="keyframe-asset-count" className="mt-1 text-2xl font-black text-white">{manifest.assets.length}</div></div>
-        <div className="rounded-xl border border-[#2D2D33] bg-[#111114] p-4"><div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">待确认</div><div className="mt-1 text-2xl font-black text-amber-300">{readyCount}</div></div>
-        <div className="rounded-xl border border-[#2D2D33] bg-[#111114] p-4"><div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">PASS</div><div data-testid="keyframe-asset-pass-count" className="mt-1 text-2xl font-black text-emerald-300">{passCount}</div></div>
+        <div className="rounded-xl border border-[#2D2D33] bg-[#111114] p-4"><div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">已准备</div><div data-testid="keyframe-asset-ready-count" className="mt-1 text-2xl font-black text-violet-300">{preparedCount}</div></div>
+        <div className="rounded-xl border border-[#2D2D33] bg-[#111114] p-4"><div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">缺失图片</div><div className="mt-1 text-2xl font-black text-amber-300">{missingCount}</div></div>
       </section>
 
       {message && <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">{message}</div>}
@@ -376,7 +391,7 @@ export const KeyframeAssetPage: React.FC = () => {
                     ? <img src={previews[asset.shotUid]} alt={`${asset.shotLabel} keyframe`} className="h-full w-full object-cover" />
                     : <div className="flex h-full flex-col items-center justify-center gap-2 text-slate-600"><ImageIcon className="h-8 w-8" /><span className="text-xs">尚无关键帧图片</span></div>}
                 </div>
-                <div className="flex items-center justify-between"><span className="font-mono text-sm font-black text-violet-300">{asset.shotLabel}</span><span className={`text-xs font-black ${asset.status === 'PASS' ? 'text-emerald-300' : asset.status === 'READY' ? 'text-amber-300' : 'text-slate-500'}`}>{asset.status}</span></div>
+                <div className="flex items-center justify-between"><span className="font-mono text-sm font-black text-violet-300">{asset.shotLabel}</span><span className={`text-xs font-black ${asset.blobKey ? 'text-violet-300' : 'text-slate-500'}`}>{asset.blobKey ? 'ASSET READY' : 'EMPTY'}</span></div>
                 <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-600/40 bg-slate-800/40 px-3 py-2.5 text-sm font-bold text-slate-200 hover:bg-slate-800/70">
                   <Upload className="h-4 w-4" /> 上传 9:16 图片
                   <input type="file" accept="image/*" className="hidden" disabled={busy} onChange={(event) => handleUpload(asset.shotUid, event.target.files?.[0] || null)} />
@@ -388,9 +403,9 @@ export const KeyframeAssetPage: React.FC = () => {
                 <div className="rounded-xl border border-[#2D2D33] bg-[#09090B] p-3"><div className="mb-1 text-[11px] font-bold uppercase tracking-wider text-slate-500">Blueprint Prompt</div><p className="text-xs leading-5 text-slate-300">{blueprint?.imagePrompt || asset.blueprintPrompt}</p></div>
 
                 <div>
-                  <label className="mb-1.5 block text-xs font-bold text-slate-400">生成参考角色（可选）</label>
+                  <label className="mb-1.5 block text-xs font-bold text-slate-400">角色母板（生成 + Step 3.3 身份 QA）</label>
                   <select value={asset.characterId} onChange={(event) => handleCharacterChange(asset.shotUid, event.target.value)} className="w-full rounded-xl border border-[#303036] bg-[#09090B] px-3 py-2.5 text-sm text-white">
-                    <option value="">不附加角色参考图</option>
+                    <option value="">不附加角色母板（Step 3.3 不评估身份分）</option>
                     {characters.map((character) => <option key={character.id} value={character.id}>{character.name}</option>)}
                   </select>
                 </div>
@@ -400,12 +415,12 @@ export const KeyframeAssetPage: React.FC = () => {
                 </button>
 
                 <div>
-                  <label className="mb-1.5 block text-xs font-bold text-slate-400">人工 QA 备注</label>
-                  <textarea value={asset.qaNote} onChange={(event) => handleQaChange(asset.shotUid, event.target.value)} rows={2} placeholder="检查人物身份、构图、连续性、肢体、道具、9:16…" className="w-full resize-y rounded-xl border border-[#303036] bg-[#09090B] px-3 py-2.5 text-sm text-white" />
+                  <label className="mb-1.5 block text-xs font-bold text-slate-400">资产准备备注（可选）</label>
+                  <textarea value={asset.qaNote} onChange={(event) => handleQaChange(asset.shotUid, event.target.value)} rows={2} placeholder="记录该镜生成/上传时需要保留的信息；正式 QA 在 Step 3.3。" className="w-full resize-y rounded-xl border border-[#303036] bg-[#09090B] px-3 py-2.5 text-sm text-white" />
                 </div>
 
                 <div className="flex flex-wrap items-center gap-3">
-                  <button disabled={asset.status === 'EMPTY' || busy} onClick={() => handleApprove(asset.shotUid)} className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-2.5 text-sm font-black text-emerald-200 disabled:cursor-not-allowed disabled:opacity-40"><CheckCircle2 className="h-4 w-4" /> 确认该镜 PASS</button>
+                  <span className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-black ${asset.blobKey ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-200' : 'border-slate-700 bg-slate-900 text-slate-500'}`}><ArrowRight className="h-4 w-4" /> {asset.blobKey ? '下一步：Step 3.3 自动 QA' : '先准备图片资产'}</span>
                   {asset.source && <span className="text-xs text-slate-500">来源：{asset.source === 'upload' ? '上传' : `${asset.provider} / ${asset.model}`}</span>}
                 </div>
               </div>
@@ -414,7 +429,7 @@ export const KeyframeAssetPage: React.FC = () => {
         })}
       </section>
 
-      <footer className="rounded-2xl border border-[#2D2D33] bg-[#111114] p-4 text-xs leading-5 text-slate-500">Step 3.2 只在全部 S01～Sn 图片均人工 PASS 后形成整体 PASS。后续视频阶段必须读取这一门禁，不得使用 EMPTY / READY 图片。</footer>
+      <footer className="rounded-2xl border border-[#2D2D33] bg-[#111114] p-4 text-xs leading-5 text-slate-500">Step 3.2 只形成“图片资产已准备”状态，不授予 PASS。最终关键帧门禁统一由 Step 3.3：AUTO QA PASS + 人工复核 PASS 产生；视频阶段不得绕过 Step 3.3。</footer>
     </div>
   );
 };

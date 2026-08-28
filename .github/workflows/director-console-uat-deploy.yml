@@ -41,6 +41,8 @@ env:
   DIRECTOR_STORYBOARD_LOCATION: us-central1
   DIRECTOR_KEYFRAME_IMAGE_MODEL: gemini-3.1-flash-image
   DIRECTOR_KEYFRAME_IMAGE_LOCATION: global
+  DIRECTOR_KEYFRAME_QA_MODEL: gemini-2.5-flash
+  DIRECTOR_KEYFRAME_QA_LOCATION: global
 
 jobs:
   deploy:
@@ -99,7 +101,7 @@ jobs:
             --concurrency=8 \
             --min-instances=0 \
             --max-instances=1 \
-            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA,PUBLIC_PREVIEW_READ_ONLY=1,DIRECTOR_PRODUCTION_RUN_ENABLED=0,DIRECTOR_STORYBOARD_GEMINI_ENABLED=1,DIRECTOR_STORYBOARD_MODEL=$DIRECTOR_STORYBOARD_MODEL,DIRECTOR_STORYBOARD_LOCATION=$DIRECTOR_STORYBOARD_LOCATION,DIRECTOR_KEYFRAME_IMAGE_ENABLED=1,DIRECTOR_KEYFRAME_IMAGE_MODEL=$DIRECTOR_KEYFRAME_IMAGE_MODEL,DIRECTOR_KEYFRAME_IMAGE_LOCATION=$DIRECTOR_KEYFRAME_IMAGE_LOCATION,P0_DISABLE_STARTUP_RECOVERY=1" \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA,PUBLIC_PREVIEW_READ_ONLY=1,DIRECTOR_PRODUCTION_RUN_ENABLED=0,DIRECTOR_STORYBOARD_GEMINI_ENABLED=1,DIRECTOR_STORYBOARD_MODEL=$DIRECTOR_STORYBOARD_MODEL,DIRECTOR_STORYBOARD_LOCATION=$DIRECTOR_STORYBOARD_LOCATION,DIRECTOR_KEYFRAME_IMAGE_ENABLED=1,DIRECTOR_KEYFRAME_IMAGE_MODEL=$DIRECTOR_KEYFRAME_IMAGE_MODEL,DIRECTOR_KEYFRAME_IMAGE_LOCATION=$DIRECTOR_KEYFRAME_IMAGE_LOCATION,DIRECTOR_KEYFRAME_QA_ENABLED=1,DIRECTOR_KEYFRAME_QA_MODEL=$DIRECTOR_KEYFRAME_QA_MODEL,DIRECTOR_KEYFRAME_QA_LOCATION=$DIRECTOR_KEYFRAME_QA_LOCATION,P0_DISABLE_STARTUP_RECOVERY=1" \
             --quiet
 
           SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
@@ -124,12 +126,14 @@ jobs:
           grep -q '"storyboardModel":"gemini-2.5-flash"' capabilities.json
           grep -q '"keyframeImageEnabled":true' capabilities.json
           grep -q '"keyframeImageModel":"gemini-3.1-flash-image"' capabilities.json
+          grep -q '"keyframeQaEnabled":true' capabilities.json
+          grep -q '"keyframeQaModel":"gemini-2.5-flash"' capabilities.json
 
           curl -fsS "$SERVICE_URL/api/episodes?limit=1" | tee episodes.json
           grep -q '"ok":true' episodes.json
 
-          # Intentionally do not call paid generation endpoints here.
-          # Deployment smoke must never invoke Storyboard Gemini or Keyframe Image Gemini.
+          # Intentionally do not call paid Director provider endpoints here.
+          # Deployment smoke must never invoke Storyboard, Keyframe Image, or Keyframe QA Gemini.
 
       - name: Deployment summary
         shell: bash
@@ -143,6 +147,7 @@ jobs:
             echo "- Public URL: ${{ steps.deploy.outputs.service_url }}"
             echo "- Storyboard provider: Vertex AI Gemini / \`$DIRECTOR_STORYBOARD_MODEL\`"
             echo "- Keyframe image provider: Vertex AI Gemini / \`$DIRECTOR_KEYFRAME_IMAGE_MODEL\`"
-            echo '- Preview safety: Episode/Veo production disabled; Storyboard and single-shot Keyframe generation require explicit intent and rate limiting'
-            echo '- Deployment smoke does not invoke paid Gemini generation endpoints'
+            echo "- Keyframe QA provider: Vertex AI Gemini / \`$DIRECTOR_KEYFRAME_QA_MODEL\`"
+            echo '- Preview safety: Episode/Veo production disabled; Storyboard, Keyframe Image, and Keyframe QA require explicit intent and rate limiting'
+            echo '- Deployment smoke does not invoke paid Gemini generation/QA endpoints'
           } >> "$GITHUB_STEP_SUMMARY"
