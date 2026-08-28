@@ -60,7 +60,8 @@ describe('Director Console source contract', () => {
     expect(workflow).toContain('PUBLIC_PREVIEW_READ_ONLY=1');
     expect(workflow).toContain('DIRECTOR_PRODUCTION_RUN_ENABLED=0');
     expect(workflow).toContain('DIRECTOR_STORYBOARD_GEMINI_ENABLED=1');
-    expect(workflow).toContain('DIRECTOR_STORYBOARD_MODEL=gemini-2.5-flash');
+    expect(workflow).toContain('DIRECTOR_STORYBOARD_MODEL: gemini-2.5-flash');
+    expect(workflow).toContain('DIRECTOR_STORYBOARD_MODEL=$DIRECTOR_STORYBOARD_MODEL');
     expect(workflow).toContain('P0_DISABLE_STARTUP_RECOVERY=1');
     expect(workflow).toContain('/api/director/capabilities');
     expect(workflow).not.toContain('/api/director/storyboard/generate" | tee');
