@@ -89,14 +89,31 @@ function initializePage(): PageState {
     ? syncKeyframeQaManifest({ current: storedQa, blueprint, assets })
     : { manifest: buildKeyframeQaManifest({ blueprint, assets }), invalidatedShotUids: [] as string[] };
 
-  if (synced.invalidatedShotUids.length > 0) {
-    for (const shotUid of synced.invalidatedShotUids) {
-      assets = revokeKeyframeAssetPass(assets, shotUid);
+  const revokedShotUids = new Set(synced.invalidatedShotUids);
+  const authorizedPassShotUids = new Set(
+    synced.manifest.items
+      .filter((item) => item.autoStatus === 'PASS' && item.report?.pass === true && item.humanDecision === 'APPROVED')
+      .map((item) => item.shotUid),
+  );
+
+  // Fail closed on legacy Step 3.2 PASS state. An asset PASS may survive only when
+  // Step 3.3 has a current AUTO PASS + human approval bound to the same asset signature.
+  for (const asset of assets.assets) {
+    if (asset.status === 'PASS' && !authorizedPassShotUids.has(asset.shotUid)) {
+      assets = revokeKeyframeAssetPass(assets, asset.shotUid);
+      revokedShotUids.add(asset.shotUid);
     }
-    persistAssets(assets);
+  }
+
+  for (const shotUid of synced.invalidatedShotUids) {
+    assets = revokeKeyframeAssetPass(assets, shotUid);
+  }
+  persistAssets(assets);
+
+  window.localStorage.setItem(KEYFRAME_QA_KEY, JSON.stringify(synced.manifest));
+  if (!isKeyframeQaComplete(synced.manifest) || revokedShotUids.size > 0) {
     window.localStorage.removeItem(KEYFRAME_QA_APPROVAL_KEY);
   }
-  window.localStorage.setItem(KEYFRAME_QA_KEY, JSON.stringify(synced.manifest));
 
   return {
     ready: true,
@@ -104,7 +121,7 @@ function initializePage(): PageState {
     blueprint,
     assets,
     qa: synced.manifest,
-    invalidatedCount: synced.invalidatedShotUids.length,
+    invalidatedCount: revokedShotUids.size,
   };
 }
 
@@ -167,7 +184,7 @@ export const KeyframeQaPage: React.FC = () => {
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [busyShot, setBusyShot] = useState('');
   const [batchBusy, setBatchBusy] = useState(false);
-  const [message, setMessage] = useState(initial.invalidatedCount > 0 ? `检测到 ${initial.invalidatedCount} 个旧 QA 与当前图片/相邻镜输入不一致，已自动失效。` : '');
+  const [message, setMessage] = useState(initial.invalidatedCount > 0 ? `检测到 ${initial.invalidatedCount} 个旧 PASS / QA 与当前 Step 3.3 门禁不一致，已自动失效。` : '');
   const [error, setError] = useState('');
   const [capabilities, setCapabilities] = useState({ keyframeQaEnabled: false, keyframeQaModel: '' });
 
@@ -269,7 +286,8 @@ export const KeyframeQaPage: React.FC = () => {
 
   const applyReport = (shotUid: string, report: KeyframeQaReport, currentQa: KeyframeQaManifest, currentAssets: KeyframeAssetManifest) => {
     const nextQa = attachKeyframeQaReport(currentQa, shotUid, report);
-    const nextAssets = report.pass ? revokeKeyframeAssetPass(currentAssets, shotUid) : revokeKeyframeAssetPass(currentAssets, shotUid);
+    // Every re-run invalidates prior human PASS until the new report is reviewed.
+    const nextAssets = revokeKeyframeAssetPass(currentAssets, shotUid);
     return { nextQa, nextAssets };
   };
 
