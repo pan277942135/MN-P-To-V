@@ -10,6 +10,7 @@ on:
       - 'src/pages/GeminiStoryboardDirectorPage.tsx'
       - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/services/director/geminiStoryboardClient.ts'
+      - 'src/services/director/chatgptStoryboardImport.ts'
       - 'src/server/services/geminiStoryboardService.ts'
       - 'src/pages/DirectorConsolePage.tsx'
       - 'episode-server.ts'
@@ -19,6 +20,8 @@ on:
       - 'src/__tests__/geminiStoryboardApi.test.ts'
       - 'src/__tests__/geminiStoryboardService.test.ts'
       - 'src/__tests__/geminiStoryboardDirectorPage.test.tsx'
+      - 'src/__tests__/chatgptStoryboardImport.test.ts'
+      - 'src/__tests__/chatgptStoryboardImportDialog.test.tsx'
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
       - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'src/__tests__/manualStoryboardDirectorPage.test.tsx'
@@ -38,6 +41,7 @@ on:
       - 'src/pages/GeminiStoryboardDirectorPage.tsx'
       - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/services/director/geminiStoryboardClient.ts'
+      - 'src/services/director/chatgptStoryboardImport.ts'
       - 'src/server/services/geminiStoryboardService.ts'
       - 'src/pages/DirectorConsolePage.tsx'
       - 'episode-server.ts'
@@ -47,6 +51,8 @@ on:
       - 'src/__tests__/geminiStoryboardApi.test.ts'
       - 'src/__tests__/geminiStoryboardService.test.ts'
       - 'src/__tests__/geminiStoryboardDirectorPage.test.tsx'
+      - 'src/__tests__/chatgptStoryboardImport.test.ts'
+      - 'src/__tests__/chatgptStoryboardImportDialog.test.tsx'
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
       - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'src/__tests__/manualStoryboardDirectorPage.test.tsx'
@@ -88,6 +94,8 @@ jobs:
           src/__tests__/autoStoryboardDirectorPage.test.tsx
           src/__tests__/geminiStoryboardService.test.ts
           src/__tests__/geminiStoryboardDirectorPage.test.tsx
+          src/__tests__/chatgptStoryboardImport.test.ts
+          src/__tests__/chatgptStoryboardImportDialog.test.tsx
           src/__tests__/geminiStoryboardApi.test.ts
           src/__tests__/episodeProductionApi.test.ts
           src/__tests__/episodeProductionRunner.test.ts

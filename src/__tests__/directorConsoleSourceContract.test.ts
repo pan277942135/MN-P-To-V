@@ -6,12 +6,13 @@ const root = path.resolve(__dirname, '../..');
 const read = (file: string) => fs.readFileSync(path.join(root, file), 'utf8');
 
 describe('Director Console source contract', () => {
-  it('makes Vertex Gemini Script → Storyboard the Director surface while preserving local/manual fallback and production monitor', () => {
+  it('keeps Vertex Gemini as the automatic Storyboard path while adding ChatGPT manual import and preserving production monitor', () => {
     const app = read('src/App.tsx');
     const sidebar = read('src/components/Sidebar.tsx');
     const geminiDirector = read('src/pages/GeminiStoryboardDirectorPage.tsx');
     const geminiClient = read('src/services/director/geminiStoryboardClient.ts');
     const geminiServer = read('src/server/services/geminiStoryboardService.ts');
+    const chatgptImport = read('src/services/director/chatgptStoryboardImport.ts');
     const localGenerator = read('src/services/director/localStoryboardGenerator.ts');
     const autoDirectorCheckpoint = read('src/pages/AutoStoryboardDirectorPage.tsx');
     const legacyManualDirector = read('src/pages/ScriptDirectorPage.tsx');
@@ -27,11 +28,13 @@ describe('Director Console source contract', () => {
     expect(sidebar).toContain("label: '生产监控'");
     expect(sidebar).toContain("'director' | 'monitor' | 'studio'");
 
-    expect(geminiDirector).toContain('导演台｜Gemini Script → Storyboard');
+    expect(geminiDirector).toContain('导演台｜Script / ChatGPT → Storyboard');
     expect(geminiDirector).toContain('Gemini 生成分镜');
+    expect(geminiDirector).toContain('手动录入分镜');
+    expect(geminiDirector).toContain('导入并拆分 Shot');
     expect(geminiDirector).toContain('使用本地备用拆镜');
     expect(geminiDirector).toContain('确认分镜');
-    expect(geminiDirector).toContain('GEMINI DIRECTOR');
+    expect(geminiDirector).toContain('GEMINI + CHATGPT IMPORT');
     expect(geminiDirector).toContain("const DRAFT_KEY = 'zaojing_director_v01_brief'");
     expect(geminiDirector).toContain("const STORYBOARD_KEY = 'zaojing_director_v02_storyboard'");
     expect(geminiDirector).toContain('保存分镜修改');
@@ -42,6 +45,10 @@ describe('Director Console source contract', () => {
     expect(geminiServer).toContain('vertexai: true');
     expect(geminiServer).toContain("responseMimeType: 'application/json'");
     expect(geminiServer).toContain('responseJsonSchema');
+
+    expect(chatgptImport).toContain("'zaojing.storyboard.v1'");
+    expect(chatgptImport).toContain('parseChatGPTStoryboardImport');
+    expect(chatgptImport).toContain('CHATGPT_STORYBOARD_OUTPUT_INSTRUCTION');
     expect(localGenerator).toContain('generateLocalStoryboard');
 
     expect(autoDirectorCheckpoint).toContain('LOCAL DIRECTOR ENGINE');
