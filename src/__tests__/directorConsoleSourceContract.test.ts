@@ -6,14 +6,16 @@ const root = path.resolve(__dirname, '../..');
 const read = (file: string) => fs.readFileSync(path.join(root, file), 'utf8');
 
 describe('Director Console source contract', () => {
-  it('makes manual storyboard breakdown the Director surface while preserving Step 1, production monitor and single-shot Studio', () => {
+  it('makes Script → Storyboard auto breakdown the Director surface while preserving manual correction, production monitor and Studio', () => {
     const app = read('src/App.tsx');
     const sidebar = read('src/components/Sidebar.tsx');
-    const scriptDirector = read('src/pages/ScriptDirectorPage.tsx');
+    const autoDirector = read('src/pages/AutoStoryboardDirectorPage.tsx');
+    const generator = read('src/services/director/localStoryboardGenerator.ts');
+    const legacyManualDirector = read('src/pages/ScriptDirectorPage.tsx');
     const monitor = read('src/pages/DirectorConsolePage.tsx');
 
     expect(app).toContain("useState<NavTab>('director')");
-    expect(app).toContain('<ScriptDirectorPage />');
+    expect(app).toContain('<AutoStoryboardDirectorPage />');
     expect(app).toContain("activeTab === 'monitor'");
     expect(app).toContain('<DirectorConsolePage />');
     expect(app).toContain('<StudioPage');
@@ -22,15 +24,20 @@ describe('Director Console source contract', () => {
     expect(sidebar).toContain("label: '生产监控'");
     expect(sidebar).toContain("'director' | 'monitor' | 'studio'");
 
-    expect(scriptDirector).toContain('导演台｜人工分镜拆解');
-    expect(scriptDirector).toContain('STEP 1 · 已验收');
-    expect(scriptDirector).toContain('STEP 2 · 待验收');
-    expect(scriptDirector).toContain("const DRAFT_KEY = 'zaojing_director_v01_brief'");
-    expect(scriptDirector).toContain("const STORYBOARD_KEY = 'zaojing_director_v02_storyboard'");
-    expect(scriptDirector).toContain('新增镜头');
-    expect(scriptDirector).toContain('保存分镜');
-    expect(scriptDirector).toContain('系统不会自动替你生成固定的 S01–S06');
+    expect(autoDirector).toContain('导演台｜Script → Storyboard 自动拆镜');
+    expect(autoDirector).toContain('生成分镜');
+    expect(autoDirector).toContain('重新生成分镜');
+    expect(autoDirector).toContain('确认分镜');
+    expect(autoDirector).toContain('LOCAL DIRECTOR ENGINE');
+    expect(autoDirector).toContain("const DRAFT_KEY = 'zaojing_director_v01_brief'");
+    expect(autoDirector).toContain("const STORYBOARD_KEY = 'zaojing_director_v02_storyboard'");
+    expect(autoDirector).toContain('新增镜头');
+    expect(autoDirector).toContain('保存分镜修改');
+    expect(generator).toContain('generateLocalStoryboard');
+    expect(generator).not.toContain('@google/genai');
+    expect(generator).not.toContain('fetch(');
 
+    expect(legacyManualDirector).toContain('导演台｜人工分镜拆解');
     expect(monitor).toContain('整集导演控制台');
     expect(monitor).toContain('S01–S06 Production Board');
     expect(monitor).toContain('Durable GCS');

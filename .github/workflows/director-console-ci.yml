@@ -6,6 +6,8 @@ on:
       - 'src/App.tsx'
       - 'src/components/Sidebar.tsx'
       - 'src/pages/ScriptDirectorPage.tsx'
+      - 'src/pages/AutoStoryboardDirectorPage.tsx'
+      - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/pages/DirectorConsolePage.tsx'
       - 'episode-server.ts'
       - 'src/server/services/episodeProductionRunner.ts'
@@ -14,6 +16,8 @@ on:
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
       - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'src/__tests__/manualStoryboardDirectorPage.test.tsx'
+      - 'src/__tests__/autoStoryboardGenerator.test.ts'
+      - 'src/__tests__/autoStoryboardDirectorPage.test.tsx'
       - 'Dockerfile'
       - '.github/workflows/director-console-ci.yml'
       - '.github/workflows/director-console-uat-deploy.yml'
@@ -24,6 +28,8 @@ on:
       - 'src/App.tsx'
       - 'src/components/Sidebar.tsx'
       - 'src/pages/ScriptDirectorPage.tsx'
+      - 'src/pages/AutoStoryboardDirectorPage.tsx'
+      - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/pages/DirectorConsolePage.tsx'
       - 'episode-server.ts'
       - 'src/server/services/episodeProductionRunner.ts'
@@ -32,6 +38,8 @@ on:
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
       - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'src/__tests__/manualStoryboardDirectorPage.test.tsx'
+      - 'src/__tests__/autoStoryboardGenerator.test.ts'
+      - 'src/__tests__/autoStoryboardDirectorPage.test.tsx'
       - 'Dockerfile'
       - '.github/workflows/director-console-ci.yml'
       - '.github/workflows/director-console-uat-deploy.yml'
@@ -64,6 +72,8 @@ jobs:
           bunx vitest run
           src/__tests__/scriptDirectorPage.test.tsx
           src/__tests__/manualStoryboardDirectorPage.test.tsx
+          src/__tests__/autoStoryboardGenerator.test.ts
+          src/__tests__/autoStoryboardDirectorPage.test.tsx
           src/__tests__/episodeProductionApi.test.ts
           src/__tests__/episodeProductionRunner.test.ts
           src/__tests__/p07EpisodeDurableInput.test.ts
