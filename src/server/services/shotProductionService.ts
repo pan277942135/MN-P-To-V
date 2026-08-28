@@ -9,11 +9,16 @@ import {
   type ShotRunnerDependencies,
 } from '../../services/episode/shotIdentitySafeRunner';
 import { firestoreShotRepository } from '../repositories/firestoreShotRepository';
+import {
+  KeyframeInputResolutionError,
+  keyframeInputResolver,
+  type KeyframeInputResolverLike,
+} from './keyframeInputResolver';
 
 export interface ShotProductionRunInput {
   episodeId: string;
   shotId: string;
-  openaiFileRef: ChatGptConversationFileRef;
+  openaiFileRef?: ChatGptConversationFileRef;
   idempotencyKey: string;
   prompt?: string;
 }
@@ -104,11 +109,6 @@ function requireSupportedShotId(shotId: string): void {
   }
 }
 
-function fileRefId(fileRef: ChatGptConversationFileRef): string | undefined {
-  if (typeof fileRef === 'string') return fileRef.trim() || undefined;
-  return String(fileRef?.id || '').trim() || undefined;
-}
-
 function buildShotPrompt(shot: ShotSpec, override?: string): string {
   const requested = String(override || '').trim();
   if (requested) return requested;
@@ -194,13 +194,14 @@ function runnerFactoryFromEnvironment(): ShotRunnerFactory {
 export function createDefaultShotProductionService(
   repository: ShotProductionShotRepository = firestoreShotRepository,
 ): ShotProductionService {
-  return new ShotProductionService(repository, runnerFactoryFromEnvironment());
+  return new ShotProductionService(repository, runnerFactoryFromEnvironment(), keyframeInputResolver);
 }
 
 export class ShotProductionService implements ShotProductionServiceLike {
   constructor(
     private readonly repository: ShotProductionShotRepository,
     private readonly runnerFactory: ShotRunnerFactory,
+    private readonly inputResolver: KeyframeInputResolverLike = keyframeInputResolver,
   ) {}
 
   public async run(input: ShotProductionRunInput): Promise<ShotProductionRunResult> {
@@ -276,15 +277,22 @@ export class ShotProductionService implements ShotProductionServiceLike {
         409,
       );
     }
-    const sourceId = fileRefId(input.openaiFileRef);
-    if (shot.keyframe.sourceFileId && sourceId && shot.keyframe.sourceFileId !== sourceId) {
-      throw new ShotProductionError(
-        codeFor(shotId, 'KEYFRAME_SOURCE_MISMATCH'),
-        `上传图片不是当前 ${shotId} 已批准的关键帧来源。`,
-        409,
-      );
+
+    let keyframeInput;
+    try {
+      keyframeInput = await this.inputResolver.resolve({
+        shot,
+        openaiFileRef: input.openaiFileRef,
+      });
+    } catch (error) {
+      if (error instanceof KeyframeInputResolutionError) {
+        throw new ShotProductionError(error.code, error.message, error.statusCode);
+      }
+      throw error;
     }
 
+    // Input resolution and integrity checks must finish before the durable provider intent
+    // reservation. This keeps corrupt/missing keyframes strictly pre-provider.
     await this.repository.prepareVideoExecution({ episodeId, shotId, idempotencyKey });
     let taskBound = false;
 
@@ -304,7 +312,7 @@ export class ShotProductionService implements ShotProductionServiceLike {
       const result = await runner.run({
         episodeId,
         shotId,
-        openaiFileRef: input.openaiFileRef,
+        keyframeInput,
         idempotencyKey,
         prompt: buildShotPrompt(shot, input.prompt),
         durationSeconds: shot.durationSeconds,

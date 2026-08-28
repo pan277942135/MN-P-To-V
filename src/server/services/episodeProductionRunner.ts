@@ -3,6 +3,7 @@ import type { EpisodeSpec, EpisodeStatus, ShotSpec } from '../../domain/episode/
 import type { ChatGptConversationFileRef } from '../../services/episode/shotIdentitySafeRunner';
 import { firestoreEpisodeRepository } from '../repositories/firestoreEpisodeRepository';
 import { firestoreShotRepository } from '../repositories/firestoreShotRepository';
+import { hasCompleteDurableKeyframeAsset } from './keyframeInputResolver';
 import {
   createDefaultShotProductionService,
   type ShotProductionRunResult,
@@ -137,6 +138,13 @@ function reviewReason(shot: ShotSpec): string | null {
   return null;
 }
 
+function hasDurableLocation(shot: ShotSpec): boolean {
+  return Boolean(
+    String(shot.keyframe.outputBucket || '').trim() ||
+    String(shot.keyframe.outputObjectPath || '').trim(),
+  );
+}
+
 export class EpisodeProductionRunner {
   constructor(
     private readonly episodeRepository: EpisodeProductionEpisodeRepository = firestoreEpisodeRepository,
@@ -242,7 +250,20 @@ export class EpisodeProductionRunner {
       }
 
       const runtimeInput = isV0ShotId(shot.shotId) ? input.shots?.[shot.shotId] : undefined;
-      if (!runtimeInput?.openaiFileRef) {
+      const durableReady = hasCompleteDurableKeyframeAsset(shot);
+      if (hasDurableLocation(shot) && !durableReady) {
+        episode = await this.persistState(episode, 'REVIEW', shot.shotId);
+        return {
+          episodeId,
+          episodeStatus: episode.status,
+          progress: computeProgress(shots, shot.shotId),
+          paused: true,
+          reasonCode: 'KEYFRAME_DURABLE_ASSET_INVALID',
+          message: `${shot.shotId} durable GCS 关键帧元数据不完整，禁止降级绕过。`,
+          lastShotResult,
+        };
+      }
+      if (!durableReady && !runtimeInput?.openaiFileRef) {
         episode = await this.persistState(episode, 'REVIEW', shot.shotId);
         return {
           episodeId,
@@ -250,7 +271,7 @@ export class EpisodeProductionRunner {
           progress: computeProgress(shots, shot.shotId),
           paused: true,
           reasonCode: 'OPENAI_FILE_REF_REQUIRED',
-          message: `${shot.shotId} 需要当前可用的 ChatGPT/OpenAI 文件引用后才能进入 Identity Safe Video。`,
+          message: `${shot.shotId} 没有 durable GCS 关键帧；legacy Shot 仍需要当前可用的 ChatGPT/OpenAI 文件引用。`,
           lastShotResult,
         };
       }
@@ -259,7 +280,7 @@ export class EpisodeProductionRunner {
       // Episode runner from creating a second provider intent for an active Shot.
       const idempotencyKey =
         shot.video.idempotencyKey ||
-        String(runtimeInput.idempotencyKey || '').trim() ||
+        String(runtimeInput?.idempotencyKey || '').trim() ||
         stableShotIdempotencyKey(episodeId, shot);
 
       episode = await this.persistState(episode, 'PRODUCTION', shot.shotId);
@@ -268,9 +289,9 @@ export class EpisodeProductionRunner {
         lastShotResult = await this.shotProductionService.run({
           episodeId,
           shotId: shot.shotId,
-          openaiFileRef: runtimeInput.openaiFileRef,
+          openaiFileRef: runtimeInput?.openaiFileRef,
           idempotencyKey,
-          prompt: runtimeInput.prompt,
+          prompt: runtimeInput?.prompt,
         });
       } catch (error: any) {
         const durableAfterError = await this.currentShots(episodeId);
