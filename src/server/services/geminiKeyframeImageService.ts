@@ -183,14 +183,26 @@ export class GeminiKeyframeImageService implements KeyframeImageGeneratorLike {
   }
 }
 
-export function createDefaultGeminiKeyframeImageService(): GeminiKeyframeImageService {
-  const project = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || '';
-  const location = process.env.DIRECTOR_KEYFRAME_IMAGE_LOCATION || 'global';
-  const model = process.env.DIRECTOR_KEYFRAME_IMAGE_MODEL || 'gemini-3.1-flash-image';
-  const client = new GoogleGenAI({
-    vertexai: true,
-    project,
-    location,
-  }) as unknown as GeminiImageClientLike;
-  return new GeminiKeyframeImageService(client, model);
+export function createDefaultGeminiKeyframeImageService(): KeyframeImageGeneratorLike {
+  let service: GeminiKeyframeImageService | null = null;
+
+  return {
+    async generate(input: KeyframeImageGenerationInput) {
+      // Keep provider construction inside the explicit generation call boundary.
+      // App startup, capability reads, CI, and unrelated Episode/Storyboard tests must
+      // never require Vertex credentials or initialize a paid image provider client.
+      if (!service) {
+        const project = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || '';
+        const location = process.env.DIRECTOR_KEYFRAME_IMAGE_LOCATION || 'global';
+        const model = process.env.DIRECTOR_KEYFRAME_IMAGE_MODEL || 'gemini-3.1-flash-image';
+        const client = new GoogleGenAI({
+          vertexai: true,
+          project,
+          location,
+        }) as unknown as GeminiImageClientLike;
+        service = new GeminiKeyframeImageService(client, model);
+      }
+      return service.generate(input);
+    },
+  };
 }
