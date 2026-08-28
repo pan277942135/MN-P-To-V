@@ -1,0 +1,135 @@
+name: Director Console UAT Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'episode-server.ts'
+      - 'server.ts'
+      - 'package.json'
+      - 'bun.lock'
+      - 'vite.config.ts'
+      - 'index.html'
+      - 'Dockerfile'
+      - '.github/workflows/director-console-uat-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Git ref to deploy'
+        required: true
+        default: 'main'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: xp-vertex-project
+  REGION: us-central1
+  GAR_REPO: zaojing
+  SERVICE: zaojing-director-console-uat
+  WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
+  DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
+  RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
+  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+  FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
+  VEO_MODEL_ID: veo-3.1-fast-generate-001
+  IDENTITY_QA_MODEL: gemini-2.5-flash
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout requested source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.sha }}
+
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+          create_credentials_file: true
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Build and push formal React Studio image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$GAR_REPO/$SERVICE:$SOURCE_SHA"
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker build -f Dockerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy read-only Director Console preview
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE='${{ steps.image.outputs.image }}'
+          SOURCE_SHA='${{ steps.image.outputs.source_sha }}'
+          gcloud run deploy "$SERVICE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --platform=managed \
+            --image="$IMAGE" \
+            --service-account="$RUNTIME_SA" \
+            --allow-unauthenticated \
+            --no-iap \
+            --cpu=2 \
+            --memory=3Gi \
+            --timeout=900 \
+            --concurrency=8 \
+            --min-instances=0 \
+            --max-instances=2 \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA,PUBLIC_PREVIEW_READ_ONLY=1,DIRECTOR_PRODUCTION_RUN_ENABLED=0,P0_DISABLE_STARTUP_RECOVERY=1" \
+            --quiet
+
+          SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+          REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
+          echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify public React page and safe Director API
+        shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+        run: |
+          set -euo pipefail
+          ROOT_STATUS="$(curl -sS -o root.html -w '%{http_code}' "$SERVICE_URL/")"
+          test "$ROOT_STATUS" = '200'
+          grep -q 'id="root"' root.html
+
+          curl -fsS "$SERVICE_URL/api/director/capabilities" | tee capabilities.json
+          grep -q '"readOnlyPreview":true' capabilities.json
+          grep -q '"productionRunEnabled":false' capabilities.json
+
+          curl -fsS "$SERVICE_URL/api/episodes?limit=1" | tee episodes.json
+          grep -q '"ok":true' episodes.json
+
+      - name: Deployment summary
+        shell: bash
+        run: |
+          {
+            echo '## Director Console UAT ready'
+            echo ''
+            echo "- Source commit: \`${{ steps.image.outputs.source_sha }}\`"
+            echo "- Cloud Run service: \`$SERVICE\`"
+            echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
+            echo "- Public URL: ${{ steps.deploy.outputs.service_url }}"
+            echo '- Image entrypoint: formal `Dockerfile` (`vite build` + `episode-server.ts`)'
+            echo '- Preview safety: read-only, provider execution disabled, startup recovery disabled'
+          } >> "$GITHUB_STEP_SUMMARY"
