@@ -3,7 +3,10 @@ name: Director Console CI
 on:
   pull_request:
     paths:
+      - 'package.json'
+      - 'director-server.ts'
       - 'src/App.tsx'
+      - 'src/components/DirectorCloudPersistenceProvider.tsx'
       - 'src/components/Sidebar.tsx'
       - 'src/pages/ScriptDirectorPage.tsx'
       - 'src/pages/AutoStoryboardDirectorPage.tsx'
@@ -22,6 +25,11 @@ on:
       - 'src/services/director/keyframeQa.ts'
       - 'src/services/director/geminiKeyframeQaClient.ts'
       - 'src/services/director/videoBlueprint.ts'
+      - 'src/services/director/directorCloudPersistence.ts'
+      - 'src/server/repositories/firestoreDirectorProjectRepository.ts'
+      - 'src/server/storage/directorGcsStore.ts'
+      - 'src/server/services/directorCloudPersistenceService.ts'
+      - 'src/server/services/directorCloudPersistenceRouter.ts'
       - 'src/server/services/geminiStoryboardService.ts'
       - 'src/server/services/geminiKeyframeImageService.ts'
       - 'src/server/services/geminiKeyframeQaService.ts'
@@ -30,6 +38,10 @@ on:
       - 'episode-server.ts'
       - 'src/server/services/episodeProductionRunner.ts'
       - 'src/server/services/keyframeInputResolver.ts'
+      - 'src/__tests__/directorCloudPersistenceService.test.ts'
+      - 'src/__tests__/directorCloudPersistenceRouter.test.ts'
+      - 'src/__tests__/directorCloudPersistenceClient.test.ts'
+      - 'src/__tests__/directorCloudPersistenceSourceContract.test.ts'
       - 'src/__tests__/episodeProductionApi.test.ts'
       - 'src/__tests__/geminiStoryboardApi.test.ts'
       - 'src/__tests__/geminiStoryboardService.test.ts'
@@ -56,7 +68,10 @@ on:
     branches:
       - main
     paths:
+      - 'package.json'
+      - 'director-server.ts'
       - 'src/App.tsx'
+      - 'src/components/DirectorCloudPersistenceProvider.tsx'
       - 'src/components/Sidebar.tsx'
       - 'src/pages/ScriptDirectorPage.tsx'
       - 'src/pages/AutoStoryboardDirectorPage.tsx'
@@ -75,6 +90,11 @@ on:
       - 'src/services/director/keyframeQa.ts'
       - 'src/services/director/geminiKeyframeQaClient.ts'
       - 'src/services/director/videoBlueprint.ts'
+      - 'src/services/director/directorCloudPersistence.ts'
+      - 'src/server/repositories/firestoreDirectorProjectRepository.ts'
+      - 'src/server/storage/directorGcsStore.ts'
+      - 'src/server/services/directorCloudPersistenceService.ts'
+      - 'src/server/services/directorCloudPersistenceRouter.ts'
       - 'src/server/services/geminiStoryboardService.ts'
       - 'src/server/services/geminiKeyframeImageService.ts'
       - 'src/server/services/geminiKeyframeQaService.ts'
@@ -83,6 +103,10 @@ on:
       - 'episode-server.ts'
       - 'src/server/services/episodeProductionRunner.ts'
       - 'src/server/services/keyframeInputResolver.ts'
+      - 'src/__tests__/directorCloudPersistenceService.test.ts'
+      - 'src/__tests__/directorCloudPersistenceRouter.test.ts'
+      - 'src/__tests__/directorCloudPersistenceClient.test.ts'
+      - 'src/__tests__/directorCloudPersistenceSourceContract.test.ts'
       - 'src/__tests__/episodeProductionApi.test.ts'
       - 'src/__tests__/geminiStoryboardApi.test.ts'
       - 'src/__tests__/geminiStoryboardService.test.ts'
@@ -132,6 +156,10 @@ jobs:
       - name: Director / Episode regression tests
         run: >-
           bunx vitest run
+          src/__tests__/directorCloudPersistenceService.test.ts
+          src/__tests__/directorCloudPersistenceRouter.test.ts
+          src/__tests__/directorCloudPersistenceClient.test.ts
+          src/__tests__/directorCloudPersistenceSourceContract.test.ts
           src/__tests__/scriptDirectorPage.test.tsx
           src/__tests__/manualStoryboardDirectorPage.test.tsx
           src/__tests__/autoStoryboardGenerator.test.ts
