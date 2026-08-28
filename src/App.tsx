@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { ConnectionProvider } from './context/ConnectionContext';
 import { Navbar } from './components/Navbar';
 import { Sidebar, type NavTab } from './components/Sidebar';
+import { DirectorCloudPersistenceProvider } from './components/DirectorCloudPersistenceProvider';
 import { GeminiStoryboardDirectorPage } from './pages/GeminiStoryboardDirectorPage';
 import { KeyframeBlueprintPage } from './pages/KeyframeBlueprintPage';
 import { KeyframeAssetPage } from './pages/KeyframeAssetPage';
@@ -88,7 +89,9 @@ export function AppContent() {
 export default function App() {
   return (
     <ConnectionProvider>
-      <AppContent />
+      <DirectorCloudPersistenceProvider>
+        <AppContent />
+      </DirectorCloudPersistenceProvider>
     </ConnectionProvider>
   );
 }
