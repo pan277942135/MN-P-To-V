@@ -42,18 +42,13 @@ function sha256(value: Buffer | string): string {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-function readableId(raw: string, fallback: string): string {
-  const value = String(raw || '').trim();
-  if (/^[A-Za-z0-9._-]{1,80}$/.test(value)) return value;
-  const digest = sha256(value || fallback).slice(0, 16);
-  return `${fallback}-${digest}`;
-}
-
 function deterministicAssetId(shot: ShotSpec, contentSha256: string): string {
   const digest = sha256(
     `${shot.episodeId}|${shot.shotId}|${shot.keyframe.version}|${contentSha256}`,
   ).slice(0, 32);
-  return `kf_${readableId(shot.episodeId, 'episode')}_${readableId(shot.shotId, 'shot')}_v${shot.keyframe.version}_${digest}`;
+  const readableEpisode = shot.episodeId.slice(0, 48);
+  const readableShot = shot.shotId.slice(0, 32);
+  return `kf_${readableEpisode}_${readableShot}_v${shot.keyframe.version}_${digest}`;
 }
 
 function extensionForMime(mimeType: SupportedKeyframeMime): string {
