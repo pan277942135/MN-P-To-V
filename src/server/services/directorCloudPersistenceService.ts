@@ -66,6 +66,11 @@ function currentAssetKeys(snapshot: DirectorCloudSnapshot) {
     .map((item: any) => `${clean(item.shotUid)}:${clean(item.blobKey)}`));
 }
 
+function cloudAssetItems(snapshot: DirectorCloudSnapshot): DirectorCloudAssetRef[] {
+  const cloudStage = snapshot.stages?.keyframeCloudAssets as { items?: DirectorCloudAssetRef[] } | undefined;
+  return Array.isArray(cloudStage?.items) ? cloudStage.items : [];
+}
+
 export class DirectorCloudPersistenceService {
   constructor(
     private readonly repository: DirectorPersistenceRepositoryLike = firestoreDirectorProjectRepository,
@@ -78,9 +83,7 @@ export class DirectorCloudPersistenceService {
 
   async sync(snapshotInput: unknown, uploadsInput: unknown): Promise<DirectorCloudProjectRecord> {
     const snapshot = validSnapshot(snapshotInput);
-    const existingCloud = Array.isArray((snapshot.stages?.keyframeCloudAssets as any)?.items)
-      ? (snapshot.stages.keyframeCloudAssets as any).items as DirectorCloudAssetRef[]
-      : [];
+    const existingCloud = cloudAssetItems(snapshot);
     const byKey = new Map(existingCloud.map((item) => [`${clean(item.shotUid)}:${clean(item.blobKey)}`, clone(item)]));
     const uploads = Array.isArray(uploadsInput) ? uploadsInput.slice(0, 30) : [];
 
@@ -130,7 +133,7 @@ export class DirectorCloudPersistenceService {
   async getKeyframeAsset(projectId: string, episodeId: string, shotUid: string, blobKey?: string) {
     const record = await this.repository.getSnapshot(projectId, episodeId);
     if (!record) return null;
-    const items: DirectorCloudAssetRef[] = record.snapshot.stages?.keyframeCloudAssets?.items || [];
+    const items = cloudAssetItems(record.snapshot);
     const ref = items.find((item) => item.shotUid === shotUid && (!blobKey || item.blobKey === blobKey));
     if (!ref) return null;
     const file = await this.assetStore.getAsset(ref);
