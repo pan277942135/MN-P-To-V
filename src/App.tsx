@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { ConnectionProvider } from './context/ConnectionContext';
 import { Navbar } from './components/Navbar';
 import { Sidebar, type NavTab } from './components/Sidebar';
+import { DirectorConsolePage } from './pages/DirectorConsolePage';
 import { StudioPage } from './pages/StudioPage';
 import { CharacterLibraryPage } from './pages/CharacterLibraryPage';
 import { TaskHistoryPage } from './pages/TaskHistoryPage';
@@ -9,10 +10,9 @@ import { HumanReviewQueuePage } from './pages/HumanReviewQueuePage';
 import { ComputeSettingsPage } from './pages/ComputeSettingsPage';
 
 export function AppContent() {
-  const [activeTab, setActiveTab] = useState<NavTab>('studio');
+  const [activeTab, setActiveTab] = useState<NavTab>('director');
   const mainRef = useRef<HTMLElement>(null);
 
-  // Scroll main content container to top immediately on tab switch
   useEffect(() => {
     if (mainRef.current) {
       mainRef.current.scrollTo({ top: 0, behavior: 'instant' });
@@ -27,6 +27,10 @@ export function AppContent() {
         <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
 
         <main ref={mainRef} className="flex-1 overflow-y-auto bg-zinc-950/50 pb-20 md:pb-0">
+          <div className={activeTab === 'director' ? 'block' : 'hidden'}>
+            <DirectorConsolePage />
+          </div>
+
           <div className={activeTab === 'studio' ? 'block' : 'hidden'}>
             <StudioPage
               onNavigateToCharacters={() => setActiveTab('characters')}

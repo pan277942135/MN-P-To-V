@@ -1,7 +1,7 @@
 import React from 'react';
-import { Film, Users, History, Settings, Sparkles, ClipboardCheck } from 'lucide-react';
+import { Clapperboard, Film, Users, History, Settings, Sparkles, ClipboardCheck } from 'lucide-react';
 
-export type NavTab = 'studio' | 'characters' | 'review' | 'history' | 'settings';
+export type NavTab = 'director' | 'studio' | 'characters' | 'review' | 'history' | 'settings';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -10,7 +10,8 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange }) => {
   const navItems = [
-    { id: 'studio' as NavTab, label: '创作工作台', icon: Film, desc: '场景裁切、首帧原图直通与视频生成' },
+    { id: 'director' as NavTab, label: '导演台', icon: Clapperboard, desc: '整集 S01–S06 生产、门禁与进度控制' },
+    { id: 'studio' as NavTab, label: '创作工作台', icon: Film, desc: '单镜头场景、首帧与视频生成' },
     { id: 'characters' as NavTab, label: '角色库', icon: Users, desc: '建立并长期复用角色身份包' },
     { id: 'review' as NavTab, label: '待我审核', icon: ClipboardCheck, desc: '集中处理 AI REVIEW 视频与边界验收' },
     { id: 'history' as NavTab, label: '任务记录', icon: History, desc: '查看历史任务与质检报告' },
@@ -19,7 +20,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange }) => {
 
   return (
     <>
-      {/* Desktop Sidebar */}
       <aside className="hidden md:flex w-64 border-r border-[#1F1F23] bg-[#0F0F12] p-4 flex-col justify-between shrink-0">
         <div className="space-y-1">
           <div className="px-3 py-2 text-[11px] font-bold uppercase tracking-widest text-[#64748B] flex items-center">
@@ -69,8 +69,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange }) => {
         </div>
       </aside>
 
-      {/* Mobile Bottom Navigation Bar */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#0F0F12]/95 backdrop-blur-lg border-t border-[#1F1F23] flex items-center justify-around px-2 py-2.5 shadow-2xl">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#0F0F12]/95 backdrop-blur-lg border-t border-[#1F1F23] flex items-center justify-around px-1 py-2.5 shadow-2xl overflow-x-auto">
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
@@ -78,12 +77,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange }) => {
             <button
               key={item.id}
               onClick={() => onTabChange(item.id)}
-              className={`flex flex-col items-center justify-center space-y-1 px-3 py-1 rounded-lg transition ${
+              className={`min-w-[58px] flex flex-col items-center justify-center space-y-1 px-2 py-1 rounded-lg transition ${
                 isActive ? 'text-[#A855F7]' : 'text-[#64748B] active:text-[#CBD5E1]'
               }`}
             >
               <Icon className={`w-5 h-5 ${isActive ? 'text-[#A855F7]' : 'text-[#64748B]'}`} />
-              <span className={`text-[10px] font-medium ${isActive ? 'text-white font-semibold' : 'text-[#64748B]'}`}>
+              <span className={`text-[9px] font-medium whitespace-nowrap ${isActive ? 'text-white font-semibold' : 'text-[#64748B]'}`}>
                 {item.label}
               </span>
             </button>
