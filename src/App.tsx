@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { ConnectionProvider } from './context/ConnectionContext';
 import { Navbar } from './components/Navbar';
 import { Sidebar, type NavTab } from './components/Sidebar';
+import { ManualStoryboardImportEntry } from './components/director/ManualStoryboardImportEntry';
 import { GeminiStoryboardDirectorPage } from './pages/GeminiStoryboardDirectorPage';
 import { DirectorConsolePage } from './pages/DirectorConsolePage';
 import { StudioPage } from './pages/StudioPage';
@@ -12,6 +13,7 @@ import { ComputeSettingsPage } from './pages/ComputeSettingsPage';
 
 export function AppContent() {
   const [activeTab, setActiveTab] = useState<NavTab>('director');
+  const [directorRevision, setDirectorRevision] = useState(0);
   const mainRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -29,7 +31,10 @@ export function AppContent() {
 
         <main ref={mainRef} className="flex-1 overflow-y-auto bg-zinc-950/50 pb-20 md:pb-0">
           <div className={activeTab === 'director' ? 'block' : 'hidden'}>
-            <GeminiStoryboardDirectorPage />
+            <GeminiStoryboardDirectorPage key={directorRevision} />
+            <ManualStoryboardImportEntry
+              onImported={() => setDirectorRevision((current) => current + 1)}
+            />
           </div>
 
           <div className={activeTab === 'monitor' ? 'block' : 'hidden'}>
