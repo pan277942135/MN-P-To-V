@@ -6,6 +6,7 @@ import { GeminiStoryboardDirectorPage } from './pages/GeminiStoryboardDirectorPa
 import { KeyframeBlueprintPage } from './pages/KeyframeBlueprintPage';
 import { KeyframeAssetPage } from './pages/KeyframeAssetPage';
 import { KeyframeQaPage } from './pages/KeyframeQaPage';
+import { VideoBlueprintPage } from './pages/VideoBlueprintPage';
 import { DirectorConsolePage } from './pages/DirectorConsolePage';
 import { StudioPage } from './pages/StudioPage';
 import { CharacterLibraryPage } from './pages/CharacterLibraryPage';
@@ -45,6 +46,10 @@ export function AppContent() {
 
           <div className={activeTab === 'keyframe-qa' ? 'block' : 'hidden'}>
             {activeTab === 'keyframe-qa' && <KeyframeQaPage />}
+          </div>
+
+          <div className={activeTab === 'video-blueprint' ? 'block' : 'hidden'}>
+            {activeTab === 'video-blueprint' && <VideoBlueprintPage />}
           </div>
 
           <div className={activeTab === 'monitor' ? 'block' : 'hidden'}>
