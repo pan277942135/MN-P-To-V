@@ -82,7 +82,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange }) => {
             <button
               key={item.id}
               onClick={() => onTabChange(item.id)}
-              className={`min-w-[68px] flex flex-col items-center justify-center space-x-1 px-2 py-1 rounded-lg transition ${
+              className={`min-w-[68px] flex flex-col items-center justify-center space-y-1 px-2 py-1 rounded-lg transition ${
                 isActive ? 'text-[#A855F7]' : 'text-[#64748B] active:text-[#CBD5E1]'
               }`}
             >
