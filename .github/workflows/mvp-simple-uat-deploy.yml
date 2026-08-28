@@ -78,7 +78,7 @@ jobs:
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy isolated private Cloud Run UAT
+      - name: Deploy public Cloud Run UAT preview
         id: deploy
         shell: bash
         run: |
@@ -91,7 +91,7 @@ jobs:
             --platform=managed \
             --image="$IMAGE" \
             --service-account="$RUNTIME_SA" \
-            --no-allow-unauthenticated \
+            --allow-unauthenticated \
             --no-iap \
             --cpu=2 \
             --memory=3Gi \
@@ -102,19 +102,12 @@ jobs:
             --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA" \
             --quiet
 
-          gcloud run services add-iam-policy-binding "$SERVICE" \
-            --project="$PROJECT_ID" \
-            --region="$REGION" \
-            --member="serviceAccount:$DEPLOY_SA" \
-            --role="roles/run.invoker" \
-            --quiet >/dev/null
-
           SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
           REVISION="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.latestReadyRevisionName)')"
           echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
           echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
 
-      - name: Mint Cloud Run ID token for pre-IAP readiness
+      - name: Mint Cloud Run ID token for readiness verification
         uses: google-github-actions/auth@v3
         id: invoke_auth
         with:
@@ -125,7 +118,7 @@ jobs:
           id_token_audience: ${{ steps.deploy.outputs.service_url }}
           id_token_include_email: true
 
-      - name: Verify Identity Safe v0.2.1 health and full readiness before browser gate
+      - name: Verify Identity Safe v0.2.1 health and full readiness
         id: verify
         shell: bash
         env:
@@ -145,49 +138,16 @@ jobs:
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/benchmark/catalog" | tee benchmark.json
           grep -q 'IDSAFE-24' benchmark.json
 
-      - name: Enable direct IAP browser access
-        id: iap
+      - name: Verify public browser access
+        id: public
         shell: bash
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
         run: |
-          set -uo pipefail
-          : > iap.log
-          IAP_AGENT="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
-
-          echo '[iap] grant existing IAP service agent Cloud Run Invoker' | tee -a iap.log
-          gcloud run services add-iam-policy-binding "$SERVICE" \
-            --project="$PROJECT_ID" \
-            --region="$REGION" \
-            --member="serviceAccount:$IAP_AGENT" \
-            --role="roles/run.invoker" \
-            --quiet 2>&1 | tee -a iap.log
-          STATUS=${PIPESTATUS[0]}
-          if [ "$STATUS" -ne 0 ]; then
-            echo 'enabled=false' >> "$GITHUB_OUTPUT"
-            exit "$STATUS"
-          fi
-
-          echo '[iap] enable direct Cloud Run IAP' | tee -a iap.log
-          gcloud run services update "$SERVICE" \
-            --project="$PROJECT_ID" \
-            --region="$REGION" \
-            --iap \
-            --quiet 2>&1 | tee -a iap.log
-          STATUS=${PIPESTATUS[0]}
-          if [ "$STATUS" -ne 0 ]; then
-            echo 'enabled=false' >> "$GITHUB_OUTPUT"
-            exit "$STATUS"
-          fi
-
-          echo '[iap] verify Cloud Run reports Iap Enabled: true' | tee -a iap.log
-          gcloud run services describe "$SERVICE" \
-            --project="$PROJECT_ID" \
-            --region="$REGION" 2>&1 | tee service-description.txt | tee -a iap.log
-          STATUS=${PIPESTATUS[0]}
-          if [ "$STATUS" -ne 0 ] || ! grep -qi 'Iap Enabled: true' service-description.txt; then
-            echo 'enabled=false' >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-          echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          PUBLIC_STATUS="$(curl -sS -o public.html -w '%{http_code}' "$SERVICE_URL/" || true)"
+          echo "status=$PUBLIC_STATUS" >> "$GITHUB_OUTPUT"
+          test "$PUBLIC_STATUS" = '200'
 
       - name: Deployment summary
         if: success()
@@ -200,8 +160,8 @@ jobs:
             echo "- Cloud Run service: \`$SERVICE\`"
             echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
             echo "- Fixed UAT URL: ${{ steps.deploy.outputs.service_url }}"
-            echo "- Browser access: direct Cloud Run IAP / Google sign-in"
-            echo "- IAP enabled: \`${{ steps.iap.outputs.enabled }}\`"
+            echo "- Browser access: public preview / no IAP"
+            echo "- Public HTTP check: \`${{ steps.public.outputs.status }}\`"
             echo "- Video model: \`$VEO_MODEL_ID\`"
             echo "- Identity QA model: \`$IDENTITY_QA_MODEL\`"
             echo "- Client network recovery: \`true\`"
@@ -209,7 +169,7 @@ jobs:
             echo "- Runtime auth: ADC / \`$RUNTIME_SA\`"
             echo "- Benchmark catalog: 24 cases"
             echo ''
-            echo 'Transport interruptions no longer map to FAILED; the browser recovers the same durable task by idempotency key. Vertex Deadline exceeded is normalized to GENERATION_TIMEOUT.'
+            echo 'UAT is intentionally public for preview. Production access control remains a separate hardening step.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish durable deployment evidence
@@ -222,13 +182,12 @@ jobs:
           SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
           REVISION: ${{ steps.deploy.outputs.revision }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
-          IAP_OUTCOME: ${{ steps.iap.outcome }}
-          IAP_ENABLED: ${{ steps.iap.outputs.enabled }}
+          PUBLIC_OUTCOME: ${{ steps.public.outcome }}
+          PUBLIC_STATUS: ${{ steps.public.outputs.status }}
         run: |
           set -euo pipefail
           READINESS="$(cat readiness.json 2>/dev/null || echo '{"ready":false,"evidence":"readiness unavailable"}')"
           CLIENT_HEALTH="$(cat client-health.json 2>/dev/null || echo '{"networkRecovery":false,"evidence":"client health unavailable"}')"
-          IAP_LOG="$(tail -80 iap.log 2>/dev/null || echo 'iap.log unavailable')"
           BODY=$(cat <<EOF
           ### MVP Identity Safe v0.2.1 UAT deployment evidence
           - Job status: \`$JOB_STATUS\`
@@ -236,8 +195,9 @@ jobs:
           - Cloud Run service: \`$SERVICE\`
           - Revision: \`${REVISION:-unavailable}\`
           - Fixed UAT URL: ${SERVICE_URL:-unavailable}
-          - IAP step: \`${IAP_OUTCOME:-not_run}\`
-          - IAP enabled: \`${IAP_ENABLED:-false}\`
+          - Browser access: \`public preview / no IAP\`
+          - Public access step: \`${PUBLIC_OUTCOME:-not_run}\`
+          - Public HTTP status: \`${PUBLIC_STATUS:-unknown}\`
           - Provider/model: \`Vertex AI / $VEO_MODEL_ID\`
           - Identity QA: \`Vertex AI / $IDENTITY_QA_MODEL\`
           - Network hardening: \`idempotency lookup + transport recovery\`
@@ -252,11 +212,6 @@ jobs:
           Readiness:
           \`\`\`json
           $READINESS
-          \`\`\`
-
-          IAP diagnostics:
-          \`\`\`text
-          $IAP_LOG
           \`\`\`
           EOF
           )
