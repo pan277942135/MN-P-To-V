@@ -1,10 +1,7 @@
 import crypto from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { SHOT_SCHEMA_VERSION, type ShotSpec } from '../domain/episode/episodeTypes';
-import {
-  KeyframeInputResolver,
-  KeyframeInputResolutionError,
-} from '../server/services/keyframeInputResolver';
+import { KeyframeInputResolver } from '../server/services/keyframeInputResolver';
 import { EXPECTED_PRODUCTION_VEO_BUCKET } from '../server/storage/gcsArtifactStore';
 
 const PNG = Buffer.from(
@@ -118,8 +115,6 @@ describe('KeyframeInputResolver P0-7', () => {
     await expect(resolver.resolve({
       shot,
       openaiFileRef: { id: 'file_s02' },
-    })).rejects.toEqual(expect.objectContaining<KeyframeInputResolutionError>({
-      code: 'KEYFRAME_DURABLE_ASSET_INVALID',
-    }));
+    })).rejects.toMatchObject({ code: 'KEYFRAME_DURABLE_ASSET_INVALID' });
   });
 });
