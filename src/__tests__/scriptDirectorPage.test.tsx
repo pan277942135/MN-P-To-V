@@ -53,10 +53,10 @@ describe('ScriptDirectorPage manual Step 1', () => {
 
     render(<ScriptDirectorPage />);
 
-    expect(screen.getByLabelText('项目标题 *')).toHaveValue('恢复测试');
-    expect(screen.getByLabelText(/创意 \/ 故事梗概/)).toHaveValue('刷新后应恢复。');
-    expect(screen.getByLabelText('完整脚本（可选）')).toHaveValue('完整脚本文本');
-    expect(screen.getByLabelText('目标总时长（秒）')).toHaveValue(45);
+    expect((screen.getByLabelText('项目标题 *') as HTMLInputElement).value).toBe('恢复测试');
+    expect((screen.getByLabelText(/创意 \/ 故事梗概/) as HTMLTextAreaElement).value).toBe('刷新后应恢复。');
+    expect((screen.getByLabelText('完整脚本（可选）') as HTMLTextAreaElement).value).toBe('完整脚本文本');
+    expect((screen.getByLabelText('目标总时长（秒）') as HTMLInputElement).value).toBe('45');
   });
 
   it('does not expose an automated breakdown action in Step 1', () => {
