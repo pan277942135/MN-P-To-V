@@ -28,7 +28,9 @@ export const DirectorCloudPersistenceProvider: React.FC<React.PropsWithChildren>
       }
       try {
         await syncDirectorCloud();
-        lastFingerprintRef.current = computeDirectorLocalFingerprint();
+        // Only mark the exact version that was sent as synced. If the user edits
+        // while the request is in-flight, the next interval will see a new fingerprint.
+        lastFingerprintRef.current = fingerprint;
         if (!cancelled) {
           setState('synced');
           setMessage('Director Cloud 已同步');
