@@ -15,6 +15,11 @@ import {
   type StoryboardGeneratorLike,
   type StoryboardGenerationInput,
 } from './src/server/services/geminiStoryboardService';
+import {
+  createDefaultGeminiKeyframeImageService,
+  type KeyframeImageGeneratorLike,
+  type KeyframeImageGenerationInput,
+} from './src/server/services/geminiKeyframeImageService';
 import { taskStateMachineService } from './src/server/services/taskStateMachineService';
 
 export interface EpisodeProductionRunnerLike {
@@ -38,9 +43,11 @@ export interface EpisodeServerDependencies {
   episodeRepository?: EpisodeReadRepositoryLike;
   shotRepository?: ShotReadRepositoryLike;
   storyboardGenerator?: StoryboardGeneratorLike;
+  keyframeImageGenerator?: KeyframeImageGeneratorLike;
 }
 
 const storyboardRateBuckets = new Map<string, number[]>();
+const keyframeImageRateBuckets = new Map<string, number[]>();
 
 function isPublicPreviewReadOnly(): boolean {
   return process.env.PUBLIC_PREVIEW_READ_ONLY === '1';
@@ -58,12 +65,22 @@ function storyboardModel(): string {
   return process.env.DIRECTOR_STORYBOARD_MODEL || 'gemini-2.5-flash';
 }
 
+function isKeyframeImageEnabled(): boolean {
+  return process.env.DIRECTOR_KEYFRAME_IMAGE_ENABLED === '1';
+}
+
+function keyframeImageModel(): string {
+  return process.env.DIRECTOR_KEYFRAME_IMAGE_MODEL || 'gemini-3.1-flash-image';
+}
+
 function directorCapabilities() {
   return {
     readOnlyPreview: isPublicPreviewReadOnly(),
     productionRunEnabled: isProductionRunEnabled(),
     storyboardGeminiEnabled: isStoryboardGeminiEnabled(),
     storyboardModel: storyboardModel(),
+    keyframeImageEnabled: isKeyframeImageEnabled(),
+    keyframeImageModel: keyframeImageModel(),
   };
 }
 
@@ -71,21 +88,31 @@ function isStoryboardGenerationRequest(req: express.Request) {
   return req.method.toUpperCase() === 'POST' && req.path === '/api/director/storyboard/generate';
 }
 
-function consumeStoryboardRateLimit(_req: express.Request) {
-  // UAT is intentionally public, so use a conservative per-instance global budget
-  // instead of trusting client-supplied forwarding headers.
+function isKeyframeImageGenerationRequest(req: express.Request) {
+  return req.method.toUpperCase() === 'POST' && req.path === '/api/director/keyframes/generate';
+}
+
+function consumeRateLimit(bucketMap: Map<string, number[]>, maxCalls: number) {
   const bucket = 'uat-global';
   const now = Date.now();
   const windowMs = 10 * 60 * 1000;
-  const previous = storyboardRateBuckets.get(bucket) || [];
+  const previous = bucketMap.get(bucket) || [];
   const active = previous.filter((timestamp) => now - timestamp < windowMs);
-  if (active.length >= 10) {
-    storyboardRateBuckets.set(bucket, active);
+  if (active.length >= maxCalls) {
+    bucketMap.set(bucket, active);
     return false;
   }
   active.push(now);
-  storyboardRateBuckets.set(bucket, active);
+  bucketMap.set(bucket, active);
   return true;
+}
+
+function consumeStoryboardRateLimit(_req: express.Request) {
+  return consumeRateLimit(storyboardRateBuckets, 10);
+}
+
+function consumeKeyframeImageRateLimit(_req: express.Request) {
+  return consumeRateLimit(keyframeImageRateBuckets, 20);
 }
 
 function hasDurableLocation(shot: ShotSpec): boolean {
@@ -183,6 +210,8 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
   const shotRepository = dependencies.shotRepository || firestoreShotRepository;
   const storyboardGenerator =
     dependencies.storyboardGenerator || createDefaultGeminiStoryboardService();
+  const keyframeImageGenerator =
+    dependencies.keyframeImageGenerator || createDefaultGeminiKeyframeImageService();
 
   const app = express();
   app.disable('x-powered-by');
@@ -193,17 +222,20 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
     const safeMethod = ['GET', 'HEAD', 'OPTIONS'].includes(req.method.toUpperCase());
     const allowedStoryboardProviderCall =
       isStoryboardGenerationRequest(req) && isStoryboardGeminiEnabled();
+    const allowedKeyframeImageProviderCall =
+      isKeyframeImageGenerationRequest(req) && isKeyframeImageEnabled();
 
     if (
       isPublicPreviewReadOnly() &&
       req.path.startsWith('/api/') &&
       !safeMethod &&
-      !allowedStoryboardProviderCall
+      !allowedStoryboardProviderCall &&
+      !allowedKeyframeImageProviderCall
     ) {
       return res.status(423).json({
         ok: false,
         error: 'PREVIEW_READ_ONLY',
-        message: '当前 Cloud Run 为公开 Preview；生产写操作与视频 Provider 调用已锁定，仅显式启用的 Gemini 分镜生成端点例外。',
+        message: '当前 Cloud Run 为公开 Preview；生产写操作与视频 Provider 调用已锁定，仅显式启用的 Director 生成端点例外。',
       });
     }
     return next();
@@ -266,6 +298,61 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
       const code = typeof error?.code === 'string' && error.code.trim()
         ? error.code.trim()
         : 'GEMINI_STORYBOARD_REQUEST_FAILED';
+      return res.status(status).json({
+        ok: false,
+        error: code,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  app.post('/api/director/keyframes/generate', async (req, res) => {
+    if (!isKeyframeImageEnabled()) {
+      return res.status(503).json({
+        ok: false,
+        error: 'GEMINI_KEYFRAME_IMAGE_DISABLED',
+        message: '当前环境未启用 Gemini 关键帧图片生成。',
+      });
+    }
+
+    if (req.get('X-Director-Generation-Intent') !== 'keyframe-image-v0.3.2') {
+      return res.status(400).json({
+        ok: false,
+        error: 'KEYFRAME_IMAGE_GENERATION_INTENT_REQUIRED',
+        message: '缺少明确的关键帧图片生成意图标记。',
+      });
+    }
+
+    if (!consumeKeyframeImageRateLimit(req)) {
+      return res.status(429).json({
+        ok: false,
+        error: 'KEYFRAME_IMAGE_RATE_LIMITED',
+        message: 'Gemini 关键帧图片生成请求过于频繁，请稍后再试。',
+      });
+    }
+
+    const input: KeyframeImageGenerationInput = {
+      prompt: String(req.body?.prompt || ''),
+      negativePrompt: String(req.body?.negativePrompt || ''),
+      characterHint: String(req.body?.characterHint || ''),
+      referenceImageBase64: String(req.body?.referenceImageBase64 || ''),
+      referenceMimeType: String(req.body?.referenceMimeType || ''),
+      aspectRatio: '9:16',
+      imageSize: '1K',
+    };
+
+    try {
+      const result = await keyframeImageGenerator.generate(input);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(200).json({ ok: true, ...result });
+    } catch (error: any) {
+      const statusCode = Number(error?.statusCode);
+      const status = Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599
+        ? statusCode
+        : 502;
+      const code = typeof error?.code === 'string' && error.code.trim()
+        ? error.code.trim()
+        : 'GEMINI_KEYFRAME_IMAGE_REQUEST_FAILED';
       return res.status(status).json({
         ok: false,
         error: code,
