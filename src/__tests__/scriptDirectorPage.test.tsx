@@ -6,7 +6,7 @@ import { ScriptDirectorPage } from '../pages/ScriptDirectorPage';
 
 const DRAFT_KEY = 'zaojing_director_v01_brief';
 
-describe('ScriptDirectorPage manual Step 1', () => {
+describe('ScriptDirectorPage manual Step 1 regression inside Step 2', () => {
   beforeEach(() => {
     window.localStorage.clear();
   });
@@ -15,7 +15,7 @@ describe('ScriptDirectorPage manual Step 1', () => {
     cleanup();
   });
 
-  it('saves a manual creative brief locally without provider execution', () => {
+  it('still saves the accepted Step 1 creative brief locally without provider execution', () => {
     render(<ScriptDirectorPage />);
 
     fireEvent.change(screen.getByLabelText('项目标题 *'), {
@@ -24,7 +24,7 @@ describe('ScriptDirectorPage manual Step 1', () => {
     fireEvent.change(screen.getByLabelText(/创意 \/ 故事梗概/), {
       target: { value: '一个人工录入、逐环节验收的创意。' },
     });
-    fireEvent.click(screen.getByRole('button', { name: /保存草稿/ }));
+    fireEvent.click(screen.getByRole('button', { name: /保存 Step 1 修改/ }));
 
     const saved = JSON.parse(window.localStorage.getItem(DRAFT_KEY) || '{}');
     expect(saved).toMatchObject({
@@ -34,10 +34,10 @@ describe('ScriptDirectorPage manual Step 1', () => {
       aspectRatio: '9:16',
     });
     expect(saved.savedAt).toEqual(expect.any(Number));
-    expect(screen.getByText(/草稿已保存到当前浏览器/)).toBeTruthy();
+    expect(screen.getByText(/Step 1 草稿已保存/)).toBeTruthy();
   });
 
-  it('restores the saved draft after remount so refresh can be accepted manually', () => {
+  it('restores the accepted Step 1 draft after remount while Step 2 is present', () => {
     window.localStorage.setItem(DRAFT_KEY, JSON.stringify({
       version: 'director-brief-v0.1',
       title: '恢复测试',
@@ -59,9 +59,11 @@ describe('ScriptDirectorPage manual Step 1', () => {
     expect((screen.getByLabelText('目标总时长（秒）') as HTMLInputElement).value).toBe('45');
   });
 
-  it('does not expose an automated breakdown action in Step 1', () => {
+  it('keeps Step 1 manual while exposing only manual Step 2 controls', () => {
     render(<ScriptDirectorPage />);
-    expect(screen.queryByRole('button', { name: /拆镜|生成分镜|AI/ })).toBeNull();
-    expect(screen.getByText(/Step 2｜人工分镜拆解/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /自动拆镜|生成分镜|生成图片|生成视频|Veo/i })).toBeNull();
+    expect(screen.getByRole('button', { name: '新增镜头' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '保存分镜' })).toBeTruthy();
+    expect(screen.getByText('导演台｜人工分镜拆解')).toBeTruthy();
   });
 });
