@@ -195,6 +195,28 @@ export function approveKeyframeAsset(
   };
 }
 
+export function revokeKeyframeAssetPass(
+  manifest: KeyframeAssetManifest,
+  shotUid: string,
+  now = Date.now(),
+): KeyframeAssetManifest {
+  const target = manifest.assets.find((asset) => asset.shotUid === shotUid);
+  if (!target || target.status !== 'PASS') return manifest;
+  return {
+    ...manifest,
+    assets: manifest.assets.map((asset) => asset.shotUid === shotUid ? {
+      ...asset,
+      status: asset.blobKey ? 'READY' : 'EMPTY',
+      approvedAt: null,
+    } : asset),
+    savedAt: now,
+  };
+}
+
+export function hasAllKeyframeAssets(manifest: KeyframeAssetManifest): boolean {
+  return manifest.assets.length > 0 && manifest.assets.every((asset) => Boolean(clean(asset.blobKey)));
+}
+
 export function isKeyframeAssetManifestComplete(manifest: KeyframeAssetManifest): boolean {
   return manifest.assets.length > 0 && manifest.assets.every((asset) => (
     asset.status === 'PASS' && Boolean(clean(asset.blobKey))
