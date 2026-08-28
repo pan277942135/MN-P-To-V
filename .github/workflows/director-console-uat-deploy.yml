@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - 'src/**'
+      - 'director-server.ts'
       - 'episode-server.ts'
       - 'server.ts'
       - 'package.json'
@@ -109,7 +110,7 @@ jobs:
           echo "service_url=$SERVICE_URL" >> "$GITHUB_OUTPUT"
           echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
 
-      - name: Verify public React page and safe Director API
+      - name: Verify public React page, Director Cloud, and safe API
         shell: bash
         env:
           SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
@@ -129,11 +130,15 @@ jobs:
           grep -q '"keyframeQaEnabled":true' capabilities.json
           grep -q '"keyframeQaModel":"gemini-2.5-flash"' capabilities.json
 
+          PERSIST_STATUS="$(curl -sS -o persistence.json -w '%{http_code}' "$SERVICE_URL/api/director/persistence/latest")"
+          test "$PERSIST_STATUS" = '200' -o "$PERSIST_STATUS" = '404'
+
           curl -fsS "$SERVICE_URL/api/episodes?limit=1" | tee episodes.json
           grep -q '"ok":true' episodes.json
 
+          # Read-only smoke only. Never write a Director project during deployment.
           # Intentionally do not call paid Director provider endpoints here.
-          # Deployment smoke must never invoke Storyboard, Keyframe Image, or Keyframe QA Gemini.
+          # Deployment smoke must never invoke Storyboard, Keyframe Image, Keyframe QA, or Veo.
 
       - name: Deployment summary
         shell: bash
@@ -145,9 +150,10 @@ jobs:
             echo "- Cloud Run service: \`$SERVICE\`"
             echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
             echo "- Public URL: ${{ steps.deploy.outputs.service_url }}"
+            echo "- Director persistence: Firestore \`$FIRESTORE_DATABASE_ID\` + GCS \`$VEO_OUTPUT_BUCKET\`"
             echo "- Storyboard provider: Vertex AI Gemini / \`$DIRECTOR_STORYBOARD_MODEL\`"
             echo "- Keyframe image provider: Vertex AI Gemini / \`$DIRECTOR_KEYFRAME_IMAGE_MODEL\`"
             echo "- Keyframe QA provider: Vertex AI Gemini / \`$DIRECTOR_KEYFRAME_QA_MODEL\`"
-            echo '- Preview safety: Episode/Veo production disabled; Storyboard, Keyframe Image, and Keyframe QA require explicit intent and rate limiting'
-            echo '- Deployment smoke does not invoke paid Gemini generation/QA endpoints'
+            echo '- Preview safety: Director metadata/assets persistence enabled; Episode/Veo production remains disabled'
+            echo '- Deployment smoke is read-only and does not invoke paid Gemini/Veo endpoints'
           } >> "$GITHUB_STEP_SUMMARY"
