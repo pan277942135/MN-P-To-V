@@ -155,7 +155,7 @@ function buildPrompt(input: ReturnType<typeof validateInput>) {
     '7. 角色、服装、道具、空间方向与动作承接要写进 notes，供后续关键帧保持连续性。',
     '8. 不要输出图片提示词，不要输出视频提示词，不要开始 Step 3。',
     '9. dialogue 没有对白时返回空字符串。',
-    '10. 只返回符合 JSON Schema 的数据，不要 Markdown，不要解释。',
+    '10. 只返回符合 JSON Schema 的数据，不要 Markdown，不要解释；响应第一个字符必须是 {，最后一个字符必须是 }。',
     '',
     `项目标题：${input.title}`,
     `目标内容形式：${formatName}`,
@@ -164,6 +164,98 @@ function buildPrompt(input: ReturnType<typeof validateInput>) {
     `完整脚本：${input.fullScript || '（未提供；按故事梗概拆镜）'}`,
     `生产备注：${input.productionNotes || '（无）'}`,
   ].join('\n');
+}
+
+function isStoryboardEnvelope(payload: unknown): boolean {
+  return Boolean(
+    payload &&
+    typeof payload === 'object' &&
+    !Array.isArray(payload) &&
+    Array.isArray((payload as { shots?: unknown }).shots),
+  );
+}
+
+function tryParseJson(candidate: string): unknown | undefined {
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    return undefined;
+  }
+}
+
+function findBalancedJsonCandidates(text: string): string[] {
+  const candidates: string[] = [];
+
+  for (let start = 0; start < text.length; start += 1) {
+    const first = text[start];
+    if (first !== '{' && first !== '[') continue;
+
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === '\\') {
+          escaped = true;
+        } else if (char === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (char === '{' || char === '[') {
+        stack.push(char);
+        continue;
+      }
+
+      if (char !== '}' && char !== ']') continue;
+      const opener = stack.pop();
+      const matches =
+        (opener === '{' && char === '}') ||
+        (opener === '[' && char === ']');
+      if (!matches) break;
+
+      if (stack.length === 0) {
+        candidates.push(text.slice(start, index + 1));
+        break;
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function parseStoryboardPayload(rawText: string): unknown {
+  const text = rawText.replace(/^\uFEFF/, '').trim();
+  const direct = tryParseJson(text);
+  if (direct !== undefined) return direct;
+
+  const matchingPayloads = findBalancedJsonCandidates(text)
+    .map((candidate) => tryParseJson(candidate))
+    .filter((candidate) => candidate !== undefined && isStoryboardEnvelope(candidate));
+
+  if (matchingPayloads.length === 1) return matchingPayloads[0];
+  if (matchingPayloads.length > 1) {
+    throw new StoryboardGenerationError(
+      'GEMINI_STORYBOARD_JSON_AMBIGUOUS',
+      'Gemini 返回了多个可解析的分镜 JSON 对象，系统拒绝猜测应采用哪一个。',
+    );
+  }
+
+  throw new StoryboardGenerationError(
+    'GEMINI_STORYBOARD_JSON_INVALID',
+    'Gemini 返回内容未形成可解析的分镜 JSON。请重试 Gemini；系统不会自动切换本地结果。',
+  );
 }
 
 function normalizeShots(payload: unknown): GeminiStoryboardShot[] {
@@ -273,7 +365,7 @@ export function createGeminiStoryboardService(
           model,
           contents: prompt,
           config: {
-            temperature: 0.45,
+            temperature: 0.35,
             maxOutputTokens: 8192,
             responseMimeType: 'application/json',
             responseJsonSchema: STORYBOARD_JSON_SCHEMA,
@@ -288,15 +380,7 @@ export function createGeminiStoryboardService(
           );
         }
 
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(text);
-        } catch {
-          throw new StoryboardGenerationError(
-            'GEMINI_STORYBOARD_JSON_INVALID',
-            'Gemini 返回了非 JSON 分镜结果。',
-          );
-        }
+        const parsed = parseStoryboardPayload(text);
 
         return {
           provider: 'vertex-gemini',
