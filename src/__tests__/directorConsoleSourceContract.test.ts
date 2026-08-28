@@ -6,10 +6,12 @@ const root = path.resolve(__dirname, '../..');
 const read = (file: string) => fs.readFileSync(path.join(root, file), 'utf8');
 
 describe('Director Console source contract', () => {
-  it('keeps Vertex Gemini as the automatic Storyboard path while adding ChatGPT manual import and preserving production monitor', () => {
+  it('keeps Storyboard generation while adding gated Step 3.1 Keyframe Blueprint and preserving production monitor', () => {
     const app = read('src/App.tsx');
     const sidebar = read('src/components/Sidebar.tsx');
     const geminiDirector = read('src/pages/GeminiStoryboardDirectorPage.tsx');
+    const keyframePage = read('src/pages/KeyframeBlueprintPage.tsx');
+    const keyframeModel = read('src/services/director/keyframeBlueprint.ts');
     const geminiClient = read('src/services/director/geminiStoryboardClient.ts');
     const geminiServer = read('src/server/services/geminiStoryboardService.ts');
     const chatgptImport = read('src/services/director/chatgptStoryboardImport.ts');
@@ -20,13 +22,16 @@ describe('Director Console source contract', () => {
 
     expect(app).toContain("useState<NavTab>('director')");
     expect(app).toContain('<GeminiStoryboardDirectorPage />');
+    expect(app).toContain("activeTab === 'keyframes'");
+    expect(app).toContain('<KeyframeBlueprintPage />');
     expect(app).toContain("activeTab === 'monitor'");
     expect(app).toContain('<DirectorConsolePage />');
     expect(app).toContain('<StudioPage');
 
     expect(sidebar).toContain("label: '导演台'");
+    expect(sidebar).toContain("label: '关键帧蓝图'");
     expect(sidebar).toContain("label: '生产监控'");
-    expect(sidebar).toContain("'director' | 'monitor' | 'studio'");
+    expect(sidebar).toContain("'director' | 'keyframes' | 'monitor' | 'studio'");
 
     expect(geminiDirector).toContain('导演台｜Script / ChatGPT → Storyboard');
     expect(geminiDirector).toContain('Gemini 生成分镜');
@@ -38,6 +43,15 @@ describe('Director Console source contract', () => {
     expect(geminiDirector).toContain("const DRAFT_KEY = 'zaojing_director_v01_brief'");
     expect(geminiDirector).toContain("const STORYBOARD_KEY = 'zaojing_director_v02_storyboard'");
     expect(geminiDirector).toContain('保存分镜修改');
+
+    expect(keyframePage).toContain('关键帧蓝图｜Storyboard → Keyframe Blueprint');
+    expect(keyframePage).toContain('确认 Keyframe Blueprint');
+    expect(keyframePage).toContain('保存 Blueprint 修改');
+    expect(keyframePage).toContain('NO IMAGE / NO VEO');
+    expect(keyframeModel).toContain("'zaojing_director_v031_keyframe_blueprints'");
+    expect(keyframeModel).toContain("'zaojing_director_v031_keyframe_approval'");
+    expect(keyframeModel).toContain('《风从那年教室吹过》系列');
+    expect(keyframeModel).toContain('shotUid: shot.uid');
 
     expect(geminiClient).toContain("'/api/director/storyboard/generate'");
     expect(geminiClient).toContain("'X-Director-Generation-Intent'");
@@ -59,7 +73,7 @@ describe('Director Console source contract', () => {
     expect(monitor).toContain('Preview 已锁定执行');
   });
 
-  it('deploys Gemini Storyboard while keeping Episode/Veo production disabled in public preview', () => {
+  it('deploys Director UAT while keeping Episode/Veo production disabled in public preview', () => {
     const workflow = read('.github/workflows/director-console-uat-deploy.yml');
 
     expect(workflow).toContain('docker build -f Dockerfile');
