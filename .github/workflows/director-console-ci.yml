@@ -11,6 +11,7 @@ on:
       - 'src/pages/KeyframeBlueprintPage.tsx'
       - 'src/pages/KeyframeAssetPage.tsx'
       - 'src/pages/KeyframeQaPage.tsx'
+      - 'src/pages/VideoBlueprintPage.tsx'
       - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/services/director/geminiStoryboardClient.ts'
       - 'src/services/director/chatgptStoryboardImport.ts'
@@ -20,6 +21,7 @@ on:
       - 'src/services/director/geminiKeyframeImageClient.ts'
       - 'src/services/director/keyframeQa.ts'
       - 'src/services/director/geminiKeyframeQaClient.ts'
+      - 'src/services/director/videoBlueprint.ts'
       - 'src/server/services/geminiStoryboardService.ts'
       - 'src/server/services/geminiKeyframeImageService.ts'
       - 'src/server/services/geminiKeyframeQaService.ts'
@@ -40,6 +42,8 @@ on:
       - 'src/__tests__/keyframeImageApi.test.ts'
       - 'src/__tests__/keyframeQa.test.ts'
       - 'src/__tests__/keyframeQaApi.test.ts'
+      - 'src/__tests__/videoBlueprint.test.ts'
+      - 'src/__tests__/videoBlueprintPage.test.tsx'
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
       - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'src/__tests__/manualStoryboardDirectorPage.test.tsx'
@@ -60,6 +64,7 @@ on:
       - 'src/pages/KeyframeBlueprintPage.tsx'
       - 'src/pages/KeyframeAssetPage.tsx'
       - 'src/pages/KeyframeQaPage.tsx'
+      - 'src/pages/VideoBlueprintPage.tsx'
       - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/services/director/geminiStoryboardClient.ts'
       - 'src/services/director/chatgptStoryboardImport.ts'
@@ -69,6 +74,7 @@ on:
       - 'src/services/director/geminiKeyframeImageClient.ts'
       - 'src/services/director/keyframeQa.ts'
       - 'src/services/director/geminiKeyframeQaClient.ts'
+      - 'src/services/director/videoBlueprint.ts'
       - 'src/server/services/geminiStoryboardService.ts'
       - 'src/server/services/geminiKeyframeImageService.ts'
       - 'src/server/services/geminiKeyframeQaService.ts'
@@ -89,6 +95,8 @@ on:
       - 'src/__tests__/keyframeImageApi.test.ts'
       - 'src/__tests__/keyframeQa.test.ts'
       - 'src/__tests__/keyframeQaApi.test.ts'
+      - 'src/__tests__/videoBlueprint.test.ts'
+      - 'src/__tests__/videoBlueprintPage.test.tsx'
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
       - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'src/__tests__/manualStoryboardDirectorPage.test.tsx'
@@ -138,6 +146,8 @@ jobs:
           src/__tests__/keyframeImageApi.test.ts
           src/__tests__/keyframeQa.test.ts
           src/__tests__/keyframeQaApi.test.ts
+          src/__tests__/videoBlueprint.test.ts
+          src/__tests__/videoBlueprintPage.test.tsx
           src/__tests__/geminiStoryboardApi.test.ts
           src/__tests__/episodeProductionApi.test.ts
           src/__tests__/episodeProductionRunner.test.ts
