@@ -4,6 +4,7 @@ import {
   computeDirectorLocalFingerprint,
   syncDirectorCloud,
 } from '../services/director/directorCloudPersistence';
+import { syncLocalShotPipeline } from '../services/director/shotProductionWorkflow';
 
 type CloudState = 'booting' | 'synced' | 'syncing' | 'offline';
 
@@ -49,6 +50,12 @@ export const DirectorCloudPersistenceProvider: React.FC<React.PropsWithChildren>
       try {
         const result = await bootstrapDirectorCloud();
         if (cancelled) return;
+
+        // Convert legacy whole-stage PASS state into the current Shot-centric model
+        // before the first fingerprint is recorded. This annotates each existing
+        // Shot with stable dependency metadata and removes automatic-QA/global gates.
+        syncLocalShotPipeline();
+
         lastFingerprintRef.current = computeDirectorLocalFingerprint();
         setState('synced');
         setMessage(
