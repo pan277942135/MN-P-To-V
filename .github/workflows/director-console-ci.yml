@@ -11,13 +11,18 @@ on:
       - 'src/pages/ScriptDirectorPage.tsx'
       - 'src/pages/AutoStoryboardDirectorPage.tsx'
       - 'src/pages/GeminiStoryboardDirectorPage.tsx'
+      - 'src/pages/ShotListPage.tsx'
       - 'src/pages/KeyframeBlueprintPage.tsx'
       - 'src/pages/KeyframeAssetPage.tsx'
+      - 'src/pages/ManualKeyframePage.tsx'
       - 'src/pages/KeyframeQaPage.tsx'
       - 'src/pages/VideoBlueprintPage.tsx'
+      - 'src/pages/ShotVideoBlueprintPage.tsx'
       - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/services/director/geminiStoryboardClient.ts'
       - 'src/services/director/chatgptStoryboardImport.ts'
+      - 'src/services/director/storyboardShotOrder.ts'
+      - 'src/services/director/shotProductionWorkflow.ts'
       - 'src/services/director/keyframeBlueprint.ts'
       - 'src/services/director/keyframeAsset.ts'
       - 'src/services/director/keyframeAssetStore.ts'
@@ -48,6 +53,9 @@ on:
       - 'src/__tests__/geminiStoryboardDirectorPage.test.tsx'
       - 'src/__tests__/chatgptStoryboardImport.test.ts'
       - 'src/__tests__/chatgptStoryboardImportDialog.test.tsx'
+      - 'src/__tests__/storyboardShotOrder.test.ts'
+      - 'src/__tests__/shotProductionWorkflow.test.ts'
+      - 'src/__tests__/shotCentricWorkflowSourceContract.test.ts'
       - 'src/__tests__/keyframeBlueprint.test.ts'
       - 'src/__tests__/keyframeBlueprintPage.test.tsx'
       - 'src/__tests__/keyframeAsset.test.ts'
@@ -76,13 +84,18 @@ on:
       - 'src/pages/ScriptDirectorPage.tsx'
       - 'src/pages/AutoStoryboardDirectorPage.tsx'
       - 'src/pages/GeminiStoryboardDirectorPage.tsx'
+      - 'src/pages/ShotListPage.tsx'
       - 'src/pages/KeyframeBlueprintPage.tsx'
       - 'src/pages/KeyframeAssetPage.tsx'
+      - 'src/pages/ManualKeyframePage.tsx'
       - 'src/pages/KeyframeQaPage.tsx'
       - 'src/pages/VideoBlueprintPage.tsx'
+      - 'src/pages/ShotVideoBlueprintPage.tsx'
       - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/services/director/geminiStoryboardClient.ts'
       - 'src/services/director/chatgptStoryboardImport.ts'
+      - 'src/services/director/storyboardShotOrder.ts'
+      - 'src/services/director/shotProductionWorkflow.ts'
       - 'src/services/director/keyframeBlueprint.ts'
       - 'src/services/director/keyframeAsset.ts'
       - 'src/services/director/keyframeAssetStore.ts'
@@ -113,6 +126,9 @@ on:
       - 'src/__tests__/geminiStoryboardDirectorPage.test.tsx'
       - 'src/__tests__/chatgptStoryboardImport.test.ts'
       - 'src/__tests__/chatgptStoryboardImportDialog.test.tsx'
+      - 'src/__tests__/storyboardShotOrder.test.ts'
+      - 'src/__tests__/shotProductionWorkflow.test.ts'
+      - 'src/__tests__/shotCentricWorkflowSourceContract.test.ts'
       - 'src/__tests__/keyframeBlueprint.test.ts'
       - 'src/__tests__/keyframeBlueprintPage.test.tsx'
       - 'src/__tests__/keyframeAsset.test.ts'
@@ -168,6 +184,9 @@ jobs:
           src/__tests__/geminiStoryboardDirectorPage.test.tsx
           src/__tests__/chatgptStoryboardImport.test.ts
           src/__tests__/chatgptStoryboardImportDialog.test.tsx
+          src/__tests__/storyboardShotOrder.test.ts
+          src/__tests__/shotProductionWorkflow.test.ts
+          src/__tests__/shotCentricWorkflowSourceContract.test.ts
           src/__tests__/keyframeBlueprint.test.ts
           src/__tests__/keyframeBlueprintPage.test.tsx
           src/__tests__/keyframeAsset.test.ts
