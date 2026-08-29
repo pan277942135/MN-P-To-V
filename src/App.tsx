@@ -4,10 +4,10 @@ import { Navbar } from './components/Navbar';
 import { Sidebar, type NavTab } from './components/Sidebar';
 import { DirectorCloudPersistenceProvider } from './components/DirectorCloudPersistenceProvider';
 import { GeminiStoryboardDirectorPage } from './pages/GeminiStoryboardDirectorPage';
+import { ShotListPage } from './pages/ShotListPage';
 import { KeyframeBlueprintPage } from './pages/KeyframeBlueprintPage';
-import { KeyframeAssetPage } from './pages/KeyframeAssetPage';
-import { KeyframeQaPage } from './pages/KeyframeQaPage';
-import { VideoBlueprintPage } from './pages/VideoBlueprintPage';
+import { ManualKeyframePage } from './pages/ManualKeyframePage';
+import { ShotVideoBlueprintPage } from './pages/ShotVideoBlueprintPage';
 import { DirectorConsolePage } from './pages/DirectorConsolePage';
 import { StudioPage } from './pages/StudioPage';
 import { CharacterLibraryPage } from './pages/CharacterLibraryPage';
@@ -34,7 +34,11 @@ export function AppContent() {
 
         <main ref={mainRef} className="flex-1 overflow-y-auto bg-zinc-950/50 pb-20 md:pb-0">
           <div className={activeTab === 'director' ? 'block' : 'hidden'}>
-            <GeminiStoryboardDirectorPage />
+            {activeTab === 'director' && <GeminiStoryboardDirectorPage />}
+          </div>
+
+          <div className={activeTab === 'shot-list' ? 'block' : 'hidden'}>
+            {activeTab === 'shot-list' && <ShotListPage />}
           </div>
 
           <div className={activeTab === 'keyframes' ? 'block' : 'hidden'}>
@@ -42,15 +46,11 @@ export function AppContent() {
           </div>
 
           <div className={activeTab === 'keyframe-assets' ? 'block' : 'hidden'}>
-            {activeTab === 'keyframe-assets' && <KeyframeAssetPage />}
-          </div>
-
-          <div className={activeTab === 'keyframe-qa' ? 'block' : 'hidden'}>
-            {activeTab === 'keyframe-qa' && <KeyframeQaPage />}
+            {activeTab === 'keyframe-assets' && <ManualKeyframePage />}
           </div>
 
           <div className={activeTab === 'video-blueprint' ? 'block' : 'hidden'}>
-            {activeTab === 'video-blueprint' && <VideoBlueprintPage />}
+            {activeTab === 'video-blueprint' && <ShotVideoBlueprintPage />}
           </div>
 
           <div className={activeTab === 'monitor' ? 'block' : 'hidden'}>
