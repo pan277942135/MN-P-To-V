@@ -6,6 +6,7 @@ import { Storage } from '@google-cloud/storage';
 import { getFirestoreInstance } from './src/server/db/firestore';
 import { VideoGenerator } from './src/services/video/videoGenerator';
 import { VideoInspector } from './src/services/video/videoInspector';
+import { resolveAutoAspectRatio } from './src/services/google/vertexClient';
 import { redactSecrets } from './src/utils/redactSecrets';
 import {
   MVP_ALLOWED_DURATIONS,
@@ -142,6 +143,7 @@ async function submitVeoOnce(params: {
   attempt: number;
 }): Promise<string> {
   const token = await getAccessToken();
+  const aspectRatio = await resolveAutoAspectRatio(params.imageBuffer.toString('base64'));
   const body = {
     instances: [{
       prompt: params.prompt,
@@ -149,7 +151,7 @@ async function submitVeoOnce(params: {
     }],
     parameters: {
       sampleCount: 1,
-      aspectRatio: '9:16',
+      aspectRatio,
       durationSeconds: params.durationSeconds,
       resolution: '1080p',
       personGeneration: 'allow_adult',
