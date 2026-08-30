@@ -10,6 +10,8 @@ on:
       - 'mvp-server-v021.ts'
       - 'Dockerfile.mvp'
       - 'src/mvp/**'
+      - 'src/services/google/vertexClient.ts'
+      - 'src/__tests__/autoAspectRatio.test.ts'
       - 'src/__tests__/mvpSimpleContract.test.ts'
       - 'src/__tests__/mvpIdentitySafe.test.ts'
       - 'src/__tests__/mvpNetworkDeadlineHardening.test.ts'
