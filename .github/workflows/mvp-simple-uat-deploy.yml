@@ -39,7 +39,8 @@ env:
   WIF_PROVIDER: projects/89614354864/locations/global/workloadIdentityPools/github-actions-mnptov/providers/repo
   DEPLOY_SA: github-deployer@xp-vertex-project.iam.gserviceaccount.com
   RUNTIME_SA: zaojing-video-runtime@xp-vertex-project.iam.gserviceaccount.com
-  VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
+  VEO_PROJECT_ID: project-8fe00d61-ebb2-4c00-bd4
+  VEO_OUTPUT_BUCKET: zaojing-veo-1081354869565-us-central1
   FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
   VEO_MODEL_ID: veo-3.1-fast-generate-001
   IDENTITY_QA_MODEL: gemini-2.5-flash
@@ -101,7 +102,7 @@ jobs:
             --concurrency=4 \
             --min-instances=0 \
             --max-instances=2 \
-            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA" \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$VEO_PROJECT_ID,GCP_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA" \
             --quiet
 
           SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
@@ -137,6 +138,8 @@ jobs:
           grep -q '"idempotencyLookup":true' client-health.json
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/readiness" | tee readiness.json
           grep -q '"ready":true' readiness.json
+          grep -q '"projectId":"project-8fe00d61-ebb2-4c00-bd4"' readiness.json
+          grep -q '"outputBucket":"zaojing-veo-1081354869565-us-central1"' readiness.json
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/benchmark/catalog" | tee benchmark.json
           grep -q 'IDSAFE-24' benchmark.json
 
@@ -164,6 +167,9 @@ jobs:
             echo "- Fixed UAT URL: ${{ steps.deploy.outputs.service_url }}"
             echo "- Browser access: public preview / no IAP"
             echo "- Public HTTP check: \`${{ steps.public.outputs.status }}\`"
+            echo "- Veo project: \`$VEO_PROJECT_ID\`"
+            echo "- Veo output bucket: \`$VEO_OUTPUT_BUCKET\`"
+            echo "- Firestore project: \`$PROJECT_ID\`"
             echo "- Video model: \`$VEO_MODEL_ID\`"
             echo "- Identity QA model: \`$IDENTITY_QA_MODEL\`"
             echo "- Client network recovery: \`true\`"
@@ -200,6 +206,9 @@ jobs:
           - Browser access: \`public preview / no IAP\`
           - Public access step: \`${PUBLIC_OUTCOME:-not_run}\`
           - Public HTTP status: \`${PUBLIC_STATUS:-unknown}\`
+          - Veo project: \`$VEO_PROJECT_ID\`
+          - Veo output bucket: \`$VEO_OUTPUT_BUCKET\`
+          - Firestore project: \`$PROJECT_ID\`
           - Provider/model: \`Vertex AI / $VEO_MODEL_ID\`
           - Identity QA: \`Vertex AI / $IDENTITY_QA_MODEL\`
           - Network hardening: \`idempotency lookup + transport recovery\`
