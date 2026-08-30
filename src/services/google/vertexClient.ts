@@ -1,3 +1,4 @@
+import sharp from 'sharp';
 import { type ActiveSession } from './credentialService';
 import { redactSecrets } from '../../utils/redactSecrets';
 import { resolveVeoStorageUri, resolveVeoOutputBucket, assertProductionStorageConfig } from '../../server/storage/gcsArtifactStore';
@@ -12,6 +13,19 @@ export interface RoutingTestResult {
   modelId: string;
   endpoint: string;
   routeResolved: boolean;
+}
+
+export type VeoAspectRatio = '9:16' | '16:9';
+
+export async function resolveAutoAspectRatio(imageBase64: string): Promise<VeoAspectRatio> {
+  const imageBuffer = Buffer.from(imageBase64, 'base64');
+  const metadata = await sharp(imageBuffer).metadata();
+  const width = Number(metadata.width || 0);
+  const height = Number(metadata.height || 0);
+  if (width <= 0 || height <= 0) {
+    throw new Error('无法读取首帧尺寸，无法自动确定视频方向');
+  }
+  return width > height ? '16:9' : '9:16';
 }
 
 export class VertexClient {
@@ -98,6 +112,7 @@ export class VertexClient {
     const region = session.region || session.location || 'us-central1';
     const modelId = payload.modelId || 'veo-3.1-fast-generate-001';
     const durationSeconds = payload.durationSeconds || 6;
+    const aspectRatio = await resolveAutoAspectRatio(payload.imageBase64);
 
     const endpoint = `https://${region}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${region}/publishers/google/models/${modelId}:predictLongRunning`;
 
@@ -117,7 +132,8 @@ export class VertexClient {
 
     const storageUri = payload.storageUri || resolveVeoStorageUri(payload.taskId || `task_${Date.now()}`);
 
-    // Single first-frame image-to-video request format for M1
+    // AUTO aspect ratio: inherit the actual first-frame orientation.
+    // Landscape -> 16:9; portrait or square -> 9:16.
     const body: Record<string, any> = {
       instances: [
         {
@@ -130,7 +146,7 @@ export class VertexClient {
       ],
       parameters: {
         sampleCount: 1,
-        aspectRatio: '9:16',
+        aspectRatio,
         durationSeconds,
         resolution: '1080p',
         personGeneration: 'allow_adult',
@@ -234,4 +250,3 @@ export class VertexClient {
     return await res.json();
   }
 }
-
