@@ -12,13 +12,16 @@ on:
       - 'mvp-server.ts'
       - 'mvp-server-v02.ts'
       - 'mvp-server-v021.ts'
+      - 'mvp-server-v022.ts'
       - 'identity-benchmark-runner.ts'
       - 'Dockerfile.mvp'
       - 'src/mvp/**'
+      - 'src/server/services/imagePreprocessor.ts'
       - 'src/__tests__/autoAspectRatio.test.ts'
       - 'src/__tests__/mvpProviderAutoAspect.contract.test.ts'
       - 'src/__tests__/mvpSimpleContract.test.ts'
       - 'src/__tests__/mvpIdentitySafe.test.ts'
+      - 'src/__tests__/identitySafeV022.test.ts'
       - 'src/__tests__/mvpNetworkDeadlineHardening.test.ts'
       - '.github/workflows/mvp-simple-*.yml'
       - '.github/workflows/identity-safe-real-benchmark.yml'
@@ -50,6 +53,9 @@ jobs:
       - name: Identity Safe v0.2 tests and 24-case benchmark contract
         run: bunx vitest run src/__tests__/mvpIdentitySafe.test.ts
 
+      - name: Identity Safe v0.2.2 protected-routing tests
+        run: bunx vitest run src/__tests__/identitySafeV022.test.ts
+
       - name: AUTO aspect ratio tests
         run: bunx vitest run src/__tests__/autoAspectRatio.test.ts src/__tests__/mvpProviderAutoAspect.contract.test.ts
 
@@ -61,15 +67,16 @@ jobs:
           VEO_OUTPUT_BUCKET: ai-studio-bucket-89614354864-asia-south1
         run: bun run test
 
-      - name: Build standalone Identity Safe v0.2.1 server
+      - name: Build standalone Identity Safe v0.2.2 server
         run: |
-          bunx esbuild mvp-server-v021.ts \
+          bunx esbuild mvp-server-v022.ts \
             --bundle \
             --platform=node \
             --format=cjs \
             --packages=external \
             --sourcemap \
             --outfile=dist/mvp-server.cjs
+          test -s dist/mvp-server.cjs
 
       - name: Build standalone real benchmark runner
         run: |
@@ -95,19 +102,22 @@ jobs:
             -e GOOGLE_CLOUD_PROJECT=xp-vertex-project \
             -e VERTEX_LOCATION=us-central1 \
             -e IDENTITY_QA_MODEL=gemini-2.5-flash \
+            -e PROTECTION_ROUTER_MODEL=gemini-2.5-flash \
+            -e SCENE_QA_MODEL=gemini-2.5-flash \
             -p 18080:8080 zaojing-mvp-simple:ci)"
           cleanup() { docker rm -f "$cid" >/dev/null 2>&1 || true; }
           trap cleanup EXIT
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:18080/api/mvp/health >/tmp/mvp-health.json; then
               cat /tmp/mvp-health.json
-              grep -q 'MVP_IDENTITY_SAFE_V02' /tmp/mvp-health.json
+              grep -q 'MVP_IDENTITY_SAFE_V022' /tmp/mvp-health.json
+              grep -q 'identity-safe-v0.2.2' /tmp/mvp-health.json
               curl -fsS http://127.0.0.1:18080/api/mvp/client-health >/tmp/mvp-client-health.json
-              grep -q 'identity-safe-v0.2.1-network-hardening' /tmp/mvp-client-health.json
-              grep -q '"networkRecovery":true' /tmp/mvp-client-health.json
+              grep -q 'identity-safe-v0.2.2-scene-routing' /tmp/mvp-client-health.json
+              grep -q '"protectionRouting":true' /tmp/mvp-client-health.json
+              grep -q '"autoPreprocess":true' /tmp/mvp-client-health.json
               curl -fsS http://127.0.0.1:18080/ >/tmp/mvp-index.html
-              grep -q 'Identity Safe v0.2.1' /tmp/mvp-index.html
-              grep -q 'NETWORK_RECOVERING' /tmp/mvp-index.html
+              grep -q 'Identity Safe v0.2.2' /tmp/mvp-index.html
               grep -q '/api/mvp/videos/lookup' /tmp/mvp-index.html
               curl -fsS http://127.0.0.1:18080/api/mvp/benchmark/catalog >/tmp/mvp-benchmark.json
               grep -q 'IDSAFE-24' /tmp/mvp-benchmark.json
