@@ -13,43 +13,31 @@ export interface ImagePreprocessResult {
 }
 
 const MIN_SHORT_SIDE = 512;
+const MIN_LONG_SIDE = 768;
 const TARGET_SHORT_SIDE = 720;
 
 /**
- * Prepare uploaded images for Veo generation.
- * Rules:
- * - Keep source orientation.
- * - Landscape -> 16:9.
- * - Portrait -> 9:16.
- * - Never crop.
- * - Resize by aspect-preserving scale only.
+ * Prepare an uploaded first frame without changing its content semantics.
+ * Only an aspect-preserving resize is permitted; no crop, generative upscale,
+ * reframing or identity-changing enhancement is performed.
  */
 export async function preprocessVeoImage(input: Buffer): Promise<ImagePreprocessResult> {
-  const image = sharp(input);
-  const metadata = await image.metadata();
-
-  if (!metadata.width || !metadata.height) {
-    throw new Error('INVALID_IMAGE_DIMENSIONS');
-  }
-
-  const originalWidth = metadata.width;
-  const originalHeight = metadata.height;
-  const portrait = originalHeight > originalWidth;
+  const metadata = await sharp(input).metadata();
+  const originalWidth = Number(metadata.width || 0);
+  const originalHeight = Number(metadata.height || 0);
+  if (originalWidth <= 0 || originalHeight <= 0) throw new Error('INVALID_IMAGE_DIMENSIONS');
 
   const shortSide = Math.min(originalWidth, originalHeight);
-  const scale = shortSide < MIN_SHORT_SIDE ? TARGET_SHORT_SIDE / shortSide : 1;
-
+  const longSide = Math.max(originalWidth, originalHeight);
+  const needsResize = shortSide < MIN_SHORT_SIDE || longSide < MIN_LONG_SIDE;
+  const scale = needsResize
+    ? Math.max(TARGET_SHORT_SIDE / shortSide, MIN_LONG_SIDE / longSide)
+    : 1;
   const processedWidth = Math.round(originalWidth * scale);
   const processedHeight = Math.round(originalHeight * scale);
-
-  const buffer = await image
-    .resize({
-      width: processedWidth,
-      height: processedHeight,
-      fit: 'fill',
-    })
-    .jpeg({ quality: 95 })
-    .toBuffer();
+  const buffer = scale === 1
+    ? Buffer.from(input)
+    : await sharp(input).resize({ width: processedWidth, height: processedHeight, fit: 'fill' }).toBuffer();
 
   return {
     buffer,
@@ -57,7 +45,7 @@ export async function preprocessVeoImage(input: Buffer): Promise<ImagePreprocess
     originalHeight,
     processedWidth,
     processedHeight,
-    orientation: portrait ? '9:16' : '16:9',
+    orientation: originalWidth > originalHeight ? '16:9' : '9:16',
     autoEnhanced: scale !== 1,
   };
 }
