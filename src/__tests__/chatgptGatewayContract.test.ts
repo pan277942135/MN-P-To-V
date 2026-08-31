@@ -215,8 +215,8 @@ describe('ChatGPT Actions gateway contract', () => {
     expect(instructions).toContain('从用户原图重新进行一次 ChatGPT 图像编辑');
     expect(dockerGateway).toContain('esbuild chatgpt-gateway.ts');
     expect(dockerGateway).not.toContain('chatgpt-gateway-v12.ts');
-    expect(dockerMvp).toContain('esbuild mvp-server-v021.ts');
-    expect(dockerMvp).not.toContain('mvp-server-v022.ts');
+    expect(dockerMvp).toContain('esbuild mvp-server-v022.ts');
+    expect(dockerMvp).not.toContain('esbuild mvp-server-v021.ts');
   });
 
   it('binds ChatGPT editing to the current source image and fails closed on unchanged output', () => {
