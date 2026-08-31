@@ -8,12 +8,15 @@ on:
       - 'mvp-server.ts'
       - 'mvp-server-v02.ts'
       - 'mvp-server-v021.ts'
+      - 'mvp-server-v022.ts'
       - 'Dockerfile.mvp'
       - 'src/mvp/**'
+      - 'src/server/services/imagePreprocessor.ts'
       - 'src/services/google/vertexClient.ts'
       - 'src/__tests__/autoAspectRatio.test.ts'
       - 'src/__tests__/mvpSimpleContract.test.ts'
       - 'src/__tests__/mvpIdentitySafe.test.ts'
+      - 'src/__tests__/identitySafeV022.test.ts'
       - 'src/__tests__/mvpNetworkDeadlineHardening.test.ts'
       - 'MVP_SIMPLE_ACCEPTANCE.md'
       - '.github/workflows/mvp-simple-uat-deploy.yml'
@@ -44,6 +47,8 @@ env:
   FIRESTORE_DATABASE_ID: ai-studio-0806-1d34279b-010b-4a28-8239-d080392dee29
   VEO_MODEL_ID: veo-3.1-fast-generate-001
   IDENTITY_QA_MODEL: gemini-2.5-flash
+  PROTECTION_ROUTER_MODEL: gemini-2.5-flash
+  SCENE_QA_MODEL: gemini-2.5-flash
 
 jobs:
   deploy:
@@ -102,7 +107,7 @@ jobs:
             --concurrency=4 \
             --min-instances=0 \
             --max-instances=2 \
-            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$VEO_PROJECT_ID,GCP_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA" \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$VEO_PROJECT_ID,GCP_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,PROTECTION_ROUTER_MODEL=$PROTECTION_ROUTER_MODEL,SCENE_QA_MODEL=$SCENE_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA" \
             --quiet
 
           SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
@@ -121,7 +126,7 @@ jobs:
           id_token_audience: ${{ steps.deploy.outputs.service_url }}
           id_token_include_email: true
 
-      - name: Verify Identity Safe v0.2.1 health and full readiness
+      - name: Verify Identity Safe v0.2.2 health and full readiness
         id: verify
         shell: bash
         env:
@@ -130,16 +135,23 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/health" | tee health.json
-          grep -q '"mode":"MVP_IDENTITY_SAFE_V02"' health.json
+          grep -q '"mode":"MVP_IDENTITY_SAFE_V022"' health.json
+          grep -q '"identitySafeVersion":"identity-safe-v0.2.2"' health.json
           grep -q '"identityQaModel":"gemini-2.5-flash"' health.json
+          grep -q '"protectionRouterModel":"gemini-2.5-flash"' health.json
+          grep -q '"sceneQaModel":"gemini-2.5-flash"' health.json
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/client-health" | tee client-health.json
-          grep -q 'identity-safe-v0.2.1-network-hardening' client-health.json
+          grep -q 'identity-safe-v0.2.2-scene-routing' client-health.json
           grep -q '"networkRecovery":true' client-health.json
           grep -q '"idempotencyLookup":true' client-health.json
+          grep -q '"protectionRouting":true' client-health.json
+          grep -q '"autoPreprocess":true' client-health.json
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/readiness" | tee readiness.json
           grep -q '"ready":true' readiness.json
           grep -q '"projectId":"project-8fe00d61-ebb2-4c00-bd4"' readiness.json
           grep -q '"outputBucket":"zaojing-veo-1081354869565-us-central1"' readiness.json
+          grep -q '"protectionRouterModel":"gemini-2.5-flash"' readiness.json
+          grep -q '"sceneQaModel":"gemini-2.5-flash"' readiness.json
           curl -fsS -H "Authorization: Bearer $ID_TOKEN" "$SERVICE_URL/api/mvp/benchmark/catalog" | tee benchmark.json
           grep -q 'IDSAFE-24' benchmark.json
 
@@ -153,13 +165,14 @@ jobs:
           PUBLIC_STATUS="$(curl -sS -o public.html -w '%{http_code}' "$SERVICE_URL/" || true)"
           echo "status=$PUBLIC_STATUS" >> "$GITHUB_OUTPUT"
           test "$PUBLIC_STATUS" = '200'
+          grep -q 'Identity Safe v0.2.2' public.html
 
       - name: Deployment summary
         if: success()
         shell: bash
         run: |
           {
-            echo '## MVP Identity Safe v0.2.1 UAT ready'
+            echo '## MVP Identity Safe v0.2.2 UAT ready'
             echo ''
             echo "- Source commit: \`${{ steps.image.outputs.source_sha }}\`"
             echo "- Cloud Run service: \`$SERVICE\`"
@@ -172,10 +185,12 @@ jobs:
             echo "- Firestore project: \`$PROJECT_ID\`"
             echo "- Video model: \`$VEO_MODEL_ID\`"
             echo "- Identity QA model: \`$IDENTITY_QA_MODEL\`"
-            echo "- Client network recovery: \`true\`"
-            echo "- Idempotency lookup: \`true\`"
+            echo "- Protection router model: \`$PROTECTION_ROUTER_MODEL\`"
+            echo "- Scene QA model: \`$SCENE_QA_MODEL\`"
+            echo "- Protection routing: \`IDENTITY (strict) / SCENE (scene continuity)\`"
+            echo "- Input auto-preprocess: \`true\`"
             echo "- Runtime auth: ADC / \`$RUNTIME_SA\`"
-            echo "- Benchmark catalog: 24 cases"
+            echo "- Benchmark catalog: 24 identity cases + v0.2.2 routing regression"
             echo ''
             echo 'UAT is intentionally public for preview. Production access control remains a separate hardening step.'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -195,9 +210,9 @@ jobs:
         run: |
           set -euo pipefail
           READINESS="$(cat readiness.json 2>/dev/null || echo '{"ready":false,"evidence":"readiness unavailable"}')"
-          CLIENT_HEALTH="$(cat client-health.json 2>/dev/null || echo '{"networkRecovery":false,"evidence":"client health unavailable"}')"
+          CLIENT_HEALTH="$(cat client-health.json 2>/dev/null || echo '{"protectionRouting":false,"evidence":"client health unavailable"}')"
           BODY=$(cat <<EOF
-          ### MVP Identity Safe v0.2.1 UAT deployment evidence
+          ### MVP Identity Safe v0.2.2 UAT deployment evidence
           - Job status: \`$JOB_STATUS\`
           - Source SHA: \`${SOURCE_SHA:-unavailable}\`
           - Cloud Run service: \`$SERVICE\`
@@ -211,8 +226,10 @@ jobs:
           - Firestore project: \`$PROJECT_ID\`
           - Provider/model: \`Vertex AI / $VEO_MODEL_ID\`
           - Identity QA: \`Vertex AI / $IDENTITY_QA_MODEL\`
-          - Network hardening: \`idempotency lookup + transport recovery\`
-          - Benchmark catalog: \`24 cases\`
+          - Protection router: \`Vertex AI / $PROTECTION_ROUTER_MODEL\`
+          - Scene QA: \`Vertex AI / $SCENE_QA_MODEL\`
+          - Routing rule: \`uncertain => IDENTITY fail-closed; high-confidence non-dominant ensemble => SCENE QA\`
+          - Input auto-preprocess: \`aspect-preserving resize only\`
           - Readiness step: \`${VERIFY_OUTCOME:-not_run}\`
 
           Client health:
