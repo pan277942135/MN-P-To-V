@@ -14,8 +14,10 @@ import {
   keyframeInputResolver,
   type KeyframeInputResolverLike,
 } from './keyframeInputResolver';
+import { syncVideoAssetToRegistry } from './assetRegistry/assetRegistrySyncService';
 
 export interface ShotProductionRunInput {
+  projectId?: string;
   episodeId: string;
   shotId: string;
   openaiFileRef?: ChatGptConversationFileRef;
@@ -249,7 +251,22 @@ export class ShotProductionService implements ShotProductionServiceLike {
           409,
         );
       }
-      return resultFromCompletedShot(shot, episodeId, shotId, true);
+      const replayed = resultFromCompletedShot(shot, episodeId, shotId, true);
+      await syncVideoAssetToRegistry({
+        projectId: input.projectId,
+        shot,
+        artifact: {
+          assetId: replayed.taskId,
+          videoUrl: replayed.videoUrl,
+          downloadUrl: replayed.downloadUrl,
+          durationSeconds: shot.durationSeconds,
+        },
+        sourceType: 'VEO_GENERATED_REPLAY',
+      }).catch((error) => {
+        console.warn('[Asset Registry] completed video replay sync skipped:', error instanceof Error ? error.message : String(error));
+        return null;
+      });
+      return replayed;
     }
 
     if (
@@ -343,6 +360,20 @@ export class ShotProductionService implements ShotProductionServiceLike {
           503,
         );
       }
+      await syncVideoAssetToRegistry({
+        projectId: input.projectId,
+        shot: completed,
+        artifact: {
+          assetId: result.taskId,
+          videoUrl: result.videoUrl,
+          downloadUrl: result.downloadUrl,
+          durationSeconds: completed.durationSeconds,
+        },
+        sourceType: 'VEO_GENERATED',
+      }).catch((error) => {
+        console.warn('[Asset Registry] video sync skipped:', error instanceof Error ? error.message : String(error));
+        return null;
+      });
       return { ...result, shotStatus: 'COMPLETED', replayed: false };
     } catch (error: unknown) {
       if (taskBound) {

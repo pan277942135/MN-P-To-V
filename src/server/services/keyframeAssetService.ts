@@ -3,12 +3,15 @@ import sharp from 'sharp';
 import type { KeyframeProvider, ShotSpec } from '../../domain/episode/episodeTypes';
 import { gcsArtifactStore, resolveVeoOutputBucket } from '../storage/gcsArtifactStore';
 import { firestoreShotRepository } from '../repositories/firestoreShotRepository';
+import { syncKeyframeAssetToRegistry } from './assetRegistry/assetRegistrySyncService';
 
 const MAX_KEYFRAME_BYTES = 20 * 1024 * 1024;
 
 type SupportedImageMime = 'image/jpeg' | 'image/png' | 'image/webp';
 
 export interface PersistKeyframeAssetInput {
+  /** Optional Director project scope; the adapter can resolve it from Director Cloud when omitted. */
+  projectId?: string;
   episodeId: string;
   shotId: string;
   provider: KeyframeProvider;
@@ -127,6 +130,14 @@ export class KeyframeAssetService {
       shot.keyframe.outputBucket &&
       shot.keyframe.outputObjectPath
     ) {
+      await syncKeyframeAssetToRegistry({
+        projectId: input.projectId,
+        shot,
+        sourceType: 'KEYFRAME_ASSET_REUSED',
+      }).catch((error) => {
+        console.warn('[Asset Registry] keyframe reuse sync skipped:', error instanceof Error ? error.message : String(error));
+        return null;
+      });
       return {
         shot,
         assetId,
@@ -170,6 +181,18 @@ export class KeyframeAssetService {
           promptHash,
           persistedAt: artifact.artifactPersistedAt || Date.now(),
         },
+      });
+
+      // Registry indexing is deliberately best effort. A Registry outage must
+      // never turn a successfully persisted production keyframe into a failed
+      // keyframe request.
+      await syncKeyframeAssetToRegistry({
+        projectId: input.projectId,
+        shot: updated,
+        sourceType: 'KEYFRAME_ASSET',
+      }).catch((error) => {
+        console.warn('[Asset Registry] keyframe sync skipped:', error instanceof Error ? error.message : String(error));
+        return null;
       });
 
       return {

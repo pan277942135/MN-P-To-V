@@ -14,6 +14,7 @@ import { CharacterLibraryPage } from './pages/CharacterLibraryPage';
 import { TaskHistoryPage } from './pages/TaskHistoryPage';
 import { HumanReviewQueuePage } from './pages/HumanReviewQueuePage';
 import { ComputeSettingsPage } from './pages/ComputeSettingsPage';
+import { AssetLibraryPage } from './pages/AssetLibraryPage';
 
 export function AppContent() {
   const [activeTab, setActiveTab] = useState<NavTab>('director');
@@ -51,6 +52,10 @@ export function AppContent() {
 
           <div className={activeTab === 'video-blueprint' ? 'block' : 'hidden'}>
             {activeTab === 'video-blueprint' && <ShotVideoBlueprintPage />}
+          </div>
+
+          <div className={activeTab === 'assets' ? 'block' : 'hidden'}>
+            {activeTab === 'assets' && <AssetLibraryPage />}
           </div>
 
           <div className={activeTab === 'monitor' ? 'block' : 'hidden'}>

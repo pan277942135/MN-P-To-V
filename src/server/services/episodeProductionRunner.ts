@@ -20,6 +20,7 @@ export interface EpisodeShotRuntimeInput {
 }
 
 export interface EpisodeProductionRunInput {
+  projectId?: string;
   episodeId: string;
   shots?: Partial<Record<V0ShotId, EpisodeShotRuntimeInput>>;
 }
@@ -287,6 +288,7 @@ export class EpisodeProductionRunner {
 
       try {
         lastShotResult = await this.shotProductionService.run({
+          ...(input.projectId ? { projectId: input.projectId } : {}),
           episodeId,
           shotId: shot.shotId,
           openaiFileRef: runtimeInput?.openaiFileRef,

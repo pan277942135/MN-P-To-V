@@ -5,6 +5,10 @@ import {
   type DirectorCloudSnapshot,
 } from '../repositories/firestoreDirectorProjectRepository';
 import { directorGcsStore, type DirectorCloudAssetRef } from '../storage/directorGcsStore';
+import {
+  assetRegistrySyncService,
+  type AssetRegistrySyncServiceLike,
+} from './assetRegistry/assetRegistrySyncService';
 
 export interface DirectorPersistenceRepositoryLike {
   isAvailable(): boolean;
@@ -75,6 +79,7 @@ export class DirectorCloudPersistenceService {
   constructor(
     private readonly repository: DirectorPersistenceRepositoryLike = firestoreDirectorProjectRepository,
     private readonly assetStore: DirectorAssetStoreLike = directorGcsStore,
+    private readonly assetRegistry: AssetRegistrySyncServiceLike = assetRegistrySyncService,
   ) {}
 
   isAvailable() {
@@ -119,7 +124,14 @@ export class DirectorCloudPersistenceService {
       savedAt: Date.now(),
     };
 
-    return this.repository.upsertSnapshot(snapshot);
+    const record = await this.repository.upsertSnapshot(snapshot);
+    // Director Cloud already owns the production snapshot. Asset Registry is a
+    // projection used for cross-project discovery, so an indexing failure is
+    // logged and deliberately does not fail the cloud persistence request.
+    await this.assetRegistry.syncLegacySnapshotAssets({ snapshot }).catch((error) => {
+      console.warn('[Asset Registry] Director Cloud snapshot indexing skipped:', error instanceof Error ? error.message : String(error));
+    });
+    return record;
   }
 
   get(projectId: string, episodeId?: string) {

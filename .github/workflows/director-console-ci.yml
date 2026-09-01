@@ -4,10 +4,12 @@ on:
   pull_request:
     paths:
       - 'package.json'
+      - 'server.ts'
       - 'director-server.ts'
       - 'src/App.tsx'
       - 'src/components/DirectorCloudPersistenceProvider.tsx'
       - 'src/components/Sidebar.tsx'
+      - 'src/components/ProjectAssetSummary.tsx'
       - 'src/pages/ScriptDirectorPage.tsx'
       - 'src/pages/AutoStoryboardDirectorPage.tsx'
       - 'src/pages/GeminiStoryboardDirectorPage.tsx'
@@ -18,6 +20,8 @@ on:
       - 'src/pages/KeyframeQaPage.tsx'
       - 'src/pages/VideoBlueprintPage.tsx'
       - 'src/pages/ShotVideoBlueprintPage.tsx'
+      - 'src/pages/AssetLibraryPage.tsx'
+      - 'src/services/assetRegistry/**'
       - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/services/director/geminiStoryboardClient.ts'
       - 'src/services/director/chatgptStoryboardImport.ts'
@@ -32,9 +36,11 @@ on:
       - 'src/services/director/videoBlueprint.ts'
       - 'src/services/director/directorCloudPersistence.ts'
       - 'src/server/repositories/firestoreDirectorProjectRepository.ts'
+      - 'src/server/repositories/directorAssetRepository.ts'
       - 'src/server/storage/directorGcsStore.ts'
       - 'src/server/services/directorCloudPersistenceService.ts'
       - 'src/server/services/directorCloudPersistenceRouter.ts'
+      - 'src/server/services/assetRegistry/**'
       - 'src/server/services/geminiStoryboardService.ts'
       - 'src/server/services/geminiKeyframeImageService.ts'
       - 'src/server/services/geminiKeyframeQaService.ts'
@@ -44,6 +50,7 @@ on:
       - 'src/server/services/episodeProductionRunner.ts'
       - 'src/server/services/keyframeInputResolver.ts'
       - 'src/__tests__/directorCloudPersistenceService.test.ts'
+      - 'src/__tests__/assetRegistry*.test.ts'
       - 'src/__tests__/directorCloudPersistenceRouter.test.ts'
       - 'src/__tests__/directorCloudPersistenceClient.test.ts'
       - 'src/__tests__/directorCloudPersistenceSourceContract.test.ts'
@@ -77,10 +84,12 @@ on:
       - main
     paths:
       - 'package.json'
+      - 'server.ts'
       - 'director-server.ts'
       - 'src/App.tsx'
       - 'src/components/DirectorCloudPersistenceProvider.tsx'
       - 'src/components/Sidebar.tsx'
+      - 'src/components/ProjectAssetSummary.tsx'
       - 'src/pages/ScriptDirectorPage.tsx'
       - 'src/pages/AutoStoryboardDirectorPage.tsx'
       - 'src/pages/GeminiStoryboardDirectorPage.tsx'
@@ -91,6 +100,8 @@ on:
       - 'src/pages/KeyframeQaPage.tsx'
       - 'src/pages/VideoBlueprintPage.tsx'
       - 'src/pages/ShotVideoBlueprintPage.tsx'
+      - 'src/pages/AssetLibraryPage.tsx'
+      - 'src/services/assetRegistry/**'
       - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/services/director/geminiStoryboardClient.ts'
       - 'src/services/director/chatgptStoryboardImport.ts'
@@ -105,9 +116,11 @@ on:
       - 'src/services/director/videoBlueprint.ts'
       - 'src/services/director/directorCloudPersistence.ts'
       - 'src/server/repositories/firestoreDirectorProjectRepository.ts'
+      - 'src/server/repositories/directorAssetRepository.ts'
       - 'src/server/storage/directorGcsStore.ts'
       - 'src/server/services/directorCloudPersistenceService.ts'
       - 'src/server/services/directorCloudPersistenceRouter.ts'
+      - 'src/server/services/assetRegistry/**'
       - 'src/server/services/geminiStoryboardService.ts'
       - 'src/server/services/geminiKeyframeImageService.ts'
       - 'src/server/services/geminiKeyframeQaService.ts'
@@ -117,6 +130,7 @@ on:
       - 'src/server/services/episodeProductionRunner.ts'
       - 'src/server/services/keyframeInputResolver.ts'
       - 'src/__tests__/directorCloudPersistenceService.test.ts'
+      - 'src/__tests__/assetRegistry*.test.ts'
       - 'src/__tests__/directorCloudPersistenceRouter.test.ts'
       - 'src/__tests__/directorCloudPersistenceClient.test.ts'
       - 'src/__tests__/directorCloudPersistenceSourceContract.test.ts'
@@ -173,6 +187,8 @@ jobs:
         run: >-
           bunx vitest run
           src/__tests__/directorCloudPersistenceService.test.ts
+          src/__tests__/assetRegistrySyncService.test.ts
+          src/__tests__/assetRegistryRouter.test.ts
           src/__tests__/directorCloudPersistenceRouter.test.ts
           src/__tests__/directorCloudPersistenceClient.test.ts
           src/__tests__/directorCloudPersistenceSourceContract.test.ts

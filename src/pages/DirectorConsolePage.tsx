@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { EpisodeSpec, ShotSpec } from '../domain/episode/episodeTypes';
+import { useDirectorCloud } from '../components/DirectorCloudPersistenceProvider';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -114,6 +115,7 @@ function pipelineLabel(shot: DirectorShot) {
 }
 
 export const DirectorConsolePage: React.FC = () => {
+  const { record } = useDirectorCloud();
   const [episodeId, setEpisodeId] = useState(() => localStorage.getItem('zaojing_director_episode_id') || 'MN-EP001');
   const [episodes, setEpisodes] = useState<DirectorSnapshot[]>([]);
   const [snapshot, setSnapshot] = useState<DirectorSnapshot | null>(null);
@@ -206,7 +208,10 @@ export const DirectorConsolePage: React.FC = () => {
       const response = await fetch(`/api/episodes/${encodeURIComponent(snapshot.episode.id)}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ shots: {} }),
+        body: JSON.stringify({
+          ...(record?.snapshot.projectId ? { projectId: record.snapshot.projectId } : {}),
+          shots: {},
+        }),
       });
       const data = await readJson<any>(response);
       setLastRun(data);

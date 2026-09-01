@@ -3,6 +3,7 @@ import express from 'express';
 import type { EpisodeServerDependencies } from './episode-server';
 import { createDirectorCloudPersistenceRouter } from './src/server/services/directorCloudPersistenceRouter';
 import { createProjectBindingRouter } from './src/server/services/projectBindingRouter';
+import { createDirectorAssetRouter } from './src/server/services/assetRegistry/assetRegistryRouter';
 
 async function loadEpisodeServerModule() {
   const previousVitest = process.env.VITEST;
@@ -28,6 +29,10 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
   // Project Binding is the anonymous, bearer-code entry point for cross-device
   // restore. It is mounted before the Episode preview gate like cloud persistence.
   app.use('/api/director/project-binding', createProjectBindingRouter());
+  // Asset Registry is a query/index layer over the existing production assets.
+  // It is mounted beside cloud persistence so best-effort registration can still
+  // complete in the public Director preview without changing the production gate.
+  app.use('/api/director', createDirectorAssetRouter());
   app.use(episodeApp);
   return app;
 }

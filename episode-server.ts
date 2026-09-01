@@ -541,9 +541,14 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
     const shots = rawInputs && typeof rawInputs === 'object' && !Array.isArray(rawInputs)
       ? rawInputs
       : {};
+    const projectId = String(req.body?.projectId || '').trim();
 
     try {
-      const result = await episodeProductionRunner.run({ episodeId, shots });
+      const result = await episodeProductionRunner.run({
+        ...(projectId ? { projectId } : {}),
+        episodeId,
+        shots,
+      });
       return res.status(200).json({ ok: true, ...result });
     } catch (error: any) {
       const statusCode = Number(error?.statusCode);
