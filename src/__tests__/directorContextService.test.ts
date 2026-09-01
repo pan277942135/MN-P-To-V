@@ -163,9 +163,14 @@ describe('DirectorContextService', () => {
       assetId: 'asset-image-1',
       type: 'IMAGE',
       reviewStatus: 'APPROVED',
-      preview: '/api/director/assets/asset-image-1/preview',
+      preview: {
+        status: 'PENDING',
+        thumbnailUrl: '/api/director/assets/asset-image-1/preview/content/thumbnail',
+        mediumUrl: '/api/director/assets/asset-image-1/preview/content/medium',
+      },
     });
-    expect(context.assetSummary).toEqual({ total: 2, images: 1, videos: 1, audio: 0 });
+    expect(context.assetSummary).toMatchObject({ total: 2, images: 1, videos: 1, audio: 0 });
+    expect(context.assetSummary.preview).toEqual({ total: 2, ready: 0, processing: 0, pending: 2, failed: 0 });
   });
 
   it('supports episode context and does not fail when the Asset Registry is missing', async () => {
@@ -175,7 +180,8 @@ describe('DirectorContextService', () => {
 
     expect(context.episode.episodeId).toBe('EP01');
     expect(context.shots).toHaveLength(2);
-    expect(context.assetSummary).toEqual({ total: 0, images: 0, videos: 0, audio: 0 });
+    expect(context.assetSummary).toMatchObject({ total: 0, images: 0, videos: 0, audio: 0 });
+    expect(context.assetSummary.preview).toEqual({ total: 0, ready: 0, processing: 0, pending: 0, failed: 0 });
     expect(context.shots.every((shot) => shot.assets.length === 0)).toBe(true);
   });
 

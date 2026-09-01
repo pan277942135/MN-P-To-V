@@ -27,6 +27,59 @@ export type DirectorMediaType =
 
 export type DirectorAssetReviewStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
 
+export type DirectorAssetPreviewStatus = 'PENDING' | 'PROCESSING' | 'READY' | 'FAILED';
+
+/**
+ * Derived preview metadata. The original asset remains authoritative and its
+ * storage path is never replaced by one of these derived objects.
+ */
+export interface DirectorAssetPreview {
+  status: DirectorAssetPreviewStatus;
+  generatedAt: string;
+  thumbnailPath: string;
+  /** Generic compatibility alias for the most useful derived preview. */
+  previewPath: string;
+  mediumPreviewPath: string;
+  videoPreviewPath: string;
+  framePaths: string[];
+  width: number;
+  height: number;
+  durationSeconds: number;
+  /** Used to detect when a re-synced asset points at a new original. */
+  sourcePath?: string;
+  error?: string;
+}
+
+export interface DirectorAssetPreviewSummary {
+  total: number;
+  ready: number;
+  processing: number;
+  pending: number;
+  failed: number;
+}
+
+export interface DirectorAssetPreviewUrls {
+  status: DirectorAssetPreviewStatus;
+  generatedAt: string;
+  thumbnailUrl: string;
+  mediumUrl: string;
+  videoUrl: string;
+  /** Explicit alias used by the AI Director Context contract. */
+  videoPreviewUrl: string;
+  frames: string[];
+  frameUrls: string[];
+  audioUrl: string;
+  width: number;
+  height: number;
+  durationSeconds: number;
+  error?: string;
+}
+
+export interface DirectorAssetPreviewResponse {
+  assetId: string;
+  preview: DirectorAssetPreviewUrls;
+}
+
 export interface DirectorAssetStorage {
   provider: string;
   bucket: string;
@@ -83,6 +136,7 @@ export interface DirectorAssetRecord {
   source: DirectorAssetSource;
   relations: DirectorAssetRelations;
   review: DirectorAssetReview;
+  preview?: DirectorAssetPreview;
   updatedAt?: number;
 }
 
@@ -108,6 +162,7 @@ export type DirectorAssetPatch = {
   source?: Partial<DirectorAssetSource>;
   relations?: Partial<DirectorAssetRelations>;
   updatedAt?: number;
+  preview?: Partial<DirectorAssetPreview>;
 };
 
 export interface DirectorAssetSummary {
@@ -163,5 +218,17 @@ export function assetSummary(assets: DirectorAssetRecord[]): DirectorAssetSummar
     text: active.filter((asset) => asset.assetType === 'TEXT').length,
     models: active.filter((asset) => asset.assetType === 'MODEL').length,
     shotsCovered: new Set(active.map((asset) => asset.shotUid).filter(Boolean)).size,
+  };
+}
+
+export function assetPreviewSummary(assets: DirectorAssetRecord[]): DirectorAssetPreviewSummary {
+  const active = assets.filter((asset) => asset.status !== 'DELETED');
+  const statusOf = (asset: DirectorAssetRecord): DirectorAssetPreviewStatus => asset.preview?.status || 'PENDING';
+  return {
+    total: active.length,
+    ready: active.filter((asset) => statusOf(asset) === 'READY').length,
+    processing: active.filter((asset) => statusOf(asset) === 'PROCESSING').length,
+    pending: active.filter((asset) => statusOf(asset) === 'PENDING').length,
+    failed: active.filter((asset) => statusOf(asset) === 'FAILED').length,
   };
 }

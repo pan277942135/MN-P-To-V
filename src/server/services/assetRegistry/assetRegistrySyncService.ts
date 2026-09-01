@@ -16,6 +16,12 @@ import {
 } from '../../repositories/firestoreDirectorProjectRepository';
 import { getFirestoreInstance } from '../../db/firestore';
 import { calculateAspectRatio } from '../../../services/formatPolicy/formatPolicy';
+import {
+  AssetPreviewService,
+  assetPreviewService,
+  createPendingAssetPreview,
+  type AssetPreviewGatewayLike,
+} from '../assetPreview/assetPreviewService';
 
 function clean(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -239,10 +245,19 @@ export interface AssetRegistrySyncServiceLike {
 }
 
 export class AssetRegistrySyncService implements AssetRegistrySyncServiceLike {
+  private readonly previewGateway: AssetPreviewGatewayLike;
+
   constructor(
     private readonly repository: DirectorAssetRepositoryLike = directorAssetRepository,
     private readonly projectResolver: AssetRegistryProjectResolverLike = new FirestoreAssetRegistryProjectResolver(),
-  ) {}
+    previewGateway?: AssetPreviewGatewayLike,
+  ) {
+    // Use the same repository instance as the Registry adapter. This keeps the
+    // best-effort side effect testable and prevents an injected repository from
+    // accidentally scheduling work against the production singleton.
+    this.previewGateway = previewGateway
+      || (repository === directorAssetRepository ? assetPreviewService : new AssetPreviewService(repository));
+  }
 
   public isAvailable(): boolean {
     return this.repository.isAvailable();
@@ -251,14 +266,28 @@ export class AssetRegistrySyncService implements AssetRegistrySyncServiceLike {
   public async registerAsset(asset: DirectorAssetRecord): Promise<DirectorAssetRecord> {
     if (!this.repository.isAvailable()) throw new Error('DIRECTOR_ASSET_FIRESTORE_UNAVAILABLE');
     const existing = await this.repository.getAsset(asset.assetId);
-    if (!existing) return this.repository.createAsset(asset);
-    const { assetId: _assetId, ...patch } = asset;
-    const updated = await this.repository.updateAsset(asset.assetId, {
-      ...patch,
-      // A human review decision is authoritative and must survive re-sync.
-      review: existing.review,
-    });
-    return updated || asset;
+    const assetWithPreview = existing || asset.preview ? asset : { ...asset, preview: createPendingAssetPreview(asset) };
+    let saved: DirectorAssetRecord;
+    if (!existing) {
+      saved = await this.repository.createAsset(assetWithPreview);
+    } else {
+      const { assetId: _assetId, ...patch } = assetWithPreview;
+      const updated = await this.repository.updateAsset(asset.assetId, {
+        ...patch,
+        // A human review decision is authoritative and must survive re-sync.
+        review: existing.review,
+      });
+      saved = updated || assetWithPreview;
+    }
+
+    // Preview generation is a derived, best-effort side effect. It is queued
+    // after the Registry projection succeeds and can never block production.
+    try {
+      this.previewGateway.enqueueAssetPreview(saved);
+    } catch (error) {
+      console.warn(`[Asset Preview] queue skipped for ${saved.assetId}:`, error instanceof Error ? error.message : String(error));
+    }
+    return saved;
   }
 
   /** Strict registration entry point used by the explicit internal API. */

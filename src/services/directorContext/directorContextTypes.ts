@@ -1,5 +1,7 @@
 import type {
   DirectorAssetMetadata,
+  DirectorAssetPreviewStatus,
+  DirectorAssetPreviewSummary,
   DirectorAssetReviewStatus,
   DirectorAssetStatus,
   DirectorAssetType,
@@ -17,7 +19,17 @@ export interface DirectorContextAsset {
   type: DirectorAssetType;
   mediaType: string;
   thumbnail: string;
-  preview: string;
+  /** Legacy direct URL alias retained for existing Context consumers. */
+  previewUrl: string;
+  /** AI-facing derived preview URLs. */
+  preview: {
+    status: DirectorAssetPreviewStatus;
+    thumbnailUrl: string;
+    mediumUrl: string;
+    videoPreviewUrl: string;
+    frameUrls: string[];
+    audioUrl: string;
+  };
   metadata: DirectorAssetMetadata;
   reviewStatus: DirectorAssetReviewStatus;
   shotUid: string;
@@ -61,6 +73,7 @@ export interface DirectorContextAssetSummary {
   images: number;
   videos: number;
   audio: number;
+  preview: DirectorAssetPreviewSummary;
 }
 
 export interface DirectorContext {

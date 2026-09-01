@@ -214,4 +214,24 @@ describe('AssetRegistrySyncService', () => {
     expect(result).toBeNull();
     expect(create).toHaveBeenCalledTimes(1);
   });
+
+  it('queues a derived Preview job only after Registry registration succeeds', async () => {
+    const repository = new MemoryAssetRepository();
+    const enqueue = vi.fn(() => true);
+    const service = new AssetRegistrySyncService(
+      repository,
+      { resolveProjectIdForEpisode: async () => null },
+      {
+        describeAssetPreview: () => ({}) as any,
+        enqueueAssetPreview: enqueue,
+        enqueueProjectPreviews: () => 0,
+        generateAssetPreview: async () => ({ status: 'PENDING' }) as any,
+      },
+    );
+
+    const result = await service.syncKeyframeAsset({ projectId: 'project-a', shot: shotFixture() });
+
+    expect(result?.preview?.status).toBe('PENDING');
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ assetId: 'kf-s03-01-a' }));
+  });
 });

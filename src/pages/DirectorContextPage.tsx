@@ -168,6 +168,22 @@ export const DirectorContextPage: React.FC = () => {
             <Metric label="Audio" value={context.assetSummary.audio} tone="text-amber-300" icon={<Volume2 className="h-3.5 w-3.5" />} />
           </section>
 
+          <section className="rounded-2xl border border-sky-500/20 bg-sky-500/[0.035] p-5 sm:p-6" data-testid="director-context-preview-summary">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-sky-300">ASSET PREVIEW</div>
+                <h2 className="mt-1 text-xl font-black text-white">AI 可读取的预览覆盖</h2>
+                <p className="mt-1 text-xs text-slate-500">图片缩略图、视频 Preview 和五帧 Strip 均为派生资源，不覆盖原始 GCS 文件。</p>
+              </div>
+              <div className="flex flex-wrap gap-2 text-xs font-bold">
+                <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-300">Total {context.assetSummary.preview.total}</span>
+                <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3 py-1.5 text-emerald-300">Ready {context.assetSummary.preview.ready}</span>
+                <span className="rounded-full border border-sky-500/25 bg-sky-500/10 px-3 py-1.5 text-sky-300">Processing {context.assetSummary.preview.processing + context.assetSummary.preview.pending}</span>
+                <span className="rounded-full border border-rose-500/25 bg-rose-500/10 px-3 py-1.5 text-rose-300">Failed {context.assetSummary.preview.failed}</span>
+              </div>
+            </div>
+          </section>
+
           <section className="rounded-2xl border border-[#27272A] bg-[#111114] p-5 sm:p-6">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
               <div>
@@ -215,9 +231,9 @@ export const DirectorContextPage: React.FC = () => {
 const PageHeading = () => (
   <header className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
     <div>
-      <div className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-purple-400"><Clapperboard className="h-4 w-4" /> Director Console · Step 4.0.3-A</div>
-      <h1 className="text-2xl font-black tracking-tight text-white sm:text-3xl">AI Director Context</h1>
-      <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-400">把项目、Episode、Shot、Blueprint、Asset 和状态组合成 AI 可以读取的标准化上下文。</p>
+      <div className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-purple-400"><Clapperboard className="h-4 w-4" /> Director Console · Step 4.0.3-B</div>
+      <h1 className="text-2xl font-black tracking-tight text-white sm:text-3xl">AI Director Context · Preview Gateway</h1>
+      <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-400">把项目、Episode、Shot、Blueprint、Asset 和可供 AI 读取的预览 URL 组合成标准化上下文。</p>
     </div>
     <span className="inline-flex items-center gap-1.5 self-start rounded-full border border-purple-500/25 bg-purple-500/10 px-3 py-1.5 text-[11px] font-bold text-purple-300"><FileJson className="h-3.5 w-3.5" /> zaojing.director.context.v1</span>
   </header>
@@ -275,5 +291,6 @@ const AssetChip: React.FC<{ asset: DirectorContextAsset }> = ({ asset }) => (
     <span className="truncate font-mono">{asset.assetId}</span>
     <span className="text-slate-600">{formatType(asset)}</span>
     <span className={asset.reviewStatus === 'APPROVED' ? 'text-emerald-300' : asset.reviewStatus === 'REJECTED' ? 'text-rose-300' : 'text-amber-300'}>{asset.reviewStatus}</span>
+    <span className={asset.preview.status === 'READY' ? 'text-emerald-300' : asset.preview.status === 'FAILED' ? 'text-rose-300' : 'text-sky-300'}>Preview · {asset.preview.status}</span>
   </span>
 );

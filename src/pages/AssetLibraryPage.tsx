@@ -14,8 +14,11 @@ import {
 } from 'lucide-react';
 import { useDirectorCloud } from '../components/DirectorCloudPersistenceProvider';
 import {
+  assetPreviewContentUrl,
   assetPreviewUrl,
   listProjectAssets,
+  requestAssetPreview,
+  requestProjectPreviews,
   updateDirectorAsset,
 } from '../services/assetRegistry/assetRegistryClient';
 import {
@@ -46,6 +49,13 @@ const REVIEW_LABELS: Record<DirectorAssetReviewStatus, string> = {
   PENDING: '待审核',
   APPROVED: '已通过',
   REJECTED: '已驳回',
+};
+
+const PREVIEW_LABELS: Record<string, string> = {
+  PENDING: '待处理',
+  PROCESSING: '处理中',
+  READY: '已就绪',
+  FAILED: '失败',
 };
 
 function formatDuration(seconds: number): string {
@@ -82,6 +92,13 @@ function reviewTone(status: DirectorAssetReviewStatus): string {
   return 'border-amber-500/25 bg-amber-500/10 text-amber-300';
 }
 
+function previewTone(status: string): string {
+  if (status === 'READY') return 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300';
+  if (status === 'FAILED') return 'border-rose-500/25 bg-rose-500/10 text-rose-300';
+  if (status === 'PROCESSING') return 'border-sky-500/25 bg-sky-500/10 text-sky-300';
+  return 'border-amber-500/25 bg-amber-500/10 text-amber-300';
+}
+
 function mediaOptions(assetType: string): string[] {
   if (assetType === 'IMAGE') return IMAGE_MEDIA_TYPES;
   if (assetType === 'VIDEO') return VIDEO_MEDIA_TYPES;
@@ -93,10 +110,11 @@ function Preview({ asset }: { asset: DirectorAssetRecord }) {
   const src = assetPreviewUrl(asset);
   const label = assetTitle(asset);
   if (asset.assetType === 'IMAGE') {
-    return <img src={src} alt={label} loading="lazy" className="h-full w-full object-cover" />;
+    return <img src={src} alt={label} loading="lazy" className="h-full w-full object-contain" />;
   }
   if (asset.assetType === 'VIDEO') {
-    return <video src={src} controls preload="metadata" className="h-full w-full object-cover" aria-label={label} />;
+    const poster = asset.preview?.framePaths?.length ? assetPreviewContentUrl(asset.assetId, 'frame', 1) : undefined;
+    return <video src={src} poster={poster} controls preload="metadata" className="h-full w-full object-contain" aria-label={label} />;
   }
   if (asset.assetType === 'AUDIO') {
     return (
@@ -127,6 +145,8 @@ export const AssetLibraryPage: React.FC = () => {
   const [assets, setAssets] = useState<DirectorAssetRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [updatingAssetId, setUpdatingAssetId] = useState('');
+  const [previewingAssetId, setPreviewingAssetId] = useState('');
+  const [previewingProject, setPreviewingProject] = useState(false);
   const [error, setError] = useState('');
 
   const projectId = (record?.snapshot.projectId || manualProjectId).trim();
@@ -188,6 +208,33 @@ export const AssetLibraryPage: React.FC = () => {
     }
   };
 
+  const regeneratePreview = async (asset: DirectorAssetRecord) => {
+    setPreviewingAssetId(asset.assetId);
+    setError('');
+    try {
+      await requestAssetPreview(asset.assetId);
+      await loadAssets();
+    } catch (cause: any) {
+      setError(cause?.message || String(cause));
+    } finally {
+      setPreviewingAssetId('');
+    }
+  };
+
+  const regenerateProjectPreviews = async () => {
+    if (!projectId) return;
+    setPreviewingProject(true);
+    setError('');
+    try {
+      await requestProjectPreviews(projectId, currentEpisodeId);
+      await loadAssets();
+    } catch (cause: any) {
+      setError(cause?.message || String(cause));
+    } finally {
+      setPreviewingProject(false);
+    }
+  };
+
   if (!projectId && !record) {
     return (
       <div className="mx-auto max-w-[1400px] space-y-6 px-4 py-6 sm:px-6 lg:px-8">
@@ -223,11 +270,16 @@ export const AssetLibraryPage: React.FC = () => {
               <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 font-mono text-[10px] text-slate-400">{projectId}</span>
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="flex flex-wrap justify-end gap-2">
+            <button type="button" onClick={() => void regenerateProjectPreviews()} disabled={previewingProject} className="inline-flex items-center gap-2 rounded-xl border border-sky-500/25 bg-sky-500/10 px-3 py-2 text-xs font-bold text-sky-200 hover:bg-sky-500/15 disabled:cursor-not-allowed disabled:opacity-50">
+              {previewingProject ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}批量生成 Preview
+            </button>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             <SummaryChip label="Images" value={summary.images} tone="text-sky-300" />
             <SummaryChip label="Videos" value={summary.videos} tone="text-violet-300" />
             <SummaryChip label="Audio" value={summary.audio} tone="text-amber-300" />
             <SummaryChip label="Shots" value={summary.shotsCovered} tone="text-emerald-300" />
+            </div>
           </div>
         </div>
       </section>
@@ -263,7 +315,14 @@ export const AssetLibraryPage: React.FC = () => {
         ) : (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {assets.map((asset) => (
-              <AssetCard key={asset.assetId} asset={asset} updating={updatingAssetId === asset.assetId} onReview={(status) => void changeReview(asset, status)} />
+              <AssetCard
+                key={asset.assetId}
+                asset={asset}
+                updating={updatingAssetId === asset.assetId}
+                previewing={previewingAssetId === asset.assetId}
+                onReview={(status) => void changeReview(asset, status)}
+                onRegenerate={() => void regeneratePreview(asset)}
+              />
             ))}
           </div>
         )}
@@ -275,9 +334,9 @@ export const AssetLibraryPage: React.FC = () => {
 const PageHeading = () => (
   <header className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
     <div>
-      <div className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-400"><Archive className="h-4 w-4" /> Director Console · Step 4.0.2-A</div>
-      <h1 className="text-2xl font-black tracking-tight text-white sm:text-3xl">资产库｜Asset Registry</h1>
-      <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-400">面向导演的项目资产视图：知道每一张图片、每一段视频来自哪个 Episode / Shot，以及当前是否可用和待审核。</p>
+      <div className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-400"><Archive className="h-4 w-4" /> Director Console · Step 4.0.3-B</div>
+      <h1 className="text-2xl font-black tracking-tight text-white sm:text-3xl">资产库｜Asset Preview Gateway</h1>
+      <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-400">面向导演的资产浏览器：缩略图、视频预览和关键帧条带均来自派生 Preview，不修改原始 GCS 资产。</p>
     </div>
     <span className="inline-flex items-center gap-1.5 self-start rounded-full border border-sky-500/25 bg-sky-500/10 px-3 py-1.5 text-[11px] font-bold text-sky-300"><ShieldCheck className="h-3.5 w-3.5" /> Firestore + GCS authority</span>
   </header>
@@ -295,9 +354,16 @@ const FilterSelect = ({ label, value, options, labels, onChange }: { label: stri
   <label className="block"><span className="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-slate-500">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="w-full rounded-xl border border-[#303036] bg-[#09090B] px-3 py-2.5 text-sm text-white outline-none focus:border-emerald-500/60">{options.map((option, index) => <option key={option || 'all'} value={option}>{labels[index] || option}</option>)}</select></label>
 );
 
-const AssetCard: React.FC<{ asset: DirectorAssetRecord; updating: boolean; onReview: (status: DirectorAssetReviewStatus) => void }> = ({ asset, updating, onReview }) => (
+const AssetCard: React.FC<{ asset: DirectorAssetRecord; updating: boolean; previewing: boolean; onReview: (status: DirectorAssetReviewStatus) => void; onRegenerate: () => void }> = ({ asset, updating, previewing, onReview, onRegenerate }) => (
   <article className="overflow-hidden rounded-2xl border border-[#2B2B32] bg-[#111114]" data-testid={`asset-card-${asset.assetId}`}>
     <div className="h-48 border-b border-[#2B2B32] bg-[#09090B]"><Preview asset={asset} /></div>
+    {asset.assetType === 'VIDEO' && (asset.preview?.framePaths?.length || 0) > 0 && (
+      <div className="grid grid-cols-5 gap-1 border-b border-[#2B2B32] bg-[#09090B] p-2">
+        {asset.preview?.framePaths.slice(0, 5).map((_, index) => (
+          <img key={index} src={assetPreviewContentUrl(asset.assetId, 'frame', index + 1)} alt={`${assetTitle(asset)} frame ${index + 1}`} loading="lazy" className="aspect-video w-full rounded object-cover" />
+        ))}
+      </div>
+    )}
     <div className="space-y-3 p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
@@ -310,10 +376,11 @@ const AssetCard: React.FC<{ asset: DirectorAssetRecord; updating: boolean; onRev
         <Meta label="Shot" value={asset.shotUid} mono />
         <Meta label="Episode" value={asset.episodeId} mono />
         <Meta label="Type" value={`${TYPE_LABELS[asset.assetType] || asset.assetType} · ${asset.mediaType}`} />
-        <Meta label="规格" value={asset.assetType === 'VIDEO' ? formatDuration(asset.metadata.durationSeconds) : asset.metadata.aspectRatio || formatBytes(asset.metadata.fileSize)} />
+        <Meta label="规格" value={`${asset.metadata.aspectRatio || '—'}${asset.assetType === 'VIDEO' ? ` · ${formatDuration(asset.metadata.durationSeconds)}` : ''}`} />
       </div>
       <div className="flex flex-wrap items-center gap-2 border-t border-[#27272A] pt-3">
         <span className={`rounded-full border px-2 py-1 text-[10px] font-bold ${reviewTone(asset.review.status)}`}>审核 · {REVIEW_LABELS[asset.review.status]}</span>
+        <span className={`rounded-full border px-2 py-1 text-[10px] font-bold ${previewTone(asset.preview?.status || 'PENDING')}`}>Preview · {PREVIEW_LABELS[asset.preview?.status || 'PENDING']}</span>
         <span className="text-[10px] text-slate-600">{asset.source.type}</span>
       </div>
       <div className="flex flex-wrap gap-2">
@@ -323,6 +390,9 @@ const AssetCard: React.FC<{ asset: DirectorAssetRecord; updating: boolean; onRev
             {REVIEW_LABELS[status]}
           </button>
         ))}
+        <button type="button" disabled={previewing} onClick={onRegenerate} className="inline-flex items-center gap-1 rounded-lg border border-sky-500/25 px-2.5 py-1.5 text-[10px] font-bold text-sky-300 hover:bg-sky-500/10 disabled:cursor-not-allowed disabled:opacity-40">
+          {previewing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}重新生成 Preview
+        </button>
       </div>
     </div>
   </article>

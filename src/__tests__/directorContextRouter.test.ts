@@ -37,7 +37,13 @@ function context(): DirectorContext {
       status: 'VIDEO_REVIEW',
       assets: [],
     }],
-    assetSummary: { total: 0, images: 0, videos: 0, audio: 0 },
+    assetSummary: {
+      total: 0,
+      images: 0,
+      videos: 0,
+      audio: 0,
+      preview: { total: 0, ready: 0, processing: 0, pending: 0, failed: 0 },
+    },
   };
 }
 

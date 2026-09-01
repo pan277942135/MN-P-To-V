@@ -23,7 +23,7 @@ function asset(overrides: Partial<DirectorAssetRecord> = {}): DirectorAssetRecor
   };
 }
 
-function app() {
+function app(previewGateway?: any) {
   const assets = [
     asset(),
     asset({ assetId: 'asset-video-1', assetType: 'VIDEO', mediaType: 'GENERATED_VIDEO', storage: { provider: 'GCS', bucket: 'bucket-1', path: 'director/shot-1/video.mp4', thumbnailPath: '', previewPath: 'https://cdn.example.test/video.mp4' } }),
@@ -59,7 +59,7 @@ function app() {
     getAsset: async () => ({ buffer: Buffer.from('asset-bytes'), mimeType: 'image/png' }),
   };
   const server = express();
-  server.use('/api/director', createDirectorAssetRouter(service as any, repository as any, binaryReader));
+  server.use('/api/director', createDirectorAssetRouter(service as any, repository as any, binaryReader, previewGateway));
   return server;
 }
 
@@ -94,14 +94,40 @@ describe('Director Asset Registry router', () => {
     expect(updated.body.asset.review.status).toBe('APPROVED');
   });
 
-  it('redirects HTTP previews and streams GCS previews', async () => {
-    const redirect = await request(app()).get('/api/director/assets/asset-video-1/preview');
+  it('returns Preview Gateway metadata and serves derived/source content separately', async () => {
+    const metadata = await request(app()).get('/api/director/assets/asset-video-1/preview');
+    expect(metadata.status).toBe(200);
+    expect(metadata.body).toMatchObject({
+      assetId: 'asset-video-1',
+      preview: { status: 'PENDING', videoUrl: '/api/director/assets/asset-video-1/preview/content/video-preview' },
+    });
+
+    const redirect = await request(app()).get('/api/director/assets/asset-video-1/preview/content/video-preview');
     expect(redirect.status).toBe(302);
     expect(redirect.headers.location).toBe('https://cdn.example.test/video.mp4');
 
-    const image = await request(app()).get('/api/director/assets/asset-image-1/preview');
+    const image = await request(app()).get('/api/director/assets/asset-image-1/preview/content/thumbnail');
     expect(image.status).toBe(200);
     expect(image.headers['content-type']).toContain('image/png');
     expect(image.body.toString()).toBe('asset-bytes');
+  });
+
+  it('queues single-asset and project preview jobs without waiting for the worker', async () => {
+    const queued: string[] = [];
+    const previewGateway = {
+      describeAssetPreview: () => ({ assetId: 'asset-image-1', preview: { status: 'PENDING', thumbnailUrl: '', mediumUrl: '', videoUrl: '', videoPreviewUrl: '', frames: [], frameUrls: [], audioUrl: '', width: 0, height: 0, durationSeconds: 0 } }),
+      enqueueAssetPreview: (value: DirectorAssetRecord) => { queued.push(value.assetId); return true; },
+      enqueueProjectPreviews: (values: DirectorAssetRecord[]) => { queued.push(...values.map((value) => value.assetId)); return values.length; },
+      generateAssetPreview: async () => ({ status: 'PROCESSING' }),
+    };
+
+    const single = await request(app(previewGateway)).post('/api/director/assets/asset-image-1/preview/generate');
+    expect(single.status).toBe(202);
+    expect(single.body).toMatchObject({ assetId: 'asset-image-1', status: 'PROCESSING' });
+
+    const batch = await request(app(previewGateway)).post('/api/director/projects/project-1/previews/generate');
+    expect(batch.status).toBe(202);
+    expect(batch.body).toMatchObject({ total: 3, queued: 3 });
+    expect(queued).toEqual(['asset-image-1', 'asset-image-1', 'asset-video-1', 'asset-audio-1']);
   });
 });

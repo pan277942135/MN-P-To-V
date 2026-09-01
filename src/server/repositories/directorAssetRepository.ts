@@ -11,6 +11,7 @@ import {
   type DirectorAssetSource,
   type DirectorAssetStorage,
   type DirectorAssetMetadata,
+  type DirectorAssetPreview,
 } from '../../services/assetRegistry/assetRegistryTypes';
 import { getFirestoreInstance, isFirestoreAvailable, markFirestoreUnavailable } from '../db/firestore';
 import { sanitizeForFirestore } from './firestoreTaskRepository';
@@ -102,6 +103,33 @@ function normalizeReview(value: unknown): DirectorAssetReview {
   };
 }
 
+function normalizePreview(value: unknown): DirectorAssetPreview | undefined {
+  const raw = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  if (!raw) return undefined;
+  const status = ['PENDING', 'PROCESSING', 'READY', 'FAILED'].includes(String(raw.status))
+    ? String(raw.status) as DirectorAssetPreview['status']
+    : 'PENDING';
+  const mediumPreviewPath = clean(raw.mediumPreviewPath);
+  const videoPreviewPath = clean(raw.videoPreviewPath);
+  const previewPath = clean(raw.previewPath) || videoPreviewPath || mediumPreviewPath;
+  return {
+    status,
+    generatedAt: clean(raw.generatedAt),
+    thumbnailPath: clean(raw.thumbnailPath),
+    previewPath,
+    mediumPreviewPath,
+    videoPreviewPath,
+    framePaths: stringArray(raw.framePaths),
+    width: numberOrZero(raw.width),
+    height: numberOrZero(raw.height),
+    durationSeconds: numberOrZero(raw.durationSeconds),
+    ...(clean(raw.sourcePath) ? { sourcePath: clean(raw.sourcePath) } : {}),
+    ...(clean(raw.error) ? { error: clean(raw.error).slice(0, 500) } : {}),
+  };
+}
+
 export function normalizeDirectorAsset(input: unknown, fallbackAssetId = ''): DirectorAssetRecord {
   const raw = input && typeof input === 'object' && !Array.isArray(input)
     ? input as Record<string, any>
@@ -133,6 +161,7 @@ export function normalizeDirectorAsset(input: unknown, fallbackAssetId = ''): Di
     source: normalizeSource(raw.source),
     relations: normalizeRelations(raw.relations),
     review: normalizeReview(raw.review),
+    ...(raw.preview ? { preview: normalizePreview(raw.preview) } : {}),
     updatedAt: numberOrZero(raw.updatedAt) || Date.now(),
   };
 }
@@ -148,6 +177,9 @@ function mergeAsset(current: DirectorAssetRecord, patch: DirectorAssetPatch): Di
     source: { ...current.source, ...(rawPatch.source || {}) },
     relations: { ...current.relations, ...(rawPatch.relations || {}) },
     review: { ...current.review, ...(rawPatch.review || {}) },
+    preview: rawPatch.preview === undefined
+      ? current.preview
+      : { ...(current.preview || {}), ...(rawPatch.preview || {}) },
     updatedAt: Date.now(),
   });
 }

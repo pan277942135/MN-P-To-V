@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Archive, Film, Image as ImageIcon, Loader2, Music2, RefreshCw, ServerCrash } from 'lucide-react';
 import { useDirectorCloud } from './DirectorCloudPersistenceProvider';
-import { assetSummary, type DirectorAssetRecord } from '../services/assetRegistry/assetRegistryTypes';
+import { assetPreviewSummary, assetSummary, type DirectorAssetRecord } from '../services/assetRegistry/assetRegistryTypes';
 import { listProjectAssets } from '../services/assetRegistry/assetRegistryClient';
 
 interface ProjectAssetSummaryProps {
@@ -40,6 +40,7 @@ export const ProjectAssetSummary: React.FC<ProjectAssetSummaryProps> = ({ projec
   }, [projectId]);
 
   const summary = useMemo(() => assetSummary(assets), [assets]);
+  const previewSummary = useMemo(() => assetPreviewSummary(assets), [assets]);
   if (!projectId) return null;
 
   const metric = (label: string, value: number, icon: React.ReactNode, tone: string) => (
@@ -75,6 +76,16 @@ export const ProjectAssetSummary: React.FC<ProjectAssetSummaryProps> = ({ projec
         {metric('Shots Covered', summary.shotsCovered, <Archive className="h-3.5 w-3.5" />, 'text-emerald-300')}
       </div>
 
+      <div className="mt-4 rounded-xl border border-sky-500/20 bg-sky-500/[0.035] p-4" data-testid="project-asset-preview-summary">
+        <div className="text-[11px] font-bold uppercase tracking-[0.16em] text-sky-300">Asset Preview</div>
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <PreviewMetric label="Total" value={previewSummary.total} tone="text-white" />
+          <PreviewMetric label="Ready" value={previewSummary.ready} tone="text-emerald-300" />
+          <PreviewMetric label="Processing" value={previewSummary.processing + previewSummary.pending} tone="text-sky-300" />
+          <PreviewMetric label="Failed" value={previewSummary.failed} tone="text-rose-300" />
+        </div>
+      </div>
+
       {error && (
         <div className="mt-4 flex items-start gap-2 rounded-xl border border-amber-500/25 bg-amber-500/5 px-3 py-2.5 text-xs leading-5 text-amber-200/80">
           <ServerCrash className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
@@ -84,3 +95,7 @@ export const ProjectAssetSummary: React.FC<ProjectAssetSummaryProps> = ({ projec
     </section>
   );
 };
+
+const PreviewMetric = ({ label, value, tone }: { label: string; value: number; tone: string }) => (
+  <div className="rounded-lg border border-[#2B2B32] bg-[#09090B] px-3 py-2"><div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{label}</div><div className={`mt-0.5 text-lg font-black ${tone}`}>{value}</div></div>
+);

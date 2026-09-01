@@ -1,4 +1,5 @@
 import type {
+  DirectorAssetPreviewResponse,
   DirectorAssetListFilters,
   DirectorAssetPatch,
   DirectorAssetRecord,
@@ -84,7 +85,50 @@ export async function updateDirectorAsset(
   return payload.asset;
 }
 
-export function assetPreviewUrl(asset: Pick<DirectorAssetRecord, 'assetId' | 'storage'>): string {
-  const configured = clean(asset.storage.previewPath);
-  return configured || `/api/director/assets/${encodeURIComponent(asset.assetId)}/preview`;
+export type AssetPreviewContentVariant = 'thumbnail' | 'medium' | 'video-preview' | 'frame' | 'original';
+
+export function assetPreviewContentUrl(assetId: string, variant: AssetPreviewContentVariant, frameIndex?: number): string {
+  const base = `/api/director/assets/${encodeURIComponent(clean(assetId))}/preview/content/${variant}`;
+  return variant === 'frame' && frameIndex ? `${base}/${frameIndex}` : base;
+}
+
+export function assetPreviewUrl(asset: Pick<DirectorAssetRecord, 'assetId' | 'assetType'>): string {
+  if (asset.assetType === 'IMAGE') return assetPreviewContentUrl(asset.assetId, 'thumbnail');
+  if (asset.assetType === 'VIDEO') return assetPreviewContentUrl(asset.assetId, 'video-preview');
+  return assetPreviewContentUrl(asset.assetId, 'original');
+}
+
+export async function getAssetPreview(
+  assetId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<DirectorAssetPreviewResponse> {
+  const response = await fetchImpl(`/api/director/assets/${encodeURIComponent(clean(assetId))}/preview`, {
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+  });
+  return readJson<DirectorAssetPreviewResponse>(response);
+}
+
+export async function requestAssetPreview(
+  assetId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ assetId: string; status: string }> {
+  const response = await fetchImpl(`/api/director/assets/${encodeURIComponent(clean(assetId))}/preview/generate`, {
+    method: 'POST',
+    headers: { Accept: 'application/json' },
+  });
+  return readJson<{ assetId: string; status: string }>(response);
+}
+
+export async function requestProjectPreviews(
+  projectId: string,
+  episodeId = '',
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ total: number; queued: number }> {
+  const query = episodeId ? `?episodeId=${encodeURIComponent(clean(episodeId))}` : '';
+  const response = await fetchImpl(`/api/director/projects/${encodeURIComponent(clean(projectId))}/previews/generate${query}`, {
+    method: 'POST',
+    headers: { Accept: 'application/json' },
+  });
+  return readJson<{ total: number; queued: number }>(response);
 }

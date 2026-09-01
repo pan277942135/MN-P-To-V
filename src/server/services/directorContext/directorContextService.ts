@@ -28,6 +28,7 @@ import {
   normalizeFormatPolicy,
   type ShotFormatPolicy,
 } from '../../../services/formatPolicy/formatPolicy';
+import { describeDirectorAssetPreview } from '../assetPreview/assetPreviewService';
 
 function clean(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -202,13 +203,23 @@ function previewPath(asset: DirectorAssetRecord): string {
 }
 
 function buildAsset(asset: DirectorAssetRecord): DirectorContextAsset {
-  const preview = previewPath(asset);
+  const previewResponse = describeDirectorAssetPreview(asset);
+  const preview = previewResponse.preview;
+  const previewUrl = preview.videoPreviewUrl || preview.mediumUrl || preview.thumbnailUrl || preview.audioUrl || previewPath(asset);
   return {
     assetId: asset.assetId,
     type: asset.assetType,
     mediaType: asset.mediaType,
-    thumbnail: clean(asset.storage.thumbnailPath) || preview,
-    preview,
+    thumbnail: preview.thumbnailUrl || clean(asset.storage.thumbnailPath) || (asset.assetType === 'IMAGE' ? previewUrl : ''),
+    previewUrl,
+    preview: {
+      status: preview.status,
+      thumbnailUrl: preview.thumbnailUrl,
+      mediumUrl: preview.mediumUrl,
+      videoPreviewUrl: preview.videoPreviewUrl,
+      frameUrls: preview.frameUrls,
+      audioUrl: preview.audioUrl,
+    },
     metadata: { ...asset.metadata },
     reviewStatus: asset.review.status,
     shotUid: asset.shotUid,
@@ -270,11 +281,19 @@ function buildShot(
 }
 
 function buildAssetSummary(assets: DirectorContextAsset[]) {
+  const previewStatus = (status: DirectorContextAsset['preview']['status']) => status;
   return {
     total: assets.length,
     images: assets.filter((asset) => asset.type === 'IMAGE').length,
     videos: assets.filter((asset) => asset.type === 'VIDEO').length,
     audio: assets.filter((asset) => asset.type === 'AUDIO').length,
+    preview: {
+      total: assets.length,
+      ready: assets.filter((asset) => previewStatus(asset.preview.status) === 'READY').length,
+      processing: assets.filter((asset) => previewStatus(asset.preview.status) === 'PROCESSING').length,
+      pending: assets.filter((asset) => previewStatus(asset.preview.status) === 'PENDING').length,
+      failed: assets.filter((asset) => previewStatus(asset.preview.status) === 'FAILED').length,
+    },
   };
 }
 
