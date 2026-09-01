@@ -18,6 +18,16 @@ export interface DirectorCloudProjectRecord {
   serverUpdatedAt: number;
 }
 
+export interface DirectorCloudRestoreBundle {
+  project: Record<string, unknown>;
+  episode: Record<string, unknown>;
+  shots: Array<Record<string, unknown>>;
+  stages: Record<string, unknown>;
+  assets: Array<Record<string, unknown>>;
+  productionStatus: Record<string, unknown>;
+  serverUpdatedAt: number;
+}
+
 function clean(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -174,6 +184,121 @@ class FirestoreDirectorProjectRepository {
       if (!snapshot || snapshot.schema !== DIRECTOR_CLOUD_SCHEMA) return null;
       return {
         snapshot: jsonSafe(snapshot),
+        serverUpdatedAt: Number(episodeData.updatedAt || projectData.updatedAt || 0),
+      };
+    } catch (error) {
+      markFirestoreUnavailable(error);
+      throw error;
+    }
+  }
+
+  async getRestoreBundle(projectIdInput: string, episodeIdInput?: string): Promise<DirectorCloudRestoreBundle | null> {
+    const db = getFirestoreInstance();
+    if (!db) throw new Error('DIRECTOR_FIRESTORE_UNAVAILABLE');
+    const projectId = clean(projectIdInput);
+    if (!projectId) throw new Error('DIRECTOR_PROJECT_ID_REQUIRED');
+
+    try {
+      const projectRef = db.collection(DIRECTOR_PROJECT_COLLECTION).doc(projectId);
+      const projectDoc = await projectRef.get();
+      if (!projectDoc.exists) return null;
+
+      const projectData = projectDoc.data() || {};
+      const episodeId = clean(episodeIdInput) || clean(projectData.activeEpisodeId);
+      if (!episodeId) return null;
+
+      const episodeRef = projectRef.collection('episodes').doc(episodeId);
+      const episodeDoc = await episodeRef.get();
+      if (!episodeDoc.exists) return null;
+
+      const episodeData = episodeDoc.data() || {};
+      const storedSnapshot = episodeData.snapshot as DirectorCloudSnapshot | undefined;
+      if (!storedSnapshot || storedSnapshot.schema !== DIRECTOR_CLOUD_SCHEMA) return null;
+
+      const [stageQuery, shotQuery] = await Promise.all([
+        episodeRef.collection('stages').get(),
+        episodeRef.collection('shots').get(),
+      ]);
+
+      const stages: Record<string, unknown> = {
+        ...jsonSafe(storedSnapshot.stages || {}),
+      };
+      for (const stageDoc of stageQuery.docs) {
+        const data = stageDoc.data() || {};
+        if (data.payload !== undefined) stages[stageDoc.id] = jsonSafe(data.payload);
+      }
+
+      const snapshotForShots: DirectorCloudSnapshot = {
+        ...jsonSafe(storedSnapshot),
+        stages,
+      };
+      const persistedShots = shotQuery.docs
+        .map((shotDoc) => jsonSafe(shotDoc.data() || {}))
+        .filter((shot) => clean(shot.shotUid));
+      const snapshotShots = buildDirectorShotDocuments(snapshotForShots);
+      // The episode snapshot is the current ordered Shot List. Per-shot documents
+      // are still read and remain the fallback for older records that predate the
+      // snapshot projection.
+      const shots = (snapshotShots.length > 0 ? snapshotShots : persistedShots)
+        .sort((left, right) => Number(left.order || 999) - Number(right.order || 999));
+
+      const assetStage = asObject(stages.keyframeAssets);
+      const cloudAssetStage = asObject(stages.keyframeCloudAssets);
+      const manifestAssets = Array.isArray(assetStage?.assets) ? assetStage.assets : [];
+      const cloudAssets = Array.isArray(cloudAssetStage?.items) ? cloudAssetStage.items : [];
+      const cloudByShot = new Map(
+        cloudAssets
+          .filter((asset: any) => clean(asset?.shotUid))
+          .map((asset: any) => [clean(asset.shotUid), jsonSafe(asset)]),
+      );
+      const assets = manifestAssets.map((asset: any) => ({
+        ...jsonSafe(asset),
+        cloudRef: cloudByShot.get(clean(asset?.shotUid)) || null,
+      }));
+      const knownAssetShots = new Set(assets.map((asset) => clean(asset.shotUid)));
+      for (const cloudAsset of cloudAssets) {
+        if (!knownAssetShots.has(clean((cloudAsset as any)?.shotUid))) {
+          assets.push({ cloudRef: jsonSafe(cloudAsset) });
+        }
+      }
+
+      const shotStatuses = shots.map((shot: any) => ({
+        shotUid: clean(shot.shotUid),
+        order: Number(shot.order || 0),
+        keyframeStatus: clean(shot.keyframeAsset?.status) || 'EMPTY',
+        keyframeQaStatus: clean(shot.keyframeQa?.autoStatus || shot.keyframeQa?.status) || 'NOT_REVIEWED',
+        videoBlueprintStatus: clean(shot.videoBlueprint?.status) || 'NOT_STARTED',
+      }));
+
+      return {
+        project: {
+          projectId,
+          seriesTitle: clean(projectData.seriesTitle || storedSnapshot.seriesTitle),
+          projectTitle: clean(projectData.projectTitle || storedSnapshot.projectTitle),
+          activeEpisodeId: episodeId,
+          createdAt: Number(projectData.createdAt || 0),
+          updatedAt: Number(projectData.updatedAt || episodeData.updatedAt || 0),
+        },
+        episode: {
+          projectId,
+          episodeId,
+          seriesTitle: clean(episodeData.seriesTitle || storedSnapshot.seriesTitle),
+          projectTitle: clean(episodeData.projectTitle || storedSnapshot.projectTitle),
+          status: clean(episodeData.status) || 'DRAFT',
+          clientUpdatedAt: Number(episodeData.clientUpdatedAt || storedSnapshot.clientUpdatedAt || 0),
+          updatedAt: Number(episodeData.updatedAt || projectData.updatedAt || 0),
+        },
+        shots,
+        stages,
+        assets,
+        productionStatus: {
+          episodeStatus: clean(episodeData.status) || 'DRAFT',
+          shotCount: shots.length,
+          keyframeAssetCount: assets.length,
+          keyframePassCount: assets.filter((asset: any) => asset.status === 'PASS').length,
+          videoBlueprintPassCount: shots.filter((shot: any) => shot.videoBlueprint?.status === 'PASS').length,
+          shots: shotStatuses,
+        },
         serverUpdatedAt: Number(episodeData.updatedAt || projectData.updatedAt || 0),
       };
     } catch (error) {

@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { ProjectBindingPanel } from '../components/ProjectBindingPanel';
 import {
   CheckCircle2,
   ChevronDown,
@@ -26,6 +27,7 @@ import {
   CHATGPT_STORYBOARD_OUTPUT_INSTRUCTION,
   parseChatGPTStoryboardImport,
 } from '../services/director/chatgptStoryboardImport';
+import type { ProjectBindingRestoreResponse } from '../services/director/projectBindingClient';
 
 const DRAFT_KEY = 'zaojing_director_v01_brief';
 const STORYBOARD_KEY = 'zaojing_director_v02_storyboard';
@@ -174,6 +176,45 @@ function normalizeStoryboard(storyboard: StoryboardDraft): StoryboardDraft {
       camera: shot.camera.trim(),
       dialogue: shot.dialogue.trim(),
       notes: shot.notes.trim(),
+    })),
+  };
+}
+
+function hydrateRestoredDraft(value: unknown): DirectorBriefDraft | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const parsed = value as Partial<DirectorBriefDraft>;
+  return {
+    ...EMPTY_DRAFT,
+    ...parsed,
+    version: 'director-brief-v0.1',
+    title: typeof parsed.title === 'string' ? parsed.title : '',
+    creativeBrief: typeof parsed.creativeBrief === 'string' ? parsed.creativeBrief : '',
+    fullScript: typeof parsed.fullScript === 'string' ? parsed.fullScript : '',
+    productionNotes: typeof parsed.productionNotes === 'string' ? parsed.productionNotes : '',
+    targetDurationSeconds: Math.max(4, Number(parsed.targetDurationSeconds || 30)),
+    aspectRatio: '9:16',
+  };
+}
+
+function hydrateRestoredStoryboard(value: unknown): StoryboardDraft | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const parsed = value as Partial<StoryboardDraft>;
+  if (!Array.isArray(parsed.shots)) return null;
+  return {
+    ...EMPTY_STORYBOARD,
+    ...parsed,
+    version: 'manual-storyboard-v0.2',
+    shots: parsed.shots.map((shot, index) => ({
+      ...createManualShot(),
+      ...(shot || {}),
+      uid: typeof shot?.uid === 'string' && shot.uid ? shot.uid : `restored-${index}-${Date.now()}`,
+      title: typeof shot?.title === 'string' ? shot.title : '',
+      durationSeconds: Math.max(1, Number(shot?.durationSeconds || 4)),
+      scene: typeof shot?.scene === 'string' ? shot.scene : '',
+      action: typeof shot?.action === 'string' ? shot.action : '',
+      camera: typeof shot?.camera === 'string' ? shot.camera : '',
+      dialogue: typeof shot?.dialogue === 'string' ? shot.dialogue : '',
+      notes: typeof shot?.notes === 'string' ? shot.notes : '',
     })),
   };
 }
@@ -538,6 +579,17 @@ export const GeminiStoryboardDirectorPage: React.FC = () => {
         ? 'ChatGPT 手动导入 · zaojing.storyboard.v1'
         : '手工';
 
+  const handleProjectRestored = (payload: ProjectBindingRestoreResponse) => {
+    const restoredDraft = hydrateRestoredDraft(payload.stages.brief);
+    const restoredStoryboard = hydrateRestoredStoryboard(payload.stages.storyboard);
+    const approval = payload.stages.storyboardApproval as { approvedAt?: unknown } | undefined;
+    if (restoredDraft) setDraft(restoredDraft);
+    if (restoredStoryboard) setStoryboard(restoredStoryboard);
+    setApprovedAt(typeof approval?.approvedAt === 'number' ? approval.approvedAt : undefined);
+    setError('');
+    setMessage(`Director Cloud 已恢复：${payload.project.projectTitle} · ${payload.episode.episodeId}。`);
+  };
+
   return (
     <div className="mx-auto max-w-[1380px] space-y-6 px-4 py-6 sm:px-6 lg:px-8">
       <header className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
@@ -558,6 +610,8 @@ export const GeminiStoryboardDirectorPage: React.FC = () => {
           <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-xs font-bold text-sky-300">GEMINI + CHATGPT IMPORT</span>
         </div>
       </header>
+
+      <ProjectBindingPanel onRestored={handleProjectRestored} />
 
       <section className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4 sm:p-5">
         <div className="flex gap-3">

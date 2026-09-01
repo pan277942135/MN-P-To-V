@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import express from 'express';
 import type { EpisodeServerDependencies } from './episode-server';
 import { createDirectorCloudPersistenceRouter } from './src/server/services/directorCloudPersistenceRouter';
+import { createProjectBindingRouter } from './src/server/services/projectBindingRouter';
 
 async function loadEpisodeServerModule() {
   const previousVitest = process.env.VITEST;
@@ -24,6 +25,9 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
   // This router enforces its own explicit persistence-intent header and only writes
   // Director metadata/assets; it does not enable Episode/Veo production execution.
   app.use('/api/director/persistence', createDirectorCloudPersistenceRouter());
+  // Project Binding is the anonymous, bearer-code entry point for cross-device
+  // restore. It is mounted before the Episode preview gate like cloud persistence.
+  app.use('/api/director/project-binding', createProjectBindingRouter());
   app.use(episodeApp);
   return app;
 }
