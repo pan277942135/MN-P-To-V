@@ -1,4 +1,5 @@
 import type { GeneratedStoryboardShot } from './localStoryboardGenerator';
+import type { AspectRatio } from '../formatPolicy/formatPolicy';
 
 export interface GeminiStoryboardRequest {
   title: string;
@@ -7,6 +8,7 @@ export interface GeminiStoryboardRequest {
   productionNotes?: string;
   targetDurationSeconds: number;
   targetFormat?: 'story_short' | 'vlog' | 'cosplay' | 'other';
+  aspectRatio?: AspectRatio;
 }
 
 export interface GeminiStoryboardResponse {

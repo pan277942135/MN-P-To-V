@@ -1,9 +1,12 @@
+import type { AspectRatio, AssetValidation } from '../formatPolicy/formatPolicy';
+
 export interface GenerateKeyframeImageRequest {
   prompt: string;
   negativePrompt?: string;
   characterHint?: string;
   referenceImageBase64?: string;
   referenceMimeType?: string;
+  aspectRatio?: AspectRatio;
 }
 
 export interface GenerateKeyframeImageResponse {
@@ -12,6 +15,7 @@ export interface GenerateKeyframeImageResponse {
   generatedAt: number;
   mimeType: string;
   imageBase64: string;
+  validation?: AssetValidation;
 }
 
 export async function generateKeyframeImage(
@@ -37,6 +41,7 @@ export async function generateKeyframeImage(
     generatedAt: Number(payload.generatedAt || Date.now()),
     mimeType: String(payload.mimeType || 'image/png'),
     imageBase64: String(payload.imageBase64 || ''),
+    ...(payload.validation ? { validation: payload.validation as AssetValidation } : {}),
   };
 }
 

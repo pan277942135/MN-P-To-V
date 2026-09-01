@@ -13,6 +13,11 @@ function context(): DirectorContext {
       creativeBrief: '青春怀旧 AI 漫剧',
       targetFormat: 'story_short',
       aspectRatio: '9:16',
+      formatPolicy: {
+        defaultAspectRatio: '9:16',
+        allowedAspectRatios: ['9:16'],
+        allowShotOverride: true,
+      },
     },
     episode: {
       episodeId: 'EP01',

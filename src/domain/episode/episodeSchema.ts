@@ -12,6 +12,15 @@ const idSchema = z.string().trim().min(1).max(160).refine((value) => !value.incl
 
 const timestampSchema = z.number().int().nonnegative();
 const moneySchema = z.number().finite().nonnegative();
+const aspectRatioSchema = z.enum(['16:9', '9:16', '1:1']);
+const formatPolicySchema = z.object({
+  defaultAspectRatio: aspectRatioSchema,
+  allowedAspectRatios: z.array(aspectRatioSchema).min(1).max(3),
+  allowShotOverride: z.boolean(),
+});
+const shotFormatPolicySchema = z.object({
+  aspectRatio: aspectRatioSchema,
+});
 
 export const CharacterSnapshotRefSchema = z.object({
   characterId: idSchema,
@@ -55,7 +64,8 @@ export const EpisodeSpecSchema = z.object({
   characterVersion: z.string().trim().min(1).max(120),
   characterSnapshot: CharacterSnapshotRefSchema,
   durationTargetSeconds: z.number().int().min(4).max(600),
-  aspectRatio: z.literal('9:16'),
+  aspectRatio: aspectRatioSchema,
+  formatPolicy: formatPolicySchema.optional(),
   status: EpisodeStatusSchema,
   budget: EpisodeBudgetSchema.optional(),
   shotIds: z.array(idSchema).max(100),
@@ -184,6 +194,7 @@ export const ShotSpecSchema = z.object({
   scene: ShotSceneSpecSchema,
   action: z.string().trim().min(1).max(4000),
   camera: z.string().trim().min(1).max(1000),
+  formatPolicy: shotFormatPolicySchema.optional(),
   emotion: z.string().trim().max(500).optional(),
   props: z.array(z.string().trim().min(1).max(240)).max(50).default([]),
   voiceover: z.string().trim().max(4000).optional(),

@@ -5,6 +5,7 @@ import {
   syncShotPipeline,
   type StoryboardDraftForWorkflow,
 } from '../services/director/shotProductionWorkflow';
+import { DEFAULT_FORMAT_POLICY } from '../services/formatPolicy/formatPolicy';
 
 function shot(uid: string, durationSeconds = 4): GeneratedStoryboardShot {
   return {
@@ -137,5 +138,17 @@ describe('shotProductionWorkflow', () => {
     expect(b?.status).toBe('DRAFT');
     expect(b?.storyboardDurationSeconds).toBe(7);
     expect(b?.productionDurationSeconds).toBe(8);
+  });
+
+  it('uses a valid Shot format override when building the keyframe blueprint', () => {
+    const overridden = shot('portrait');
+    overridden.formatPolicy = { aspectRatio: '9:16' };
+    const result = syncShotPipeline({
+      storyboard: storyboard([overridden]),
+      formatPolicy: DEFAULT_FORMAT_POLICY,
+      now: 100,
+    });
+
+    expect(result.blueprint.blueprints[0].imagePrompt).toContain('9:16 电影感关键帧');
   });
 });

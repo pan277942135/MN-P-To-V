@@ -1,4 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
+import { normalizeAspectRatio, type AspectRatio } from '../../services/formatPolicy/formatPolicy';
 
 export interface KeyframeImageGenerationInput {
   prompt: string;
@@ -6,7 +7,7 @@ export interface KeyframeImageGenerationInput {
   characterHint?: string;
   referenceImageBase64?: string;
   referenceMimeType?: string;
-  aspectRatio?: '9:16';
+  aspectRatio?: AspectRatio;
   imageSize?: '1K';
 }
 
@@ -86,14 +87,14 @@ function validateInput(input: KeyframeImageGenerationInput) {
     characterHint,
     referenceImageBase64,
     referenceMimeType,
-    aspectRatio: '9:16' as const,
+    aspectRatio: normalizeAspectRatio(input.aspectRatio, '9:16'),
     imageSize: '1K' as const,
   };
 }
 
 function buildPrompt(input: ReturnType<typeof validateInput>, hasReference: boolean) {
   return [
-    '你是“造境 Director”的关键帧摄影师。生成一张可直接作为后续图生视频首帧的竖屏电影感关键帧。',
+    `你是“造境 Director”的关键帧摄影师。生成一张可直接作为后续图生视频首帧的 ${input.aspectRatio} 电影感关键帧。`,
     '必须是一个稳定的静态瞬间：主体清晰、空间关系明确、构图完整，不画分镜格，不出现字幕、UI、水印或说明文字。',
     hasReference
       ? '已提供角色参考图：严格保持参考图中的同一角色身份、脸部结构、年龄感与整体辨识度；不得换脸或重新设计人物。'
@@ -101,7 +102,7 @@ function buildPrompt(input: ReturnType<typeof validateInput>, hasReference: bool
     input.characterHint ? `角色约束：${input.characterHint}` : '',
     `关键帧 Prompt：${input.prompt}`,
     input.negativePrompt ? `必须避免：${input.negativePrompt}` : '',
-    '输出比例固定 9:16。只生成一张最终关键帧图片。',
+    `输出比例为 ${input.aspectRatio}。只生成一张最终关键帧图片。`,
   ].filter(Boolean).join('\n');
 }
 

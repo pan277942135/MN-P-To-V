@@ -4,6 +4,11 @@ import type { KeyframeProvider, ShotSpec } from '../../domain/episode/episodeTyp
 import { gcsArtifactStore, resolveVeoOutputBucket } from '../storage/gcsArtifactStore';
 import { firestoreShotRepository } from '../repositories/firestoreShotRepository';
 import { syncKeyframeAssetToRegistry } from './assetRegistry/assetRegistrySyncService';
+import { firestoreDirectorProjectRepository } from '../repositories/firestoreDirectorProjectRepository';
+import {
+  validateAssetMetadata,
+  type AssetValidation,
+} from '../../services/formatPolicy/formatPolicy';
 
 const MAX_KEYFRAME_BYTES = 20 * 1024 * 1024;
 
@@ -21,6 +26,10 @@ export interface PersistKeyframeAssetInput {
   providerModel?: string;
   prompt?: string;
   expectedVersion?: number;
+  /** Optional policy snapshots supplied by a Director upload caller. */
+  projectFormatPolicy?: unknown;
+  episodeFormatPolicy?: unknown;
+  shotFormatPolicy?: unknown;
 }
 
 export interface PersistKeyframeAssetResult {
@@ -34,6 +43,7 @@ export interface PersistKeyframeAssetResult {
   outputBucket: string;
   outputObjectPath: string;
   reusedExistingAsset: boolean;
+  validation: AssetValidation;
 }
 
 function sha256(value: Buffer | string): string {
@@ -65,6 +75,30 @@ function assertProviderInput(provider: KeyframeProvider, sourceFileId?: string, 
   }
   if (provider === 'GEMINI_GENERATED' && !String(providerModel || '').trim()) {
     throw new Error('KEYFRAME_PROVIDER_MODEL_REQUIRED: GEMINI_GENERATED requires providerModel.');
+  }
+}
+
+function objectValue(value: unknown): Record<string, any> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, any>
+    : {};
+}
+
+async function readFormatPolicies(projectId?: string): Promise<{ projectPolicy?: unknown; episodePolicy?: unknown }> {
+  const cleanProjectId = String(projectId || '').trim();
+  if (!cleanProjectId) return {};
+  try {
+    const bundle = await firestoreDirectorProjectRepository.getRestoreBundle(cleanProjectId);
+    const brief = objectValue(bundle?.stages?.brief);
+    return {
+      projectPolicy: bundle?.project?.formatPolicy || brief.formatPolicy,
+      episodePolicy: bundle?.episode?.formatPolicy,
+    };
+  } catch (error) {
+    // Policy lookup is advisory. The legacy 9:16 fallback keeps the production
+    // upload path available when an older/partial project cannot be read.
+    console.warn('[Format Policy] project lookup skipped:', error instanceof Error ? error.message : String(error));
+    return {};
   }
 }
 
@@ -119,6 +153,21 @@ export class KeyframeAssetService {
     const height = Number(metadata.height || 0);
     if (!width || !height) throw new Error('KEYFRAME_DIMENSIONS_INVALID');
 
+    const persistedPolicies = input.projectFormatPolicy === undefined || input.episodeFormatPolicy === undefined
+      ? await readFormatPolicies(input.projectId)
+      : {};
+    const projectFormatPolicy = input.projectFormatPolicy ?? persistedPolicies.projectPolicy;
+    const episodeFormatPolicy = input.episodeFormatPolicy ?? persistedPolicies.episodePolicy;
+    const validation = validateAssetMetadata({
+      width,
+      height,
+      mimeType,
+      assetType: 'IMAGE',
+      projectPolicy: projectFormatPolicy,
+      episodePolicy: episodeFormatPolicy,
+      shotOverride: input.shotFormatPolicy || shot.formatPolicy,
+    });
+
     const contentSha256 = sha256(input.buffer);
     const promptHash = input.prompt ? sha256(input.prompt) : undefined;
     const assetId = buildAssetId(input.episodeId, input.shotId, version, contentSha256);
@@ -149,6 +198,7 @@ export class KeyframeAssetService {
         outputBucket: shot.keyframe.outputBucket,
         outputObjectPath: shot.keyframe.outputObjectPath,
         reusedExistingAsset: true,
+        validation,
       };
     }
 
@@ -206,6 +256,7 @@ export class KeyframeAssetService {
         outputBucket: artifact.outputBucket,
         outputObjectPath: artifact.outputObjectPath,
         reusedExistingAsset: false,
+        validation,
       };
     } catch (error) {
       if (!existedBefore) {

@@ -1,3 +1,5 @@
+import type { ShotFormatPolicy, AspectRatio } from '../formatPolicy/formatPolicy';
+
 export interface StoryboardGenerationInput {
   title: string;
   creativeBrief: string;
@@ -5,6 +7,7 @@ export interface StoryboardGenerationInput {
   productionNotes?: string;
   targetDurationSeconds: number;
   targetFormat?: 'story_short' | 'vlog' | 'cosplay' | 'other';
+  aspectRatio?: AspectRatio;
 }
 
 export interface GeneratedStoryboardShot {
@@ -16,6 +19,8 @@ export interface GeneratedStoryboardShot {
   camera: string;
   dialogue: string;
   notes: string;
+  /** Optional per-Shot production format override; absent means inherit policy. */
+  formatPolicy?: ShotFormatPolicy;
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -167,8 +172,9 @@ function inferDialogue(beat: string) {
   return '';
 }
 
-function inferNotes(beat: string) {
-  const notes = ['9:16 竖屏；与前后镜头保持人物、服装、道具和动作连续。'];
+function inferNotes(beat: string, aspectRatio: AspectRatio) {
+  const formatLabel = aspectRatio === '16:9' ? '横屏' : aspectRatio === '9:16' ? '竖屏' : '方形';
+  const notes = [`${aspectRatio} ${formatLabel}；与前后镜头保持人物、服装、道具和动作连续。`];
   if (/拒信|现实|失业/.test(beat)) notes.push('现实段落保持自然、克制，不做夸张表演。');
   if (/EVA|泡棉|手搓|制作|法杖/.test(beat)) notes.push('手工道具保留粗糙真实质感，并延续到后续镜头。');
   if (/幻想|变身|变成|魔法/.test(beat)) notes.push('明确标记为幻想段落；转化前后的主体位置与道具连续。');
@@ -199,6 +205,7 @@ export function generateLocalStoryboard(input: StoryboardGenerationInput): Gener
   const beats = buildBeats(source, Math.max(4, Number(input.targetDurationSeconds || 30)));
   const durations = allocateDurations(beats.length, input.targetDurationSeconds);
   const stamp = Date.now().toString(36);
+  const aspectRatio = input.aspectRatio || '9:16';
 
   return beats.map((beat, index) => ({
     uid: `auto-${stamp}-${index + 1}`,
@@ -208,6 +215,6 @@ export function generateLocalStoryboard(input: StoryboardGenerationInput): Gener
     action: inferAction(beat),
     camera: inferCamera(beat, index),
     dialogue: inferDialogue(beat),
-    notes: inferNotes(beat),
+    notes: inferNotes(beat, aspectRatio),
   }));
 }

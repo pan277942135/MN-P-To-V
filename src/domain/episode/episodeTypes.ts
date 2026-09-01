@@ -1,3 +1,5 @@
+import type { AspectRatio, ProductionFormatPolicy, ShotFormatPolicy } from '../../services/formatPolicy/formatPolicy';
+
 export const EPISODE_SCHEMA_VERSION = 'episode-v0.1' as const;
 export const SHOT_SCHEMA_VERSION = 'shot-v0.1' as const;
 
@@ -51,7 +53,9 @@ export interface EpisodeSpec {
   characterVersion: string;
   characterSnapshot: CharacterSnapshotRef;
   durationTargetSeconds: number;
-  aspectRatio: '9:16';
+  /** Legacy field retained for existing consumers; policy is authoritative when present. */
+  aspectRatio: AspectRatio;
+  formatPolicy?: ProductionFormatPolicy;
   status: EpisodeStatus;
   budget?: EpisodeBudget;
   shotIds: string[];
@@ -124,6 +128,7 @@ export interface ShotSpec {
   scene: ShotSceneSpec;
   action: string;
   camera: string;
+  formatPolicy?: ShotFormatPolicy;
   emotion?: string;
   props: string[];
   voiceover?: string;

@@ -1,4 +1,10 @@
 import { getFirestoreInstance, markFirestoreUnavailable } from '../db/firestore';
+import {
+  hasFormatPolicy,
+  hasShotFormatPolicy,
+  normalizeFormatPolicy,
+  type ProductionFormatPolicy,
+} from '../../services/formatPolicy/formatPolicy';
 
 export const DIRECTOR_PROJECT_COLLECTION = 'director_projects';
 export const DIRECTOR_CLOUD_SCHEMA = 'zaojing.director.cloud.v1' as const;
@@ -11,6 +17,7 @@ export interface DirectorCloudSnapshot {
   projectTitle: string;
   clientUpdatedAt: number;
   stages: Record<string, unknown>;
+  formatPolicy?: ProductionFormatPolicy;
 }
 
 export interface DirectorCloudProjectRecord {
@@ -42,6 +49,12 @@ function asObject(value: unknown): Record<string, any> | null {
     : null;
 }
 
+function snapshotFormatPolicy(snapshot: DirectorCloudSnapshot): ProductionFormatPolicy | undefined {
+  const brief = asObject(snapshot.stages?.brief);
+  const candidate = snapshot.formatPolicy || brief?.formatPolicy;
+  return hasFormatPolicy(candidate) ? normalizeFormatPolicy(candidate) : undefined;
+}
+
 export function buildDirectorShotDocuments(snapshot: DirectorCloudSnapshot) {
   const stages = snapshot.stages || {};
   const storyboard = asObject(stages.storyboard);
@@ -67,7 +80,12 @@ export function buildDirectorShotDocuments(snapshot: DirectorCloudSnapshot) {
   storyboardShots.forEach((shot: any, index: number) => {
     const shotUid = clean(shot?.uid);
     if (!shotUid) return;
-    Object.assign(ensure(shotUid), { order: index + 1, storyboard: jsonSafe(shot) });
+    const shotFormatPolicy = asObject(shot?.formatPolicy);
+    Object.assign(ensure(shotUid), {
+      order: index + 1,
+      storyboard: jsonSafe(shot),
+      ...(hasShotFormatPolicy(shotFormatPolicy) ? { formatPolicy: jsonSafe(shotFormatPolicy) } : {}),
+    });
   });
   blueprintItems.forEach((item: any) => {
     const shotUid = clean(item?.shotUid);
@@ -110,6 +128,7 @@ class FirestoreDirectorProjectRepository {
 
     const now = Date.now();
     try {
+      const formatPolicy = snapshotFormatPolicy(snapshot);
       const projectRef = db.collection(DIRECTOR_PROJECT_COLLECTION).doc(projectId);
       const episodeRef = projectRef.collection('episodes').doc(episodeId);
       const batch = db.batch();
@@ -122,6 +141,7 @@ class FirestoreDirectorProjectRepository {
         activeEpisodeId: episodeId,
         latestClientUpdatedAt: Number(snapshot.clientUpdatedAt || 0),
         updatedAt: now,
+        ...(formatPolicy ? { formatPolicy } : {}),
       }, { merge: true });
 
       batch.set(episodeRef, {
@@ -133,6 +153,7 @@ class FirestoreDirectorProjectRepository {
         clientUpdatedAt: Number(snapshot.clientUpdatedAt || 0),
         snapshot,
         updatedAt: now,
+        ...(formatPolicy ? { formatPolicy } : {}),
       }, { merge: true });
 
       for (const [stageKey, stageValue] of Object.entries(snapshot.stages || {})) {
@@ -270,6 +291,10 @@ class FirestoreDirectorProjectRepository {
         videoBlueprintStatus: clean(shot.videoBlueprint?.status) || 'NOT_STARTED',
       }));
 
+      const formatPolicy = snapshotFormatPolicy(snapshotForShots)
+        || (hasFormatPolicy(projectData.formatPolicy) ? normalizeFormatPolicy(projectData.formatPolicy) : undefined)
+        || (hasFormatPolicy(episodeData.formatPolicy) ? normalizeFormatPolicy(episodeData.formatPolicy) : undefined);
+
       return {
         project: {
           projectId,
@@ -278,6 +303,7 @@ class FirestoreDirectorProjectRepository {
           activeEpisodeId: episodeId,
           createdAt: Number(projectData.createdAt || 0),
           updatedAt: Number(projectData.updatedAt || episodeData.updatedAt || 0),
+          ...(formatPolicy ? { formatPolicy } : {}),
         },
         episode: {
           projectId,
@@ -287,6 +313,7 @@ class FirestoreDirectorProjectRepository {
           status: clean(episodeData.status) || 'DRAFT',
           clientUpdatedAt: Number(episodeData.clientUpdatedAt || storedSnapshot.clientUpdatedAt || 0),
           updatedAt: Number(episodeData.updatedAt || projectData.updatedAt || 0),
+          ...(hasFormatPolicy(episodeData.formatPolicy) ? { formatPolicy: normalizeFormatPolicy(episodeData.formatPolicy) } : formatPolicy ? { formatPolicy } : {}),
         },
         shots,
         stages,

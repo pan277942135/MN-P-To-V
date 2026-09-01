@@ -144,11 +144,18 @@ export const DirectorContextPage: React.FC = () => {
               </div>
             </div>
 
-            <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
               <Info label="创意 Brief" value={context.project.creativeBrief || '未填写'} wide />
               <Info label="目标形式" value={FORMAT_LABELS[context.project.targetFormat] || context.project.targetFormat || '未指定'} />
               <Info label="画幅比例" value={context.project.aspectRatio || '未指定'} />
+              <Info label="允许画幅" value={context.project.formatPolicy.allowedAspectRatios.join(' · ')} />
               <Info label="Episode 状态" value={context.episode.status || '未指定'} />
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-indigo-500/20 bg-indigo-500/5 px-3.5 py-3 text-xs text-indigo-100/80" data-testid="director-context-format-policy">
+              <span className="font-bold text-indigo-200">Production Format Policy</span>
+              <span>Default · {context.project.formatPolicy.defaultAspectRatio}</span>
+              <span>·</span>
+              <span>Shot Override · {context.project.formatPolicy.allowShotOverride ? 'ON' : 'OFF'}</span>
             </div>
             {context.episode.summary && <p className="mt-4 max-w-5xl text-sm leading-6 text-slate-300"><span className="font-bold text-slate-500">Episode Summary：</span>{context.episode.summary}</p>}
           </section>
@@ -252,6 +259,7 @@ const ShotRow: React.FC<{ shot: DirectorContextShot }> = ({ shot }) => {
         <ContextField label="Camera" value={shot.camera || '未标注'} />
         <ContextField label="Dialogue" value={shot.dialogue || '无'} />
       </div>
+      {shot.formatPolicy && <div className="mt-3 text-xs text-indigo-200/75">画幅覆盖 · <span className="font-black text-indigo-200">{shot.formatPolicy.aspectRatio}</span></div>}
       {shot.assets.length > 0 && <div className="mt-3 flex flex-wrap gap-2 border-t border-[#222228] pt-3">{shot.assets.map((asset) => <AssetChip key={asset.assetId} asset={asset} />)}</div>}
     </article>
   );

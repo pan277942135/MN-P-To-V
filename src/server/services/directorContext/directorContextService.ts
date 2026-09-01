@@ -21,6 +21,13 @@ import {
   type DirectorShotContext,
 } from '../../../services/directorContext/directorContextTypes';
 import type { DirectorAssetRecord } from '../../../services/assetRegistry/assetRegistryTypes';
+import {
+  hasFormatPolicy,
+  LEGACY_FORMAT_POLICY,
+  normalizeAspectRatio,
+  normalizeFormatPolicy,
+  type ShotFormatPolicy,
+} from '../../../services/formatPolicy/formatPolicy';
 
 function clean(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -141,12 +148,22 @@ function buildProject(bundle: DirectorCloudRestoreBundle, projectId: string): Di
   const project = objectValue(bundle.project);
   const episode = objectValue(bundle.episode);
   const brief = briefFrom(bundle);
+  const policyValue = project.formatPolicy || episode.formatPolicy || brief.formatPolicy;
+  const policy = hasFormatPolicy(policyValue)
+    ? normalizeFormatPolicy(policyValue, LEGACY_FORMAT_POLICY)
+    : LEGACY_FORMAT_POLICY;
+  const hasPolicy = hasFormatPolicy(policyValue);
   return {
     projectId,
     title: text(project.projectTitle, project.title, episode.projectTitle, brief.title, projectId),
     creativeBrief: text(project.creativeBrief, brief.creativeBrief, brief.summary),
     targetFormat: text(project.targetFormat, brief.targetFormat),
-    aspectRatio: text(project.aspectRatio, brief.aspectRatio, '9:16'),
+    // `formatPolicy` supersedes the legacy field when it exists. Historical
+    // records without the field still resolve to their old 9:16 behavior.
+    aspectRatio: hasPolicy
+      ? policy.defaultAspectRatio
+      : normalizeAspectRatio(text(project.aspectRatio, brief.aspectRatio, LEGACY_FORMAT_POLICY.defaultAspectRatio)),
+    formatPolicy: policy,
   };
 }
 
@@ -231,6 +248,12 @@ function buildShot(
   const videoBlueprint = objectValue(raw.videoBlueprint);
   const keyframeQa = objectValue(raw.keyframeQa);
   const keyframeAsset = objectValue(raw.keyframeAsset);
+  const rawFormatPolicy = objectValue(raw.formatPolicy || storyboard.formatPolicy);
+  const formatPolicy: ShotFormatPolicy | undefined = rawFormatPolicy.aspectRatio === '16:9'
+    || rawFormatPolicy.aspectRatio === '9:16'
+    || rawFormatPolicy.aspectRatio === '1:1'
+    ? { aspectRatio: rawFormatPolicy.aspectRatio }
+    : undefined;
   return {
     shotUid,
     order: numericOrder(raw.order, storyboard.order) || index + 1,
@@ -241,6 +264,7 @@ function buildShot(
     action,
     dialogue: text(raw.dialogue, raw.voiceover, storyboard.dialogue, storyboard.voiceover),
     status: text(raw.status, video.status, videoBlueprint.status, keyframeQa.autoStatus, keyframeQa.status, keyframeAsset.status, 'DRAFT'),
+    ...(formatPolicy ? { formatPolicy } : {}),
     assets: assetsByShot.get(shotUid) || [],
   };
 }

@@ -14,6 +14,13 @@ import {
 import { KEYFRAME_QA_APPROVAL_KEY, KEYFRAME_QA_KEY } from './keyframeQa';
 import { VIDEO_BLUEPRINT_APPROVAL_KEY, VIDEO_BLUEPRINT_KEY } from './videoBlueprint';
 import { keyframeAssetStore } from './keyframeAssetStore';
+import {
+  hasFormatPolicy,
+  LEGACY_FORMAT_POLICY,
+  normalizeFormatPolicy,
+  type ProductionFormatPolicy,
+} from '../formatPolicy/formatPolicy';
+import type { AssetValidation } from '../formatPolicy/formatPolicy';
 
 export const DIRECTOR_CLOUD_SCHEMA = 'zaojing.director.cloud.v1' as const;
 export const DIRECTOR_CLOUD_INTENT = 'director-cloud-v0.4.0' as const;
@@ -46,6 +53,9 @@ export interface DirectorCloudAssetRef {
   sizeBytes: number;
   generation: string;
   updatedAt: number;
+  width?: number;
+  height?: number;
+  aspectRatio?: string;
 }
 
 export interface DirectorCloudSnapshot {
@@ -56,11 +66,18 @@ export interface DirectorCloudSnapshot {
   projectTitle: string;
   clientUpdatedAt: number;
   stages: Record<string, any>;
+  formatPolicy?: ProductionFormatPolicy;
 }
 
 export interface DirectorCloudRecord {
   snapshot: DirectorCloudSnapshot;
   serverUpdatedAt: number;
+  assetUploads?: Array<{
+    assetId: string;
+    shotUid: string;
+    blobKey: string;
+    validation: AssetValidation;
+  }>;
 }
 
 function readJson<T = any>(key: string): T | null {
@@ -139,6 +156,9 @@ export function collectDirectorLocalSnapshot(): DirectorCloudSnapshot {
     projectTitle: String(brief.title || blueprint.projectTitle || '未命名 Director 项目'),
     clientUpdatedAt,
     stages,
+    ...(hasFormatPolicy(brief.formatPolicy)
+      ? { formatPolicy: normalizeFormatPolicy(brief.formatPolicy, LEGACY_FORMAT_POLICY) }
+      : {}),
   };
 }
 
@@ -184,7 +204,7 @@ async function buildAssetUploads(snapshot: DirectorCloudSnapshot) {
   const manifest = snapshot.stages.keyframeAssets as KeyframeAssetManifest | undefined;
   const cloudMap = snapshot.stages.keyframeCloudAssets as { items?: DirectorCloudAssetRef[] } | undefined;
   const existing = new Map((cloudMap?.items || []).map((item) => [`${item.shotUid}:${item.blobKey}`, item]));
-  const uploads: Array<{ shotUid: string; blobKey: string; mimeType: string; base64: string }> = [];
+  const uploads: Array<{ shotUid: string; blobKey: string; mimeType: string; base64: string; validate: boolean }> = [];
   if (!manifest?.assets?.length) return uploads;
 
   for (const asset of manifest.assets) {
@@ -197,6 +217,7 @@ async function buildAssetUploads(snapshot: DirectorCloudSnapshot) {
       blobKey: asset.blobKey,
       mimeType: blob.type || asset.mimeType || 'image/png',
       base64: await blobToBase64(blob),
+      validate: true,
     });
   }
   return uploads;
@@ -218,6 +239,21 @@ export async function syncDirectorCloud(): Promise<DirectorCloudRecord> {
   if (!response.ok) throw new Error(payload?.message || `Cloud persistence sync failed (${response.status})`);
   const record = payload.record as DirectorCloudRecord;
   if (!record?.snapshot) throw new Error('Cloud persistence response missing snapshot.');
+  const uploadResults = Array.isArray(payload.uploads)
+    ? payload.uploads
+    : Array.isArray(record.assetUploads) ? record.assetUploads : [];
+  if (uploadResults.length) {
+    const manifest = readJson<KeyframeAssetManifest>(KEYFRAME_ASSET_KEY);
+    if (manifest?.assets) {
+      writeJson(KEYFRAME_ASSET_KEY, {
+        ...manifest,
+        assets: manifest.assets.map((asset) => {
+          const result = uploadResults.find((item: any) => item?.shotUid === asset.shotUid && item?.blobKey === asset.blobKey);
+          return result?.validation ? { ...asset, validation: result.validation } : asset;
+        }),
+      });
+    }
+  }
   const cloudAssets = record.snapshot.stages?.keyframeCloudAssets;
   if (cloudAssets) writeJson(DIRECTOR_CLOUD_ASSET_MAP_KEY, cloudAssets);
   writeJson(DIRECTOR_CLOUD_SYNC_META_KEY, {

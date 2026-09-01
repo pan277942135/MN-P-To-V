@@ -26,6 +26,7 @@ import {
   type KeyframeQaGenerationInput,
 } from './src/server/services/geminiKeyframeQaService';
 import { taskStateMachineService } from './src/server/services/taskStateMachineService';
+import { normalizeAspectRatio } from './src/services/formatPolicy/formatPolicy';
 
 export interface EpisodeProductionRunnerLike {
   run(input: EpisodeProductionRunInput): Promise<EpisodeProductionRunResult>;
@@ -367,7 +368,7 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
       characterHint: String(req.body?.characterHint || ''),
       referenceImageBase64: String(req.body?.referenceImageBase64 || ''),
       referenceMimeType: String(req.body?.referenceMimeType || ''),
-      aspectRatio: '9:16',
+      aspectRatio: normalizeAspectRatio(req.body?.aspectRatio, '9:16'),
       imageSize: '1K',
     };
 

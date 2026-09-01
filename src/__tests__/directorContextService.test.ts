@@ -179,6 +179,36 @@ describe('DirectorContextService', () => {
     expect(context.shots.every((shot) => shot.assets.length === 0)).toBe(true);
   });
 
+  it('exposes the project Production Format Policy in the AI context contract', async () => {
+    const base = bundle();
+    const service = new DirectorContextService(
+      source({
+        getRestoreBundle: async () => ({
+          ...base,
+          project: {
+            ...base.project,
+            formatPolicy: {
+              defaultAspectRatio: '16:9',
+              allowedAspectRatios: ['16:9', '9:16', '1:1'],
+              allowShotOverride: true,
+            },
+          },
+        }),
+      }),
+      new MemoryAssetRepository(),
+      assetSync() as any,
+    );
+
+    const context = await service.getDirectorContext('project-a');
+
+    expect(context.project.aspectRatio).toBe('16:9');
+    expect(context.project.formatPolicy).toEqual({
+      defaultAspectRatio: '16:9',
+      allowedAspectRatios: ['16:9', '9:16', '1:1'],
+      allowShotOverride: true,
+    });
+  });
+
   it('resolves Shot Context with a purpose alias and validates missing shots', async () => {
     const service = new DirectorContextService(source(), new MemoryAssetRepository([asset()]), assetSync() as any);
     const context = await service.getShotContext('S03-01');

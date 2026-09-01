@@ -27,10 +27,17 @@ import {
   type StoryboardApprovalForBlueprint,
   type StoryboardForBlueprint,
 } from '../services/director/keyframeBlueprint';
+import {
+  LEGACY_FORMAT_POLICY,
+  normalizeFormatPolicy,
+  type ProductionFormatPolicy,
+} from '../services/formatPolicy/formatPolicy';
 
 interface DirectorProjectDraft {
   title?: string;
   productionNotes?: string;
+  formatPolicy?: ProductionFormatPolicy;
+  aspectRatio?: '16:9' | '9:16' | '1:1';
 }
 
 interface InitialPageState {
@@ -124,6 +131,16 @@ function initializePage(): InitialPageState {
     productionNotes: project.productionNotes || '',
     storyboard,
     approval: storyboardApproval,
+    aspectRatio: normalizeFormatPolicy(project.formatPolicy, project.formatPolicy ? LEGACY_FORMAT_POLICY : {
+      ...LEGACY_FORMAT_POLICY,
+      defaultAspectRatio: project.aspectRatio || LEGACY_FORMAT_POLICY.defaultAspectRatio,
+      allowedAspectRatios: [project.aspectRatio || LEGACY_FORMAT_POLICY.defaultAspectRatio],
+    }).defaultAspectRatio,
+    formatPolicy: normalizeFormatPolicy(project.formatPolicy, project.formatPolicy ? LEGACY_FORMAT_POLICY : {
+      ...LEGACY_FORMAT_POLICY,
+      defaultAspectRatio: project.aspectRatio || LEGACY_FORMAT_POLICY.defaultAspectRatio,
+      allowedAspectRatios: [project.aspectRatio || LEGACY_FORMAT_POLICY.defaultAspectRatio],
+    }),
   });
   window.localStorage.setItem(KEYFRAME_BLUEPRINT_KEY, JSON.stringify(created));
   window.localStorage.removeItem(KEYFRAME_BLUEPRINT_APPROVAL_KEY);

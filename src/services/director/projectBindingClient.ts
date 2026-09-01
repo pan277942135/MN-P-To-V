@@ -1,3 +1,5 @@
+import type { ProductionFormatPolicy } from '../formatPolicy/formatPolicy';
+
 export interface ProjectBindingProject {
   projectId: string;
   seriesTitle: string;
@@ -5,6 +7,7 @@ export interface ProjectBindingProject {
   activeEpisodeId: string;
   createdAt?: number;
   updatedAt?: number;
+  formatPolicy?: ProductionFormatPolicy;
 }
 export interface ProjectBindingEpisode {
   projectId: string;
@@ -14,6 +17,7 @@ export interface ProjectBindingEpisode {
   status: string;
   clientUpdatedAt?: number;
   updatedAt?: number;
+  formatPolicy?: ProductionFormatPolicy;
 }
 
 export interface ProjectBindingRestoreResponse {

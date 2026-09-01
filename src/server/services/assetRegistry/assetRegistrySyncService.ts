@@ -15,6 +15,7 @@ import {
   type DirectorCloudSnapshot,
 } from '../../repositories/firestoreDirectorProjectRepository';
 import { getFirestoreInstance } from '../../db/firestore';
+import { calculateAspectRatio } from '../../../services/formatPolicy/formatPolicy';
 
 function clean(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -31,18 +32,6 @@ function createdAt(value: unknown): string {
   return Number.isFinite(timestamp) && timestamp > 0
     ? new Date(timestamp).toISOString()
     : new Date().toISOString();
-}
-
-function aspectRatio(width: number, height: number): string {
-  if (!width || !height) return '';
-  let left = Math.round(width);
-  let right = Math.round(height);
-  while (right) {
-    const next = left % right;
-    left = right;
-    right = next;
-  }
-  return left > 0 ? `${Math.round(width) / left}:${Math.round(height) / left}` : '';
 }
 
 function digest(value: string): string {
@@ -124,7 +113,7 @@ function canonicalKeyframeAsset(input: {
     metadata: {
       width,
       height,
-      aspectRatio: aspectRatio(width, height),
+      aspectRatio: calculateAspectRatio(width, height),
       durationSeconds: 0,
       fileSize: numberOrZero(keyframe.sizeBytes),
       mimeType: clean(keyframe.mimeType),
@@ -331,8 +320,8 @@ export class AssetRegistrySyncService implements AssetRegistrySyncServiceLike {
         clean(item?.shotUid) === shotUid && clean(item?.blobKey) === blobKey
       )) || {};
       const storyboardShot = storyboardShots.find((item: any) => clean(item?.uid) === shotUid) || {};
-      const width = numberOrZero(manifestAsset.width);
-      const height = numberOrZero(manifestAsset.height);
+      const width = numberOrZero(manifestAsset.width || cloud.width);
+      const height = numberOrZero(manifestAsset.height || cloud.height);
       const asset: DirectorAssetRecord = {
         assetId: clean(cloud.assetId) || `legacy_kf_${digest(`${snapshot.projectId}|${snapshot.episodeId}|${shotUid}|${blobKey}`)}`,
         projectId: clean(snapshot.projectId),
@@ -351,7 +340,7 @@ export class AssetRegistrySyncService implements AssetRegistrySyncServiceLike {
         metadata: {
           width,
           height,
-          aspectRatio: aspectRatio(width, height),
+          aspectRatio: calculateAspectRatio(width, height),
           durationSeconds: 0,
           fileSize: numberOrZero(cloud.sizeBytes) || numberOrZero(manifestAsset.sizeBytes),
           mimeType: clean(cloud.mimeType) || clean(manifestAsset.mimeType),

@@ -1,4 +1,11 @@
 import type { GeneratedStoryboardShot } from './localStoryboardGenerator';
+import {
+  LEGACY_FORMAT_POLICY,
+  normalizeAspectRatio,
+  resolveFormatPolicy,
+  type AspectRatio,
+  type ProductionFormatPolicy,
+} from '../formatPolicy/formatPolicy';
 
 export const DIRECTOR_DRAFT_KEY = 'zaojing_director_v01_brief';
 export const STORYBOARD_KEY = 'zaojing_director_v02_storyboard';
@@ -93,12 +100,13 @@ function buildContinuity(shot: GeneratedStoryboardShot, productionNotes: string)
 function buildImagePrompt(
   shot: GeneratedStoryboardShot,
   continuity: string,
+  aspectRatio: AspectRatio,
 ): string {
   const dialogueHint = clean(shot.dialogue)
     ? `对白/旁白语义仅用于表演情绪参考：${clean(shot.dialogue)}。`
     : '';
   return [
-    `竖屏 9:16 电影感关键帧。`,
+    `${aspectRatio} 电影感关键帧。`,
     `场景：${clean(shot.scene)}。`,
     `构图与镜头语言：${clean(shot.camera)}。`,
     `冻结瞬间：${clean(shot.action)}。`,
@@ -113,6 +121,8 @@ export function buildKeyframeBlueprintDraft(input: {
   productionNotes?: string;
   storyboard: StoryboardForBlueprint;
   approval: StoryboardApprovalForBlueprint;
+  aspectRatio?: AspectRatio;
+  formatPolicy?: ProductionFormatPolicy;
   now?: number;
 }): KeyframeBlueprintDraft {
   const { storyboard, approval } = input;
@@ -123,6 +133,14 @@ export function buildKeyframeBlueprintDraft(input: {
   const now = input.now ?? Date.now();
   const productionNotes = clean(input.productionNotes);
   const blueprints = storyboard.shots.map((shot, index): KeyframeBlueprint => {
+    const aspectRatio = resolveFormatPolicy({
+      projectPolicy: input.formatPolicy || (input.aspectRatio ? {
+        ...LEGACY_FORMAT_POLICY,
+        defaultAspectRatio: normalizeAspectRatio(input.aspectRatio, LEGACY_FORMAT_POLICY.defaultAspectRatio),
+        allowedAspectRatios: [normalizeAspectRatio(input.aspectRatio, LEGACY_FORMAT_POLICY.defaultAspectRatio)],
+      } : undefined),
+      shotOverride: shot.formatPolicy,
+    }).expectedAspectRatio;
     const label = shotLabel(index);
     const continuity = buildContinuity(shot, productionNotes);
     const notes = clean(shot.notes);
@@ -141,7 +159,7 @@ export function buildKeyframeBlueprintDraft(input: {
       props: notes ? `按分镜备注保留必要道具：${notes}` : '按画面动作保留必要道具；无关键道具时填写“无”。',
       lighting: `依据“${clean(shot.scene)}”建立自然、可信且与相邻镜头连续的环境光与时间感。`,
       continuity,
-      imagePrompt: buildImagePrompt(shot, continuity),
+      imagePrompt: buildImagePrompt(shot, continuity, aspectRatio),
       negativePrompt: '人物身份漂移、换脸、服装变化、场景跳变、左右方向错误、肢体异常、额外手指或手臂、重复人物、文字水印、UI 元素、过度磨皮、塑料皮、失焦主体、构图裁切错误。',
     };
   });

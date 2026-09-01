@@ -12,6 +12,9 @@ export interface DirectorCloudAssetRef {
   sizeBytes: number;
   generation: string;
   updatedAt: number;
+  width?: number;
+  height?: number;
+  aspectRatio?: string;
 }
 
 function clean(value: unknown): string {

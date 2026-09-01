@@ -11,6 +11,11 @@ import {
 import { parseEpisodeSpec, parseShotSpec } from '../../domain/episode/episodeSchema';
 import { callWithRetry } from '../../utils/retryHelper';
 import { redactSecrets } from '../../utils/redactSecrets';
+import {
+  LEGACY_FORMAT_POLICY,
+  normalizeFormatPolicy,
+  type ProductionFormatPolicy,
+} from '../../services/formatPolicy/formatPolicy';
 
 const LEGAL_DURATIONS = [4, 6, 8] as const;
 
@@ -87,6 +92,7 @@ export interface EpisodePlanRequest {
   shotCount?: 5 | 6;
   budgetLimitUsd?: number;
   defaultKeyframeProvider?: Extract<KeyframeProvider, 'CHATGPT_UPLOAD' | 'GEMINI_GENERATED'>;
+  formatPolicy?: ProductionFormatPolicy;
 }
 
 export interface EpisodePlanResult {
@@ -265,7 +271,8 @@ function buildEpisodeAndShots(
     characterVersion: request.characterVersion,
     characterSnapshot: request.characterSnapshot,
     durationTargetSeconds: request.durationTargetSeconds,
-    aspectRatio: '9:16',
+    aspectRatio: normalizeFormatPolicy(request.formatPolicy, LEGACY_FORMAT_POLICY).defaultAspectRatio,
+    ...(request.formatPolicy ? { formatPolicy: normalizeFormatPolicy(request.formatPolicy, LEGACY_FORMAT_POLICY) } : {}),
     status: 'PLANNED',
     ...(request.budgetLimitUsd !== undefined ? {
       budget: {

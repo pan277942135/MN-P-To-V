@@ -1,5 +1,12 @@
 import type { GeneratedStoryboardShot } from './localStoryboardGenerator';
 import {
+  LEGACY_FORMAT_POLICY,
+  normalizeFormatPolicy,
+  resolveFormatPolicy,
+  type AspectRatio,
+  type ProductionFormatPolicy,
+} from '../formatPolicy/formatPolicy';
+import {
   CURRENT_SERIES_TITLE,
   DIRECTOR_DRAFT_KEY,
   KEYFRAME_BLUEPRINT_APPROVAL_KEY,
@@ -105,13 +112,14 @@ function shotLabel(index: number) {
   return `S${String(index + 1).padStart(2, '0')}`;
 }
 
-export function visualSignature(shot: GeneratedStoryboardShot): string {
+export function visualSignature(shot: GeneratedStoryboardShot, aspectRatio?: AspectRatio): string {
   return JSON.stringify({
     scene: clean(shot.scene),
     camera: clean(shot.camera),
     action: clean(shot.action),
     dialogue: clean(shot.dialogue),
     notes: clean(shot.notes),
+    aspectRatio: aspectRatio || shot.formatPolicy?.aspectRatio || '',
   });
 }
 
@@ -125,6 +133,7 @@ function createBlueprint(
   projectTitle: string,
   productionNotes: string,
   previousShotUid: string,
+  aspectRatio: AspectRatio,
 ): ShotAwareBlueprint {
   const label = shotLabel(index);
   const continuity = [clean(productionNotes), clean(shot.notes)]
@@ -148,7 +157,7 @@ function createBlueprint(
     lighting: `依据“${clean(shot.scene)}”建立自然、可信且与相邻镜头连续的环境光与时间感。`,
     continuity,
     imagePrompt: [
-      '竖屏 9:16 电影感关键帧。',
+      `${aspectRatio} 电影感关键帧。`,
       `场景：${clean(shot.scene)}。`,
       `构图与镜头语言：${clean(shot.camera)}。`,
       `冻结瞬间：${clean(shot.action)}。`,
@@ -157,7 +166,7 @@ function createBlueprint(
       '画面必须是可作为后续图生视频首帧的单一稳定瞬间，主体清晰，空间关系明确，不表现时间连续动作。',
     ].filter(Boolean).join(' '),
     negativePrompt: '人物身份漂移、换脸、服装变化、场景跳变、左右方向错误、肢体异常、额外手指或手臂、重复人物、文字水印、UI 元素、过度磨皮、塑料皮、失焦主体、构图裁切错误。',
-    sourceVisualSignature: visualSignature(shot),
+    sourceVisualSignature: visualSignature(shot, aspectRatio),
     sourceTimingSignature: timingSignature(shot),
     sourcePreviousShotUid: previousShotUid,
   };
@@ -229,24 +238,30 @@ export function syncShotPipeline(input: {
   existingVideos?: ShotVideoBlueprintManifest | null;
   projectTitle?: string;
   productionNotes?: string;
+  formatPolicy?: ProductionFormatPolicy;
   now?: number;
 }): ShotPipelineSyncResult {
   const now = input.now ?? Date.now();
+  const projectFormatPolicy = normalizeFormatPolicy(input.formatPolicy, LEGACY_FORMAT_POLICY);
   const shots = Array.isArray(input.storyboard.shots) ? input.storyboard.shots : [];
   const oldBlueprints = new Map((input.existingBlueprint?.blueprints || []).map((item) => [item.shotUid, item as ShotAwareBlueprint]));
   const invalidatedKeyframeShotUids = new Set<string>();
   const invalidatedVideoShotUids = new Set<string>();
 
   const blueprints = shots.map((shot, index) => {
+    const aspectRatio = resolveFormatPolicy({
+      projectPolicy: projectFormatPolicy,
+      shotOverride: shot.formatPolicy,
+    }).expectedAspectRatio;
     const label = shotLabel(index);
     const previousShotUid = index > 0 ? shots[index - 1].uid : '';
     const old = oldBlueprints.get(shot.uid);
-    const nextVisual = visualSignature(shot);
+    const nextVisual = visualSignature(shot, aspectRatio);
     const nextTiming = timingSignature(shot);
     if (!old) {
       invalidatedKeyframeShotUids.add(shot.uid);
       invalidatedVideoShotUids.add(shot.uid);
-      return createBlueprint(shot, index, clean(input.projectTitle), clean(input.productionNotes), previousShotUid);
+      return createBlueprint(shot, index, clean(input.projectTitle), clean(input.productionNotes), previousShotUid, aspectRatio);
     }
 
     const hadVisualSignature = typeof old.sourceVisualSignature === 'string';
@@ -261,7 +276,7 @@ export function syncShotPipeline(input: {
     if (visualChanged || predecessorChanged || timingChanged) invalidatedVideoShotUids.add(shot.uid);
 
     if (visualChanged) {
-      return createBlueprint(shot, index, clean(input.projectTitle), clean(input.productionNotes), previousShotUid);
+      return createBlueprint(shot, index, clean(input.projectTitle), clean(input.productionNotes), previousShotUid, aspectRatio);
     }
 
     return {
@@ -363,7 +378,7 @@ export function readCurrentStoryboard(): StoryboardDraftForWorkflow | null {
 export function syncLocalShotPipeline(now = Date.now()): ShotPipelineSyncResult | null {
   const storyboard = readCurrentStoryboard();
   if (!storyboard?.shots?.length) return null;
-  const project = readJson<{ title?: string; productionNotes?: string }>(DIRECTOR_DRAFT_KEY) || {};
+  const project = readJson<{ title?: string; productionNotes?: string; formatPolicy?: ProductionFormatPolicy }>(DIRECTOR_DRAFT_KEY) || {};
   const result = syncShotPipeline({
     storyboard,
     existingBlueprint: readJson<KeyframeBlueprintDraft>(KEYFRAME_BLUEPRINT_KEY),
@@ -371,6 +386,7 @@ export function syncLocalShotPipeline(now = Date.now()): ShotPipelineSyncResult 
     existingVideos: readJson<ShotVideoBlueprintManifest>(VIDEO_BLUEPRINT_KEY),
     projectTitle: project.title,
     productionNotes: project.productionNotes,
+    formatPolicy: project.formatPolicy,
     now,
   });
   window.localStorage.setItem(KEYFRAME_BLUEPRINT_KEY, JSON.stringify(result.blueprint));
@@ -405,7 +421,7 @@ export function saveStoryboardAndSync(
   };
   window.localStorage.setItem(STORYBOARD_KEY, JSON.stringify(normalized));
   window.localStorage.removeItem(STORYBOARD_APPROVAL_KEY);
-  const project = readJson<{ title?: string; productionNotes?: string }>(DIRECTOR_DRAFT_KEY) || {};
+  const project = readJson<{ title?: string; productionNotes?: string; formatPolicy?: ProductionFormatPolicy }>(DIRECTOR_DRAFT_KEY) || {};
   const result = syncShotPipeline({
     storyboard: normalized,
     existingBlueprint: readJson<KeyframeBlueprintDraft>(KEYFRAME_BLUEPRINT_KEY),
@@ -413,6 +429,7 @@ export function saveStoryboardAndSync(
     existingVideos: readJson<ShotVideoBlueprintManifest>(VIDEO_BLUEPRINT_KEY),
     projectTitle: project.title,
     productionNotes: project.productionNotes,
+    formatPolicy: project.formatPolicy,
     now,
   });
   window.localStorage.setItem(KEYFRAME_BLUEPRINT_KEY, JSON.stringify(result.blueprint));

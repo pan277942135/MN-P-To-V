@@ -5,6 +5,7 @@ import {
   findIncompleteBlueprintIndex,
   isStoryboardApprovalCurrent,
 } from '../services/director/keyframeBlueprint';
+import { DEFAULT_FORMAT_POLICY } from '../services/formatPolicy/formatPolicy';
 
 const storyboard = {
   version: 'manual-storyboard-v0.2',
@@ -66,5 +67,21 @@ describe('Step 3.1 keyframe blueprint model', () => {
     expect(result.blueprints[0].imagePrompt).toContain('风吹动白色窗帘');
     expect(result.blueprints[0].continuity).toContain('校服');
     expect(findIncompleteBlueprintIndex(result)).toBe(-1);
+  });
+
+  it('uses a Shot override without changing the Blueprint schema', () => {
+    const result = buildKeyframeBlueprintDraft({
+      projectTitle: '多平台项目',
+      storyboard: {
+        ...storyboard,
+        shots: [{ ...storyboard.shots[0], formatPolicy: { aspectRatio: '1:1' } }],
+      },
+      approval: { ...approval, shotCount: 1 },
+      formatPolicy: DEFAULT_FORMAT_POLICY,
+      now: 401,
+    });
+
+    expect(result.blueprints[0].imagePrompt).toContain('1:1 电影感关键帧');
+    expect(result.blueprints[0]).not.toHaveProperty('formatPolicy');
   });
 });

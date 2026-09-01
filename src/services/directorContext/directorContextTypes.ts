@@ -4,6 +4,7 @@ import type {
   DirectorAssetStatus,
   DirectorAssetType,
 } from '../assetRegistry/assetRegistryTypes';
+import type { ProductionFormatPolicy, ShotFormatPolicy } from '../formatPolicy/formatPolicy';
 
 export const DIRECTOR_CONTEXT_SCHEMA = 'zaojing.director.context.v1' as const;
 
@@ -31,6 +32,7 @@ export interface DirectorContextProject {
   creativeBrief: string;
   targetFormat: string;
   aspectRatio: string;
+  formatPolicy: ProductionFormatPolicy;
 }
 
 export interface DirectorContextEpisode {
@@ -50,6 +52,7 @@ export interface DirectorContextShot {
   action: string;
   dialogue: string;
   status: string;
+  formatPolicy?: ShotFormatPolicy;
   assets: DirectorContextAsset[];
 }
 

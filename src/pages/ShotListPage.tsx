@@ -18,6 +18,15 @@ import {
   moveStoryboardShotBy,
   moveStoryboardShotToOrder,
 } from '../services/director/storyboardShotOrder';
+import {
+  LEGACY_FORMAT_POLICY,
+  hasFormatPolicy,
+  normalizeFormatPolicy,
+  SUPPORTED_ASPECT_RATIOS,
+  type AspectRatio,
+  type ProductionFormatPolicy,
+} from '../services/formatPolicy/formatPolicy';
+import { DIRECTOR_DRAFT_KEY } from '../services/director/keyframeBlueprint';
 
 function createShot(): GeneratedStoryboardShot {
   return {
@@ -40,8 +49,22 @@ function emptyStoryboard(): StoryboardDraftForWorkflow {
   return { version: 'manual-storyboard-v0.2', shots: [] };
 }
 
+function readFormatPolicy(): ProductionFormatPolicy {
+  try {
+    const raw = window.localStorage.getItem(DIRECTOR_DRAFT_KEY);
+    const draft = raw ? JSON.parse(raw) as { formatPolicy?: unknown } : {};
+    return normalizeFormatPolicy(
+      hasFormatPolicy(draft.formatPolicy) ? draft.formatPolicy : undefined,
+      LEGACY_FORMAT_POLICY,
+    );
+  } catch {
+    return LEGACY_FORMAT_POLICY;
+  }
+}
+
 export const ShotListPage: React.FC = () => {
   const initial = useMemo(() => readCurrentStoryboard() || emptyStoryboard(), []);
+  const formatPolicy = useMemo(() => readFormatPolicy(), []);
   const [storyboard, setStoryboard] = useState<StoryboardDraftForWorkflow>(initial);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -171,10 +194,30 @@ export const ShotListPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="grid gap-3 md:grid-cols-[130px_1fr_1fr]">
+              <div className="grid gap-3 md:grid-cols-[130px_1fr_1fr_170px]">
                 <div><label className="mb-1 block text-[11px] font-bold text-slate-500">时长</label><input type="number" min={1} max={60} value={shot.durationSeconds} onChange={(event) => updateShot(shot.uid, 'durationSeconds', Math.max(1, Number(event.target.value || 1)))} className="w-full rounded-xl border border-[#303036] bg-[#09090B] px-3 py-2.5 text-sm text-white" /></div>
                 <div><label className="mb-1 block text-[11px] font-bold text-slate-500">场景</label><input value={shot.scene} onChange={(event) => updateShot(shot.uid, 'scene', event.target.value)} className="w-full rounded-xl border border-[#303036] bg-[#09090B] px-3 py-2.5 text-sm text-white" /></div>
                 <div><label className="mb-1 block text-[11px] font-bold text-slate-500">镜头语言</label><input value={shot.camera} onChange={(event) => updateShot(shot.uid, 'camera', event.target.value)} className="w-full rounded-xl border border-[#303036] bg-[#09090B] px-3 py-2.5 text-sm text-white" /></div>
+                <div>
+                  <label htmlFor={`${shot.uid}-aspect-ratio`} className="mb-1 block text-[11px] font-bold text-slate-500">画幅覆盖</label>
+                  <select
+                    id={`${shot.uid}-aspect-ratio`}
+                    aria-label={`${shotLabel} 画幅覆盖`}
+                    value={shot.formatPolicy?.aspectRatio || ''}
+                    disabled={!formatPolicy.allowShotOverride}
+                    onChange={(event) => updateShot(
+                      shot.uid,
+                      'formatPolicy',
+                      event.target.value ? { aspectRatio: event.target.value as AspectRatio } : undefined,
+                    )}
+                    className="w-full rounded-xl border border-[#303036] bg-[#09090B] px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <option value="">继承项目策略</option>
+                    {SUPPORTED_ASPECT_RATIOS.filter((aspectRatio) => formatPolicy.allowedAspectRatios.includes(aspectRatio)).map((aspectRatio) => (
+                      <option key={aspectRatio} value={aspectRatio}>{aspectRatio}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
               <div className="grid gap-3 lg:grid-cols-2">

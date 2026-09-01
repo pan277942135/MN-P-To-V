@@ -22,6 +22,7 @@ function restoredCloudRecord(payload: ProjectBindingRestoreResponse): DirectorCl
       projectTitle: payload.project.projectTitle,
       clientUpdatedAt: Number(payload.episode.clientUpdatedAt || 0),
       stages: payload.stages,
+      ...(payload.project.formatPolicy ? { formatPolicy: payload.project.formatPolicy } : {}),
     },
     serverUpdatedAt: payload.serverUpdatedAt,
   };

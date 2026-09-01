@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { ProjectBindingPanel } from '../components/ProjectBindingPanel';
 import { ProjectAssetSummary } from '../components/ProjectAssetSummary';
+import { FormatPolicyEditor } from '../components/FormatPolicyEditor';
 import { useDirectorCloud } from '../components/DirectorCloudPersistenceProvider';
 import {
   CheckCircle2,
@@ -10,7 +11,6 @@ import {
   Clock3,
   Copy,
   FileInput,
-  LockKeyhole,
   Plus,
   RotateCcw,
   Save,
@@ -30,6 +30,15 @@ import {
   parseChatGPTStoryboardImport,
 } from '../services/director/chatgptStoryboardImport';
 import type { ProjectBindingRestoreResponse } from '../services/director/projectBindingClient';
+import {
+  DEFAULT_FORMAT_POLICY,
+  LEGACY_FORMAT_POLICY,
+  hasFormatPolicy,
+  normalizeFormatPolicy,
+  SUPPORTED_ASPECT_RATIOS,
+  type AspectRatio,
+  type ProductionFormatPolicy,
+} from '../services/formatPolicy/formatPolicy';
 
 const DRAFT_KEY = 'zaojing_director_v01_brief';
 const STORYBOARD_KEY = 'zaojing_director_v02_storyboard';
@@ -43,7 +52,9 @@ interface DirectorBriefDraft {
   sourceType: 'idea' | 'outline' | 'script';
   targetFormat: 'story_short' | 'vlog' | 'cosplay' | 'other';
   targetDurationSeconds: number;
-  aspectRatio: '9:16';
+  /** Legacy field retained for existing persistence and consumers. */
+  aspectRatio: AspectRatio;
+  formatPolicy: ProductionFormatPolicy;
   creativeBrief: string;
   fullScript: string;
   productionNotes: string;
@@ -65,7 +76,8 @@ const EMPTY_DRAFT: DirectorBriefDraft = {
   sourceType: 'idea',
   targetFormat: 'story_short',
   targetDurationSeconds: 30,
-  aspectRatio: '9:16',
+  aspectRatio: '16:9',
+  formatPolicy: DEFAULT_FORMAT_POLICY,
   creativeBrief: '',
   fullScript: '',
   productionNotes: '',
@@ -94,11 +106,14 @@ function readSavedDraft(): DirectorBriefDraft {
     const raw = window.localStorage.getItem(DRAFT_KEY);
     if (!raw) return EMPTY_DRAFT;
     const parsed = JSON.parse(raw) as Partial<DirectorBriefDraft>;
+    const fallback = hasFormatPolicy(parsed.formatPolicy) ? DEFAULT_FORMAT_POLICY : LEGACY_FORMAT_POLICY;
+    const formatPolicy = normalizeFormatPolicy(parsed.formatPolicy, fallback);
     return {
       ...EMPTY_DRAFT,
       ...parsed,
       version: 'director-brief-v0.1',
-      aspectRatio: '9:16',
+      aspectRatio: formatPolicy.defaultAspectRatio,
+      formatPolicy,
       targetDurationSeconds: Math.max(4, Number(parsed.targetDurationSeconds || 30)),
     };
   } catch {
@@ -182,9 +197,12 @@ function normalizeStoryboard(storyboard: StoryboardDraft): StoryboardDraft {
   };
 }
 
-function hydrateRestoredDraft(value: unknown): DirectorBriefDraft | null {
+function hydrateRestoredDraft(value: unknown, inheritedPolicy?: unknown): DirectorBriefDraft | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const parsed = value as Partial<DirectorBriefDraft>;
+  const policyValue = parsed.formatPolicy || inheritedPolicy;
+  const fallback = hasFormatPolicy(policyValue) ? DEFAULT_FORMAT_POLICY : LEGACY_FORMAT_POLICY;
+  const formatPolicy = normalizeFormatPolicy(policyValue, fallback);
   return {
     ...EMPTY_DRAFT,
     ...parsed,
@@ -194,7 +212,8 @@ function hydrateRestoredDraft(value: unknown): DirectorBriefDraft | null {
     fullScript: typeof parsed.fullScript === 'string' ? parsed.fullScript : '',
     productionNotes: typeof parsed.productionNotes === 'string' ? parsed.productionNotes : '',
     targetDurationSeconds: Math.max(4, Number(parsed.targetDurationSeconds || 30)),
-    aspectRatio: '9:16',
+    aspectRatio: formatPolicy.defaultAspectRatio,
+    formatPolicy,
   };
 }
 
@@ -268,6 +287,17 @@ export const GeminiStoryboardDirectorPage: React.FC = () => {
     clearFeedback();
   };
 
+  const updateFormatPolicy = (formatPolicy: ProductionFormatPolicy) => {
+    setDraft((current) => ({
+      ...current,
+      formatPolicy,
+      // Keep the legacy field synchronized for existing consumers.
+      aspectRatio: formatPolicy.defaultAspectRatio,
+    }));
+    invalidateApproval();
+    clearFeedback();
+  };
+
   const updateShot = <K extends keyof GeneratedStoryboardShot>(
     uid: string,
     key: K,
@@ -301,6 +331,8 @@ export const GeminiStoryboardDirectorPage: React.FC = () => {
     creativeBrief: draft.creativeBrief.trim(),
     fullScript: draft.fullScript.trim(),
     productionNotes: draft.productionNotes.trim(),
+    formatPolicy: normalizeFormatPolicy(draft.formatPolicy, DEFAULT_FORMAT_POLICY),
+    aspectRatio: normalizeFormatPolicy(draft.formatPolicy, DEFAULT_FORMAT_POLICY).defaultAspectRatio,
     savedAt: Date.now(),
   });
 
@@ -357,6 +389,7 @@ export const GeminiStoryboardDirectorPage: React.FC = () => {
         productionNotes: savedDraft.productionNotes,
         targetDurationSeconds: savedDraft.targetDurationSeconds,
         targetFormat: savedDraft.targetFormat,
+        aspectRatio: savedDraft.formatPolicy.defaultAspectRatio,
       });
 
       persistGeneratedStoryboard(
@@ -396,6 +429,7 @@ export const GeminiStoryboardDirectorPage: React.FC = () => {
         productionNotes: savedDraft.productionNotes,
         targetDurationSeconds: savedDraft.targetDurationSeconds,
         targetFormat: savedDraft.targetFormat,
+        aspectRatio: savedDraft.formatPolicy.defaultAspectRatio,
       });
       persistGeneratedStoryboard(shots, 'local-director-v0.1');
       setError('');
@@ -448,7 +482,8 @@ export const GeminiStoryboardDirectorPage: React.FC = () => {
         sourceType: result.project.sourceType,
         targetFormat: result.project.targetFormat,
         targetDurationSeconds: result.project.targetDurationSeconds,
-        aspectRatio: '9:16',
+        aspectRatio: draft.formatPolicy.defaultAspectRatio,
+        formatPolicy: draft.formatPolicy,
         creativeBrief: result.project.creativeBrief,
         fullScript: result.project.fullScript,
         productionNotes: result.project.productionNotes,
@@ -583,7 +618,7 @@ export const GeminiStoryboardDirectorPage: React.FC = () => {
         : '手工';
 
   const handleProjectRestored = (payload: ProjectBindingRestoreResponse) => {
-    const restoredDraft = hydrateRestoredDraft(payload.stages.brief);
+    const restoredDraft = hydrateRestoredDraft(payload.stages.brief, payload.project.formatPolicy || payload.episode.formatPolicy);
     const restoredStoryboard = hydrateRestoredStoryboard(payload.stages.storyboard);
     const approval = payload.stages.storyboardApproval as { approvedAt?: unknown } | undefined;
     if (restoredDraft) setDraft(restoredDraft);
@@ -669,10 +704,17 @@ export const GeminiStoryboardDirectorPage: React.FC = () => {
             <input id="gemini-director-duration" type="number" min={4} max={600} value={draft.targetDurationSeconds} onChange={(event) => updateDraft('targetDurationSeconds', Math.max(4, Number(event.target.value || 4)))} className="w-full rounded-xl border border-[#303036] bg-[#09090B] px-4 py-3 text-sm text-white outline-none focus:border-purple-500/70" />
           </div>
           <div>
-            <label className="mb-2 block text-xs font-bold text-slate-300">画幅</label>
-            <div className="flex h-[46px] items-center justify-between rounded-xl border border-[#303036] bg-[#09090B] px-4 text-sm text-white"><span>9:16 竖屏</span><LockKeyhole className="h-4 w-4 text-slate-500" /></div>
+            <label className="mb-2 block text-xs font-bold text-slate-300">默认画幅</label>
+            <div className="flex h-[46px] items-center rounded-xl border border-[#303036] bg-[#09090B] px-4 text-sm font-black text-white"><span>{draft.formatPolicy.defaultAspectRatio}</span><span className="ml-auto text-[11px] font-normal text-slate-500">Production Policy</span></div>
           </div>
         </div>
+
+        <FormatPolicyEditor
+          value={draft.formatPolicy}
+          onChange={updateFormatPolicy}
+          idPrefix="gemini-director"
+          compact
+        />
 
         <div>
           <label htmlFor="gemini-director-brief" className="mb-2 block text-xs font-bold text-slate-300">创意 / 故事梗概 *</label>
@@ -742,10 +784,32 @@ export const GeminiStoryboardDirectorPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="grid gap-4 md:grid-cols-[150px_1fr_1fr]">
+                  <div className="grid gap-4 md:grid-cols-[150px_1fr_1fr_170px]">
                     <div><label htmlFor={`${shot.uid}-duration`} className="mb-1.5 block text-[11px] font-bold text-slate-500">{label} 时长（秒）</label><input id={`${shot.uid}-duration`} type="number" min={1} max={60} value={shot.durationSeconds} onChange={(event) => updateShot(shot.uid, 'durationSeconds', Math.max(1, Number(event.target.value || 1)))} className="w-full rounded-xl border border-[#303036] bg-[#111114] px-3 py-2.5 text-sm text-white" /></div>
                     <div><label htmlFor={`${shot.uid}-scene`} className="mb-1.5 block text-[11px] font-bold text-slate-500">{label} 场景</label><input id={`${shot.uid}-scene`} value={shot.scene} onChange={(event) => updateShot(shot.uid, 'scene', event.target.value)} className="w-full rounded-xl border border-[#303036] bg-[#111114] px-3 py-2.5 text-sm text-white" /></div>
                     <div><label htmlFor={`${shot.uid}-camera`} className="mb-1.5 block text-[11px] font-bold text-slate-500">{label} 镜头语言</label><input id={`${shot.uid}-camera`} value={shot.camera} onChange={(event) => updateShot(shot.uid, 'camera', event.target.value)} className="w-full rounded-xl border border-[#303036] bg-[#111114] px-3 py-2.5 text-sm text-white" /></div>
+                    <div>
+                      <label htmlFor={`${shot.uid}-aspect-ratio`} className="mb-1.5 block text-[11px] font-bold text-slate-500">{label} 画幅覆盖</label>
+                      <select
+                        id={`${shot.uid}-aspect-ratio`}
+                        aria-label={`${label} 画幅覆盖`}
+                        value={shot.formatPolicy?.aspectRatio || ''}
+                        disabled={!draft.formatPolicy.allowShotOverride}
+                        onChange={(event) => updateShot(
+                          shot.uid,
+                          'formatPolicy',
+                          event.target.value
+                            ? { aspectRatio: event.target.value as AspectRatio }
+                            : undefined,
+                        )}
+                        className="w-full rounded-xl border border-[#303036] bg-[#111114] px-3 py-2.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <option value="">继承项目策略</option>
+                        {SUPPORTED_ASPECT_RATIOS
+                          .filter((aspectRatio) => draft.formatPolicy.allowedAspectRatios.includes(aspectRatio))
+                          .map((aspectRatio) => <option key={aspectRatio} value={aspectRatio}>{aspectRatio}</option>)}
+                      </select>
+                    </div>
                   </div>
 
                   <div className="grid gap-4 lg:grid-cols-2">

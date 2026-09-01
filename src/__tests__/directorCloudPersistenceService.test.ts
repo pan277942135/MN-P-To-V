@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import sharp from 'sharp';
 import {
   DIRECTOR_CLOUD_SCHEMA,
   buildDirectorShotDocuments,
@@ -91,5 +92,96 @@ describe('DirectorCloudPersistenceService', () => {
     const restored = await service.getKeyframeAsset('project-1', 'episode-1', 'shot-a', 'blob-a');
     expect(restored?.buffer.toString()).toBe('asset');
     expect(restored?.ref.blobKey).toBe('blob-a');
+  });
+
+  it('returns upload validation and keeps a convertible ratio as WARNING', async () => {
+    const landscape = await sharp({
+      create: { width: 1920, height: 1080, channels: 4, background: { r: 20, g: 20, b: 20, alpha: 1 } },
+    }).png().toBuffer();
+    const saved: DirectorCloudSnapshot[] = [];
+    let putCount = 0;
+    const repository = {
+      isAvailable: () => true,
+      upsertSnapshot: async (value: DirectorCloudSnapshot): Promise<DirectorCloudProjectRecord> => {
+        saved.push(value);
+        return { snapshot: value, serverUpdatedAt: 789 };
+      },
+      getSnapshot: async () => null,
+      getLatestSnapshot: async () => null,
+    };
+    const assetStore = {
+      putKeyframe: async (input: any) => {
+        putCount += 1;
+        return {
+          shotUid: input.shotUid,
+          blobKey: input.blobKey,
+          bucket: 'bucket-1',
+          objectPath: `director/${input.shotUid}/${input.blobKey}.png`,
+          uri: `gs://bucket-1/director/${input.shotUid}/${input.blobKey}.png`,
+          mimeType: input.mimeType,
+          sizeBytes: input.buffer.length,
+          generation: '1',
+          updatedAt: 999,
+        };
+      },
+      getAsset: async () => ({ buffer: Buffer.from('asset'), mimeType: 'image/png' }),
+    };
+    const assetRegistry = {
+      syncLegacySnapshotAssets: async () => [{
+        assetId: 'registry-a',
+        source: { sourceId: 'shot-a:blob-a' },
+      }],
+    };
+    const service = new DirectorCloudPersistenceService(repository as any, assetStore as any, assetRegistry as any);
+    const result = await service.sync({
+      ...snapshot(),
+      formatPolicy: {
+        defaultAspectRatio: '16:9',
+        allowedAspectRatios: ['16:9', '9:16'],
+        allowShotOverride: true,
+      },
+    }, [{
+      shotUid: 'shot-a',
+      blobKey: 'blob-a',
+      mimeType: 'image/png',
+      base64: landscape.toString('base64'),
+      validate: true,
+    }]);
+
+    expect(putCount).toBe(1);
+    expect(result.assetUploads[0]).toMatchObject({
+      assetId: 'registry-a',
+      validation: { status: 'VALID', actualAspectRatio: '16:9', expectedAspectRatio: '16:9' },
+    });
+    expect(saved).toHaveLength(1);
+  });
+
+  it('does not persist an INVALID strict upload but still returns its validation', async () => {
+    let putCount = 0;
+    const repository = {
+      isAvailable: () => true,
+      upsertSnapshot: async (value: DirectorCloudSnapshot): Promise<DirectorCloudProjectRecord> => ({ snapshot: value, serverUpdatedAt: 790 }),
+      getSnapshot: async () => null,
+      getLatestSnapshot: async () => null,
+    };
+    const assetStore = {
+      putKeyframe: async () => { putCount += 1; throw new Error('should not put'); },
+      getAsset: async () => ({ buffer: Buffer.from('asset'), mimeType: 'image/png' }),
+    };
+    const service = new DirectorCloudPersistenceService(repository as any, assetStore as any, { syncLegacySnapshotAssets: async () => [] } as any);
+    const result = await service.sync({ ...snapshot(), formatPolicy: {
+      defaultAspectRatio: '16:9',
+      allowedAspectRatios: ['16:9'],
+      allowShotOverride: true,
+    } }, [{
+      shotUid: 'shot-a',
+      blobKey: 'bad-a',
+      mimeType: 'application/pdf',
+      base64: Buffer.from('not-media').toString('base64'),
+      validate: true,
+    }]);
+
+    expect(putCount).toBe(0);
+    expect(result.assetUploads[0].validation.status).toBe('INVALID');
   });
 });

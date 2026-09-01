@@ -27,6 +27,19 @@ import {
   persistManualKeyframeAssets,
   syncLocalShotPipeline,
 } from '../services/director/shotProductionWorkflow';
+import {
+  DIRECTOR_DRAFT_KEY,
+  STORYBOARD_KEY,
+} from '../services/director/keyframeBlueprint';
+import {
+  DEFAULT_FORMAT_POLICY,
+  LEGACY_FORMAT_POLICY,
+  hasFormatPolicy,
+  resolveFormatPolicy,
+  validateAssetMetadata,
+  type AssetValidation,
+  type ProductionFormatPolicy,
+} from '../services/formatPolicy/formatPolicy';
 
 async function imageDimensions(blob: Blob): Promise<{ width: number; height: number }> {
   return await new Promise((resolve, reject) => {
@@ -44,13 +57,35 @@ async function imageDimensions(blob: Blob): Promise<{ width: number; height: num
   });
 }
 
-async function assertNineSixteen(blob: Blob) {
-  const { width, height } = await imageDimensions(blob);
-  if (!width || !height) throw new Error('图片尺寸无效。');
-  const ratio = width / height;
-  if (Math.abs(ratio - 9 / 16) > 0.04) {
-    throw new Error(`关键帧必须接近 9:16；当前为 ${width}×${height}。`);
+function readJson<T>(key: string): T | null {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? JSON.parse(raw) as T : null;
+  } catch {
+    return null;
   }
+}
+
+function readProjectFormatPolicy(): ProductionFormatPolicy {
+  const project = readJson<{ formatPolicy?: ProductionFormatPolicy; aspectRatio?: '16:9' | '9:16' | '1:1' }>(DIRECTOR_DRAFT_KEY);
+  if (hasFormatPolicy(project?.formatPolicy)) return project.formatPolicy as ProductionFormatPolicy;
+  if (project?.aspectRatio) {
+    return {
+      ...LEGACY_FORMAT_POLICY,
+      defaultAspectRatio: project.aspectRatio,
+      allowedAspectRatios: [project.aspectRatio],
+    };
+  }
+  return DEFAULT_FORMAT_POLICY;
+}
+
+function policyForShot(shotUid: string) {
+  const storyboard = readJson<{ shots?: Array<{ uid?: string; formatPolicy?: unknown }> }>(STORYBOARD_KEY);
+  const shot = storyboard?.shots?.find((item) => item.uid === shotUid);
+  return resolveFormatPolicy({
+    projectPolicy: readProjectFormatPolicy(),
+    shotOverride: shot?.formatPolicy,
+  });
 }
 
 async function loadReferenceBlob(character: CharacterProfile | undefined): Promise<Blob | null> {
@@ -138,8 +173,26 @@ export const ManualKeyframePage: React.FC = () => {
       createdAt?: number;
     },
   ) => {
-    if (!manifest) return;
-    await assertNineSixteen(blob);
+    if (!manifest) return null;
+    const resolvedPolicy = policyForShot(shotUid);
+    let dimensions = { width: 0, height: 0 };
+    try {
+      dimensions = await imageDimensions(blob);
+    } catch {
+      // Let the shared validator produce the INVALID reason used by the API.
+    }
+    const validation: AssetValidation = validateAssetMetadata({
+      width: dimensions.width,
+      height: dimensions.height,
+      mimeType: blob.type,
+      assetType: 'IMAGE',
+      projectPolicy: resolvedPolicy.project,
+      episodePolicy: resolvedPolicy.episode,
+      shotOverride: resolvedPolicy.shotOverride,
+    });
+    if (validation.status === 'INVALID') {
+      throw new Error(`${validation.reason || '媒体文件无效'}；${validation.suggestion || '请重新选择文件。'}`);
+    }
     const current = manifest.assets.find((item) => item.shotUid === shotUid);
     const blobKey = newBlobKey(shotUid);
     await keyframeAssetStore.put(blobKey, shotUid, blob);
@@ -155,11 +208,15 @@ export const ManualKeyframePage: React.FC = () => {
       fileName: meta.fileName,
       mimeType: blob.type || 'image/png',
       sizeBytes: blob.size,
+      width: dimensions.width,
+      height: dimensions.height,
+      validation,
       characterId: meta.characterId,
       provider: meta.provider,
       model: meta.model,
       now: meta.createdAt,
     }));
+    return validation;
   };
 
   const handleUpload = async (shotUid: string, file: File | null) => {
@@ -169,8 +226,10 @@ export const ManualKeyframePage: React.FC = () => {
     try {
       if (!file.type.startsWith('image/')) throw new Error('请选择图片文件。');
       if (file.size > 20 * 1024 * 1024) throw new Error('单张图片不能超过 20MB。');
-      await replaceBlob(shotUid, file, { source: 'upload', fileName: file.name });
-      setMessage('关键帧已上传。请直接人工检查并决定 PASS / 重做。');
+      const validation = await replaceBlob(shotUid, file, { source: 'upload', fileName: file.name });
+      setMessage(validation?.status === 'WARNING'
+        ? `关键帧已上传，但画幅为 ${validation.actualAspectRatio}，项目期望 ${validation.expectedAspectRatio}。可裁切或改用其他画幅。`
+        : '关键帧已上传。请直接人工检查并决定 PASS / 重做。');
     } catch (cause: any) {
       setError(cause?.message || String(cause));
     } finally {
@@ -196,10 +255,11 @@ export const ManualKeyframePage: React.FC = () => {
           : blueprint.characterReference,
         referenceImageBase64: refBlob ? await blobToBase64(refBlob) : undefined,
         referenceMimeType: refBlob?.type || undefined,
+        aspectRatio: policyForShot(shotUid).expectedAspectRatio,
       });
       if (!result.imageBase64) throw new Error('Gemini 未返回图片数据。');
       const blob = base64ToBlob(result.imageBase64, result.mimeType);
-      await replaceBlob(shotUid, blob, {
+      const validation = await replaceBlob(shotUid, blob, {
         source: 'gemini',
         fileName: `${asset.shotLabel}-${result.model}.png`,
         characterId: asset.characterId,
@@ -207,7 +267,9 @@ export const ManualKeyframePage: React.FC = () => {
         model: result.model,
         createdAt: result.generatedAt,
       });
-      setMessage(`${asset.shotLabel} 已生成关键帧。系统不会自动 QA，请你人工检查。`);
+      setMessage(validation?.status === 'WARNING'
+        ? `${asset.shotLabel} 已生成，但实际画幅 ${validation.actualAspectRatio} 与期望 ${validation.expectedAspectRatio} 不同。`
+        : `${asset.shotLabel} 已生成关键帧。系统不会自动 QA，请你人工检查。`);
     } catch (cause: any) {
       setError(cause?.message || String(cause));
     } finally {
@@ -291,18 +353,20 @@ export const ManualKeyframePage: React.FC = () => {
         {manifest.assets.map((asset) => {
           const blueprint = blueprintByShot.get(asset.shotUid);
           const busy = busyShot === asset.shotUid;
+          const resolvedPolicy = policyForShot(asset.shotUid);
           return (
             <article key={asset.uid} className="grid gap-5 rounded-2xl border border-[#2D2D33] bg-[#111114] p-4 sm:p-5 xl:grid-cols-[260px_1fr]">
               <div className="space-y-3">
-                <div className="aspect-[9/16] overflow-hidden rounded-xl border border-[#303036] bg-[#09090B]">{previews[asset.shotUid] ? <img src={previews[asset.shotUid]} alt={`${asset.shotLabel} keyframe`} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-xs text-slate-600">尚无图片</div>}</div>
+                <div className="overflow-hidden rounded-xl border border-[#303036] bg-[#09090B]" style={{ aspectRatio: resolvedPolicy.expectedAspectRatio.replace(':', '/') }}>{previews[asset.shotUid] ? <img src={previews[asset.shotUid]} alt={`${asset.shotLabel} keyframe`} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-xs text-slate-600">尚无图片</div>}</div>
                 <div className="flex items-center justify-between"><span className="font-mono text-sm font-black text-violet-300">{asset.shotLabel}</span><span className={`text-xs font-black ${asset.status === 'PASS' ? 'text-emerald-300' : asset.blobKey ? 'text-amber-300' : 'text-slate-500'}`}>{asset.status === 'PASS' ? 'HUMAN PASS' : asset.blobKey ? '待人工确认' : '待图片'}</span></div>
               </div>
 
               <div className="space-y-4">
                 <div><div className="text-base font-black text-white">{blueprint?.shotTitle || asset.shotLabel}</div><p className="mt-1 text-xs leading-5 text-slate-500">{blueprint?.imagePrompt || asset.blueprintPrompt}</p></div>
+                {asset.validation && <div className={`rounded-xl border px-3 py-2 text-xs ${asset.validation.status === 'VALID' ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-200' : 'border-amber-500/25 bg-amber-500/10 text-amber-200'}`}>画幅校验：<span className="font-black">{asset.validation.status}</span> · 实际 {asset.validation.actualAspectRatio || '未知'} / 期望 {asset.validation.expectedAspectRatio}</div>}
                 <div><label className="mb-1.5 block text-xs font-bold text-slate-400">角色母板（可选）</label><select value={asset.characterId} onChange={(event) => handleCharacterChange(asset.shotUid, event.target.value)} className="w-full rounded-xl border border-[#303036] bg-[#09090B] px-3 py-2.5 text-sm text-white"><option value="">未指定角色</option>{characters.map((character) => <option key={character.id} value={character.id}>{character.name}</option>)}</select></div>
                 <div className="flex flex-wrap gap-2">
-                  <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-2.5 text-sm font-bold text-sky-200"><Upload className="h-4 w-4" /> 上传 9:16<input type="file" accept="image/*" className="hidden" disabled={busy} onChange={(event) => handleUpload(asset.shotUid, event.target.files?.[0] || null)} /></label>
+                  <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-2.5 text-sm font-bold text-sky-200"><Upload className="h-4 w-4" /> 上传 {resolvedPolicy.expectedAspectRatio}<input type="file" accept="image/*" className="hidden" disabled={busy} onChange={(event) => handleUpload(asset.shotUid, event.target.files?.[0] || null)} /></label>
                   <button disabled={busy || !capabilities.keyframeImageEnabled} onClick={() => handleGenerate(asset.shotUid)} className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />} Gemini 生成关键帧</button>
                 </div>
                 <textarea rows={2} value={asset.qaNote} onChange={(event) => handleNote(asset.shotUid, event.target.value)} placeholder="人工检查备注：人物、手指、服装、道具、构图、连续性……" className="w-full resize-y rounded-xl border border-[#303036] bg-[#09090B] px-3 py-2.5 text-sm text-white" />

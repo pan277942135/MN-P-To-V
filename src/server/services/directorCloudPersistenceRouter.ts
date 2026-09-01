@@ -75,7 +75,7 @@ export function createDirectorCloudPersistenceRouter(
     try {
       const record = await service.sync(req.body?.snapshot, req.body?.assetUploads);
       res.setHeader('Cache-Control', 'no-store');
-      return res.status(200).json({ ok: true, record });
+      return res.status(200).json({ ok: true, record, uploads: record.assetUploads || [] });
     } catch (error: any) {
       const message = error?.message || String(error);
       const badInput = /INVALID|REQUIRED|TOO_LARGE/.test(message);

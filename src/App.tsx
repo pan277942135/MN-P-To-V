@@ -16,6 +16,7 @@ import { HumanReviewQueuePage } from './pages/HumanReviewQueuePage';
 import { ComputeSettingsPage } from './pages/ComputeSettingsPage';
 import { AssetLibraryPage } from './pages/AssetLibraryPage';
 import { DirectorContextPage } from './pages/DirectorContextPage';
+import { ProjectSettingsPage } from './pages/ProjectSettingsPage';
 
 export function AppContent() {
   const [activeTab, setActiveTab] = useState<NavTab>('director');
@@ -61,6 +62,10 @@ export function AppContent() {
 
           <div className={activeTab === 'director-context' ? 'block' : 'hidden'}>
             {activeTab === 'director-context' && <DirectorContextPage />}
+          </div>
+
+          <div className={activeTab === 'project-settings' ? 'block' : 'hidden'}>
+            {activeTab === 'project-settings' && <ProjectSettingsPage />}
           </div>
 
           <div className={activeTab === 'monitor' ? 'block' : 'hidden'}>

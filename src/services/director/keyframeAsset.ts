@@ -2,6 +2,7 @@ import type {
   KeyframeBlueprintApproval,
   KeyframeBlueprintDraft,
 } from './keyframeBlueprint';
+import type { AssetValidation } from '../formatPolicy/formatPolicy';
 
 export const KEYFRAME_ASSET_KEY = 'zaojing_director_v032_keyframe_assets';
 export const KEYFRAME_ASSET_APPROVAL_KEY = 'zaojing_director_v032_keyframe_asset_approval';
@@ -23,6 +24,9 @@ export interface KeyframeAssetItem {
   fileName: string;
   mimeType: string;
   sizeBytes: number;
+  width?: number;
+  height?: number;
+  validation?: AssetValidation;
   characterId: string;
   provider: string;
   model: string;
@@ -130,6 +134,9 @@ export function attachKeyframeAsset(
     fileName: string;
     mimeType: string;
     sizeBytes: number;
+    width?: number;
+    height?: number;
+    validation?: AssetValidation;
     characterId?: string;
     provider?: string;
     model?: string;
@@ -147,6 +154,9 @@ export function attachKeyframeAsset(
       fileName: clean(input.fileName),
       mimeType: clean(input.mimeType),
       sizeBytes: Math.max(0, Number(input.sizeBytes || 0)),
+      ...(input.width ? { width: Number(input.width) } : {}),
+      ...(input.height ? { height: Number(input.height) } : {}),
+      ...(input.validation ? { validation: input.validation } : {}),
       characterId: clean(input.characterId),
       provider: clean(input.provider),
       model: clean(input.model),

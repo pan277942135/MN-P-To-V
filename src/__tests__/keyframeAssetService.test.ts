@@ -47,6 +47,17 @@ async function pngBuffer(): Promise<Buffer> {
   }).png().toBuffer();
 }
 
+async function landscapePngBuffer(): Promise<Buffer> {
+  return sharp({
+    create: {
+      width: 1920,
+      height: 1080,
+      channels: 3,
+      background: { r: 30, g: 60, b: 90 },
+    },
+  }).png().toBuffer();
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -107,6 +118,48 @@ describe('KeyframeAssetService', () => {
     }));
     expect(result.shot.status).toBe('KEYFRAME_QA');
     expect(result.shot.keyframe.status).toBe('QA_PENDING');
+  });
+
+  it('returns VALID when the uploaded keyframe matches the supplied project policy', async () => {
+    const inputShot = shotFixture();
+    const buffer = await landscapePngBuffer();
+    vi.spyOn(firestoreShotRepository, 'getShot').mockResolvedValue(inputShot);
+    vi.spyOn(gcsArtifactStore, 'artifactExists').mockResolvedValue(false);
+    vi.spyOn(gcsArtifactStore, 'uploadImageArtifact').mockImplementation(async ({ objectPath, buffer: bytes, contentType }) => ({
+      outputBucket: 'ai-studio-bucket-89614354864-asia-south1',
+      outputObjectPath: objectPath,
+      videoUri: `gs://ai-studio-bucket-89614354864-asia-south1/${objectPath}`,
+      sizeBytes: bytes.length,
+      contentType: contentType || 'image/png',
+      artifactPersisted: true,
+      artifactPersistedAt: 1_800_000_010_000,
+    }));
+    vi.spyOn(firestoreShotRepository, 'bindKeyframeAsset').mockImplementation(async (params) => ({
+      ...inputShot,
+      status: 'KEYFRAME_QA',
+      keyframe: { ...inputShot.keyframe, ...params.asset, provider: params.provider, status: 'QA_PENDING', generationAttempt: 1 },
+      updatedAt: 1_800_000_010_000,
+    }));
+
+    const result = await KeyframeAssetService.persist({
+      episodeId: 'MN-COS-001',
+      shotId: 'S01',
+      provider: 'CHATGPT_UPLOAD',
+      sourceFileId: 'file-chatgpt-format-policy',
+      buffer,
+      declaredMimeType: 'image/png',
+      projectFormatPolicy: {
+        defaultAspectRatio: '16:9',
+        allowedAspectRatios: ['16:9', '9:16', '1:1'],
+        allowShotOverride: true,
+      },
+    });
+
+    expect(result.validation).toEqual({
+      status: 'VALID',
+      actualAspectRatio: '16:9',
+      expectedAspectRatio: '16:9',
+    });
   });
 
   it('rejects a provider that does not match the planned shot before uploading', async () => {
