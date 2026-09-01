@@ -81,25 +81,33 @@ jobs:
             --format='yaml(name,uid,locationId,type,concurrencyMode)'
 
           RUNTIME_MEMBER="serviceAccount:$RUNTIME_SA"
-          POLICY_BEFORE="$(gcloud projects get-iam-policy "$PROJECT_ID" --format=json)"
-          if jq -e --arg member "$RUNTIME_MEMBER" '
-            any(.bindings[]?; .role == "roles/datastore.user" and any((.members // [])[]; . == $member))
-          ' <<<"$POLICY_BEFORE" >/dev/null; then
-            echo 'runtime_datastore_role_before=present' | tee -a "$GITHUB_OUTPUT"
-          else
-            echo 'runtime_datastore_role_before=missing' | tee -a "$GITHUB_OUTPUT"
-            gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-              --member="$RUNTIME_MEMBER" \
-              --role='roles/datastore.user' \
-              --condition=None \
-              --quiet
-          fi
+          if POLICY_BEFORE="$(gcloud projects get-iam-policy "$PROJECT_ID" --format=json 2>&1)"; then
+            if jq -e --arg member "$RUNTIME_MEMBER" '
+              any(.bindings[]?; .role == "roles/datastore.user" and any((.members // [])[]; . == $member))
+            ' <<<"$POLICY_BEFORE" >/dev/null; then
+              echo 'runtime_datastore_role_before=present' | tee -a "$GITHUB_OUTPUT"
+            else
+              echo 'runtime_datastore_role_before=missing' | tee -a "$GITHUB_OUTPUT"
+              gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+                --member="$RUNTIME_MEMBER" \
+                --role='roles/datastore.user' \
+                --condition=None \
+                --quiet
+            fi
 
-          POLICY_AFTER="$(gcloud projects get-iam-policy "$PROJECT_ID" --format=json)"
-          jq -e --arg member "$RUNTIME_MEMBER" '
-            any(.bindings[]?; .role == "roles/datastore.user" and any((.members // [])[]; . == $member))
-          ' <<<"$POLICY_AFTER" >/dev/null
-          echo 'runtime_datastore_role=verified' | tee -a "$GITHUB_OUTPUT"
+            POLICY_AFTER="$(gcloud projects get-iam-policy "$PROJECT_ID" --format=json)"
+            jq -e --arg member "$RUNTIME_MEMBER" '
+              any(.bindings[]?; .role == "roles/datastore.user" and any((.members // [])[]; . == $member))
+            ' <<<"$POLICY_AFTER" >/dev/null
+            echo 'runtime_datastore_role=verified' | tee -a "$GITHUB_OUTPUT"
+          else
+            # The deployment SA is intentionally not granted broad project IAM
+            # administration. In that case the runtime probe below is the
+            # authoritative check; do not silently attempt a broader grant.
+            echo 'runtime_datastore_role_before=unverified_deploy_sa_iam_denied' | tee -a "$GITHUB_OUTPUT"
+            echo 'runtime_datastore_role=runtime_probe_required' | tee -a "$GITHUB_OUTPUT"
+            echo "$POLICY_BEFORE" >&2
+          fi
 
       - name: Build and push formal React Studio image
         id: image
