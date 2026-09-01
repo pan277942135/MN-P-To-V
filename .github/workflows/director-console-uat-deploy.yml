@@ -75,7 +75,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(gcloud projects describe "$PROJECT_ID" --format='value(projectId)')" = "$PROJECT_ID"
-          gcloud firestore databases describe "$FIRESTORE_DATABASE_ID" \
+          gcloud firestore databases describe \
+            --database="$FIRESTORE_DATABASE_ID" \
             --project="$PROJECT_ID" \
             --format='yaml(name,uid,locationId,type,concurrencyMode)'
 
