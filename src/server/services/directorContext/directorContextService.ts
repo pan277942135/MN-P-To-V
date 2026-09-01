@@ -163,6 +163,8 @@ function buildEpisode(bundle: DirectorCloudRestoreBundle, requestedEpisodeId?: s
       episode.episodeTitle,
       brief.episodeTitle,
       storyboard.episodeTitle,
+      episode.projectTitle,
+      project.projectTitle,
       episodeId,
     ),
     summary: text(
