@@ -288,6 +288,13 @@ export async function applyDirectorCloudSnapshot(snapshot: DirectorCloudSnapshot
     if (Object.prototype.hasOwnProperty.call(snapshot.stages || {}, stageKey)) writeJson(localKey, snapshot.stages[stageKey]);
     else window.localStorage.removeItem(localKey);
   }
+  // Keep the policy available to legacy UI readers even when a cloud record
+  // stores it only at the new snapshot level. Existing brief/aspectRatio data
+  // remains untouched; this is an additive restore annotation.
+  if (snapshot.formatPolicy) {
+    const brief = readJson<Record<string, unknown>>(DIRECTOR_DRAFT_KEY) || {};
+    writeJson(DIRECTOR_DRAFT_KEY, { ...brief, formatPolicy: snapshot.formatPolicy });
+  }
   if (snapshot.stages?.keyframeCloudAssets) writeJson(DIRECTOR_CLOUD_ASSET_MAP_KEY, snapshot.stages.keyframeCloudAssets);
   if (options?.restoreAssets !== false) await restoreCloudAssets(snapshot);
 }

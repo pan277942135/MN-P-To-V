@@ -51,7 +51,9 @@ function asObject(value: unknown): Record<string, any> | null {
 
 function snapshotFormatPolicy(snapshot: DirectorCloudSnapshot): ProductionFormatPolicy | undefined {
   const brief = asObject(snapshot.stages?.brief);
-  const candidate = snapshot.formatPolicy || brief?.formatPolicy;
+  const candidate = hasFormatPolicy(snapshot.formatPolicy)
+    ? snapshot.formatPolicy
+    : brief?.formatPolicy;
   return hasFormatPolicy(candidate) ? normalizeFormatPolicy(candidate) : undefined;
 }
 

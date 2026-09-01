@@ -73,7 +73,9 @@ function validSnapshot(input: any): DirectorCloudSnapshot {
   const projectId = clean(input.projectId);
   const episodeId = clean(input.episodeId);
   if (!projectId || !episodeId) throw new Error('DIRECTOR_PROJECT_EPISODE_ID_REQUIRED');
-  const formatPolicy = input.formatPolicy || input.stages?.brief?.formatPolicy;
+  const formatPolicy = hasFormatPolicy(input.formatPolicy)
+    ? input.formatPolicy
+    : input.stages?.brief?.formatPolicy;
   return {
     schema: DIRECTOR_CLOUD_SCHEMA,
     projectId,
