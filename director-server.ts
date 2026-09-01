@@ -6,6 +6,7 @@ import { createProjectBindingRouter } from './src/server/services/projectBinding
 import { createDirectorAssetRouter } from './src/server/services/assetRegistry/assetRegistryRouter';
 import { createDirectorContextRouter } from './src/server/services/directorContext/directorContextRouter';
 import { createProjectSessionRouter } from './src/server/services/projectSessionRouter';
+import { createFirestoreDiagnosticRouter } from './src/server/services/firestoreDiagnosticRouter';
 
 async function loadEpisodeServerModule() {
   const previousVitest = process.env.VITEST;
@@ -43,6 +44,7 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
   // composes the existing production snapshot with Registry assets; it does
   // not replace either source or alter the binding restore contract.
   app.use('/api/director/project-session', createProjectSessionRouter());
+  app.use('/api/debug/firestore', createFirestoreDiagnosticRouter());
   app.use(episodeApp);
   return app;
 }

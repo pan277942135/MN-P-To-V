@@ -32,9 +32,7 @@ export function getFirestoreInstance(): Firestore | null {
   }
 
   try {
-    const fileCfg = getConfigFromAppletFile();
-    const projectId = process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || fileCfg.projectId;
-    const databaseId = process.env.FIRESTORE_DATABASE_ID || fileCfg.databaseId || '(default)';
+    const { projectId, databaseId } = getFirestoreRuntimeConfig();
 
     if (process.env.NODE_ENV === 'test' && !process.env.FIRESTORE_EMULATOR_HOST && !process.env.TEST_FIRESTORE_ENABLED) {
       // In unit test environment unless explicitly enabled, keep firestoreInstance null unless mock is set
@@ -56,6 +54,14 @@ export function getFirestoreInstance(): Firestore | null {
   }
 
   return firestoreInstance;
+}
+
+export function getFirestoreRuntimeConfig(): { projectId: string; databaseId: string } {
+  const fileCfg = getConfigFromAppletFile();
+  return {
+    projectId: process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || fileCfg.projectId || '',
+    databaseId: process.env.FIRESTORE_DATABASE_ID || fileCfg.databaseId || '(default)',
+  };
 }
 
 export function markFirestoreUnavailable(err?: any): void {
@@ -85,4 +91,3 @@ export function getStorageAuthority(): 'firestore' | 'server_memory' | 'unavaila
   }
   return 'unavailable';
 }
-

@@ -44,6 +44,7 @@ env:
   DIRECTOR_KEYFRAME_IMAGE_LOCATION: global
   DIRECTOR_KEYFRAME_QA_MODEL: gemini-2.5-flash
   DIRECTOR_KEYFRAME_QA_LOCATION: global
+  FIRESTORE_DIAGNOSTIC_ENABLED: '1'
 
 jobs:
   deploy:
@@ -67,6 +68,37 @@ jobs:
         uses: google-github-actions/setup-gcloud@v3
         with:
           project_id: ${{ env.PROJECT_ID }}
+
+      - name: Verify Firestore project, database, and runtime IAM
+        id: firestore
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gcloud projects describe "$PROJECT_ID" --format='value(projectId)')" = "$PROJECT_ID"
+          gcloud firestore databases describe "$FIRESTORE_DATABASE_ID" \
+            --project="$PROJECT_ID" \
+            --format='yaml(name,uid,locationId,type,concurrencyMode)'
+
+          RUNTIME_MEMBER="serviceAccount:$RUNTIME_SA"
+          POLICY_BEFORE="$(gcloud projects get-iam-policy "$PROJECT_ID" --format=json)"
+          if jq -e --arg member "$RUNTIME_MEMBER" '
+            any(.bindings[]?; .role == "roles/datastore.user" and any((.members // [])[]; . == $member))
+          ' <<<"$POLICY_BEFORE" >/dev/null; then
+            echo 'runtime_datastore_role_before=present' | tee -a "$GITHUB_OUTPUT"
+          else
+            echo 'runtime_datastore_role_before=missing' | tee -a "$GITHUB_OUTPUT"
+            gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+              --member="$RUNTIME_MEMBER" \
+              --role='roles/datastore.user' \
+              --condition=None \
+              --quiet
+          fi
+
+          POLICY_AFTER="$(gcloud projects get-iam-policy "$PROJECT_ID" --format=json)"
+          jq -e --arg member "$RUNTIME_MEMBER" '
+            any(.bindings[]?; .role == "roles/datastore.user" and any((.members // [])[]; . == $member))
+          ' <<<"$POLICY_AFTER" >/dev/null
+          echo 'runtime_datastore_role=verified' | tee -a "$GITHUB_OUTPUT"
 
       - name: Build and push formal React Studio image
         id: image
@@ -102,7 +134,7 @@ jobs:
             --concurrency=8 \
             --min-instances=0 \
             --max-instances=1 \
-            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA,PUBLIC_PREVIEW_READ_ONLY=1,DIRECTOR_PRODUCTION_RUN_ENABLED=0,DIRECTOR_STORYBOARD_GEMINI_ENABLED=1,DIRECTOR_STORYBOARD_MODEL=$DIRECTOR_STORYBOARD_MODEL,DIRECTOR_STORYBOARD_LOCATION=$DIRECTOR_STORYBOARD_LOCATION,DIRECTOR_KEYFRAME_IMAGE_ENABLED=1,DIRECTOR_KEYFRAME_IMAGE_MODEL=$DIRECTOR_KEYFRAME_IMAGE_MODEL,DIRECTOR_KEYFRAME_IMAGE_LOCATION=$DIRECTOR_KEYFRAME_IMAGE_LOCATION,DIRECTOR_KEYFRAME_QA_ENABLED=0,DIRECTOR_KEYFRAME_QA_MODEL=$DIRECTOR_KEYFRAME_QA_MODEL,DIRECTOR_KEYFRAME_QA_LOCATION=$DIRECTOR_KEYFRAME_QA_LOCATION,P0_DISABLE_STARTUP_RECOVERY=1" \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_LOCATION=$REGION,VEO_OUTPUT_BUCKET=$VEO_OUTPUT_BUCKET,FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID,VEO_MODEL_ID=$VEO_MODEL_ID,IDENTITY_QA_MODEL=$IDENTITY_QA_MODEL,RUNTIME_SERVICE_ACCOUNT_EMAIL=$RUNTIME_SA,COMMIT_SHA=$SOURCE_SHA,FIRESTORE_DIAGNOSTIC_ENABLED=$FIRESTORE_DIAGNOSTIC_ENABLED,PUBLIC_PREVIEW_READ_ONLY=1,DIRECTOR_PRODUCTION_RUN_ENABLED=0,DIRECTOR_STORYBOARD_GEMINI_ENABLED=1,DIRECTOR_STORYBOARD_MODEL=$DIRECTOR_STORYBOARD_MODEL,DIRECTOR_STORYBOARD_LOCATION=$DIRECTOR_STORYBOARD_LOCATION,DIRECTOR_KEYFRAME_IMAGE_ENABLED=1,DIRECTOR_KEYFRAME_IMAGE_MODEL=$DIRECTOR_KEYFRAME_IMAGE_MODEL,DIRECTOR_KEYFRAME_IMAGE_LOCATION=$DIRECTOR_KEYFRAME_IMAGE_LOCATION,DIRECTOR_KEYFRAME_QA_ENABLED=0,DIRECTOR_KEYFRAME_QA_MODEL=$DIRECTOR_KEYFRAME_QA_MODEL,DIRECTOR_KEYFRAME_QA_LOCATION=$DIRECTOR_KEYFRAME_QA_LOCATION,P0_DISABLE_STARTUP_RECOVERY=1" \
             --quiet
 
           SERVICE_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
@@ -129,8 +161,55 @@ jobs:
           grep -q '"keyframeImageModel":"gemini-3.1-flash-image"' capabilities.json
           grep -q '"keyframeQaEnabled":false' capabilities.json
 
+          FIRESTORE_STATUS="$(curl -sS -o firestore.json -w '%{http_code}' "$SERVICE_URL/api/debug/firestore")"
+          test "$FIRESTORE_STATUS" = '200'
+          jq -e --arg project "$PROJECT_ID" --arg database "$FIRESTORE_DATABASE_ID" --arg sa "$RUNTIME_SA" '
+            .ok == true and
+            .runtimeProjectId == $project and
+            .firestoreDatabaseId == $database and
+            .serviceAccount == $sa and
+            .firestoreReachable == true and
+            (.collections | index("director_projects")) != null
+          ' firestore.json
+
+          SERVICE_ACCOUNT="$(gcloud run services describe "$SERVICE" --project="$PROJECT_ID" --region="$REGION" --format='value(spec.template.spec.serviceAccountName)')"
+          test "$SERVICE_ACCOUNT" = "$RUNTIME_SA"
+
+          # Capture only Firestore-related Cloud Run log fields. This is a
+          # read-only diagnostic and intentionally excludes request bodies and
+          # credentials.
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="zaojing-director-console-uat" AND (textPayload:"Firestore" OR textPayload:"PERMISSION_DENIED" OR jsonPayload.message:"Firestore" OR jsonPayload.message:"PERMISSION_DENIED")' \
+            --project="$PROJECT_ID" \
+            --freshness=24h \
+            --limit=100 \
+            --format='table(timestamp,severity,textPayload,jsonPayload.message)' || true
+
+          # Use an ID that is valid for Firestore document paths but is not a
+          # real project. A 404 proves the runtime can read the database without
+          # writing any project or production asset.
+          SESSION_STATUS="$(curl -sS -o session.json -w '%{http_code}' "$SERVICE_URL/api/director/project-session/uat-firestore-diagnosis-missing-project-20260901")"
+          test "$SESSION_STATUS" = '404'
+          jq -e '.error == "DIRECTOR_PROJECT_NOT_FOUND"' session.json
+
           PERSIST_STATUS="$(curl -sS -o persistence.json -w '%{http_code}' "$SERVICE_URL/api/director/persistence/latest")"
           test "$PERSIST_STATUS" = '200' -o "$PERSIST_STATUS" = '404'
+          if [ "$PERSIST_STATUS" = '200' ]; then
+            LIVE_PROJECT_ID="$(jq -r '.record.snapshot.projectId // empty' persistence.json)"
+            LIVE_EPISODE_ID="$(jq -r '.record.snapshot.episodeId // empty' persistence.json)"
+            test -n "$LIVE_PROJECT_ID"
+            test -n "$LIVE_EPISODE_ID"
+            LIVE_SESSION_STATUS="$(curl -sS -o live-session.json -w '%{http_code}' "$SERVICE_URL/api/director/project-session/$LIVE_PROJECT_ID?episodeId=$LIVE_EPISODE_ID")"
+            test "$LIVE_SESSION_STATUS" = '200'
+            jq -e --arg project "$LIVE_PROJECT_ID" --arg episode "$LIVE_EPISODE_ID" '
+              .ok == true and
+              .project.projectId == $project and
+              .episode.episodeId == $episode and
+              (.shots | type == "array") and
+              (.assets | type == "array") and
+              (.context.schema == "zaojing.director.context.v1")
+            ' live-session.json
+          fi
 
           curl -fsS "$SERVICE_URL/api/episodes?limit=1" | tee episodes.json
           grep -q '"ok":true' episodes.json
@@ -150,6 +229,7 @@ jobs:
             echo "- Revision: \`${{ steps.deploy.outputs.revision }}\`"
             echo "- Public URL: ${{ steps.deploy.outputs.service_url }}"
             echo "- Director persistence: Firestore \`$FIRESTORE_DATABASE_ID\` + GCS \`$VEO_OUTPUT_BUCKET\`"
+            echo "- Firestore runtime IAM: \`roles/datastore.user\` for \`$RUNTIME_SA\` (pre-check: ${{ steps.firestore.outputs.runtime_datastore_role_before }}, final: ${{ steps.firestore.outputs.runtime_datastore_role }})"
             echo "- Storyboard provider: Vertex AI Gemini / \`$DIRECTOR_STORYBOARD_MODEL\`"
             echo "- Keyframe image provider: Vertex AI Gemini / \`$DIRECTOR_KEYFRAME_IMAGE_MODEL\`"
             echo '- Keyframe QA: disabled; current QA policy is human-only'
