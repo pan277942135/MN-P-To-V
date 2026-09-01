@@ -21,7 +21,9 @@ on:
       - 'src/pages/VideoBlueprintPage.tsx'
       - 'src/pages/ShotVideoBlueprintPage.tsx'
       - 'src/pages/AssetLibraryPage.tsx'
+      - 'src/pages/DirectorContextPage.tsx'
       - 'src/services/assetRegistry/**'
+      - 'src/services/directorContext/**'
       - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/services/director/geminiStoryboardClient.ts'
       - 'src/services/director/chatgptStoryboardImport.ts'
@@ -41,6 +43,7 @@ on:
       - 'src/server/services/directorCloudPersistenceService.ts'
       - 'src/server/services/directorCloudPersistenceRouter.ts'
       - 'src/server/services/assetRegistry/**'
+      - 'src/server/services/directorContext/**'
       - 'src/server/services/geminiStoryboardService.ts'
       - 'src/server/services/geminiKeyframeImageService.ts'
       - 'src/server/services/geminiKeyframeQaService.ts'
@@ -51,6 +54,7 @@ on:
       - 'src/server/services/keyframeInputResolver.ts'
       - 'src/__tests__/directorCloudPersistenceService.test.ts'
       - 'src/__tests__/assetRegistry*.test.ts'
+      - 'src/__tests__/directorContext*.test.ts'
       - 'src/__tests__/directorCloudPersistenceRouter.test.ts'
       - 'src/__tests__/directorCloudPersistenceClient.test.ts'
       - 'src/__tests__/directorCloudPersistenceSourceContract.test.ts'
@@ -101,7 +105,9 @@ on:
       - 'src/pages/VideoBlueprintPage.tsx'
       - 'src/pages/ShotVideoBlueprintPage.tsx'
       - 'src/pages/AssetLibraryPage.tsx'
+      - 'src/pages/DirectorContextPage.tsx'
       - 'src/services/assetRegistry/**'
+      - 'src/services/directorContext/**'
       - 'src/services/director/localStoryboardGenerator.ts'
       - 'src/services/director/geminiStoryboardClient.ts'
       - 'src/services/director/chatgptStoryboardImport.ts'
@@ -121,6 +127,7 @@ on:
       - 'src/server/services/directorCloudPersistenceService.ts'
       - 'src/server/services/directorCloudPersistenceRouter.ts'
       - 'src/server/services/assetRegistry/**'
+      - 'src/server/services/directorContext/**'
       - 'src/server/services/geminiStoryboardService.ts'
       - 'src/server/services/geminiKeyframeImageService.ts'
       - 'src/server/services/geminiKeyframeQaService.ts'
@@ -131,6 +138,7 @@ on:
       - 'src/server/services/keyframeInputResolver.ts'
       - 'src/__tests__/directorCloudPersistenceService.test.ts'
       - 'src/__tests__/assetRegistry*.test.ts'
+      - 'src/__tests__/directorContext*.test.ts'
       - 'src/__tests__/directorCloudPersistenceRouter.test.ts'
       - 'src/__tests__/directorCloudPersistenceClient.test.ts'
       - 'src/__tests__/directorCloudPersistenceSourceContract.test.ts'
@@ -189,6 +197,8 @@ jobs:
           src/__tests__/directorCloudPersistenceService.test.ts
           src/__tests__/assetRegistrySyncService.test.ts
           src/__tests__/assetRegistryRouter.test.ts
+          src/__tests__/directorContextService.test.ts
+          src/__tests__/directorContextRouter.test.ts
           src/__tests__/directorCloudPersistenceRouter.test.ts
           src/__tests__/directorCloudPersistenceClient.test.ts
           src/__tests__/directorCloudPersistenceSourceContract.test.ts

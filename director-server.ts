@@ -4,6 +4,7 @@ import type { EpisodeServerDependencies } from './episode-server';
 import { createDirectorCloudPersistenceRouter } from './src/server/services/directorCloudPersistenceRouter';
 import { createProjectBindingRouter } from './src/server/services/projectBindingRouter';
 import { createDirectorAssetRouter } from './src/server/services/assetRegistry/assetRegistryRouter';
+import { createDirectorContextRouter } from './src/server/services/directorContext/directorContextRouter';
 
 async function loadEpisodeServerModule() {
   const previousVitest = process.env.VITEST;
@@ -33,6 +34,10 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
   // It is mounted beside cloud persistence so best-effort registration can still
   // complete in the public Director preview without changing the production gate.
   app.use('/api/director', createDirectorAssetRouter());
+  // AI Director Context is a read-only composition of the existing Director
+  // Cloud Shot/Blueprint data and the Asset Registry. It does not create a new
+  // source of truth or open any provider execution path.
+  app.use('/api/director', createDirectorContextRouter());
   app.use(episodeApp);
   return app;
 }

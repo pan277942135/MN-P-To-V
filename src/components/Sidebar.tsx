@@ -1,7 +1,7 @@
 import React from 'react';
-import { Archive, Clapperboard, Film, Users, History, Settings, Sparkles, ClipboardCheck, Activity, Image as ImageIcon, ListVideo, ListOrdered } from 'lucide-react';
+import { Archive, Clapperboard, Film, Users, History, Settings, Sparkles, ClipboardCheck, Activity, Image as ImageIcon, ListVideo, ListOrdered, FileJson } from 'lucide-react';
 
-export type NavTab = 'director' | 'shot-list' | 'keyframes' | 'keyframe-assets' | 'keyframe-qa' | 'video-blueprint' | 'assets' | 'monitor' | 'studio' | 'characters' | 'review' | 'history' | 'settings';
+export type NavTab = 'director' | 'shot-list' | 'keyframes' | 'keyframe-assets' | 'keyframe-qa' | 'video-blueprint' | 'assets' | 'director-context' | 'monitor' | 'studio' | 'characters' | 'review' | 'history' | 'settings';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -15,6 +15,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange }) => {
     { id: 'keyframe-assets' as NavTab, label: '关键帧', icon: ImageIcon, desc: '逐 Shot 生成或上传，人工确认 PASS' },
     { id: 'video-blueprint' as NavTab, label: '视频蓝图', icon: ListVideo, desc: '任一关键帧 PASS 后立即准备本镜视频' },
     { id: 'assets' as NavTab, label: '资产库', icon: Archive, desc: '项目级图片、视频、音频与引用资产' },
+    { id: 'director-context' as NavTab, label: 'AI Context', icon: FileJson, desc: 'AI 导演读取项目、Shot 与资产上下文' },
     { id: 'monitor' as NavTab, label: '生产监控', icon: Activity, desc: '查看 Episode / Shot 门禁、资产与生产状态' },
     { id: 'studio' as NavTab, label: '创作工作台', icon: Film, desc: '单镜头场景、首帧与视频生成' },
     { id: 'characters' as NavTab, label: '角色库', icon: Users, desc: '建立并长期复用角色身份包' },
