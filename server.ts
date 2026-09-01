@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 42758)
-Total output lines: 4035
-
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -1012,7 +1009,2098 @@ export async function createApp(dependencies: { s01ProductionService?: S01Produc
       return res.json({ analysis });
     } catch (err: unknown) {
       const { redactedMessage } = sanitizeError(err);
-      return res.status(500).json({ error: …22758 tokens truncated…rded from a completed cloud operation, try directly re-fetching video stream first
+      return res.status(500).json({ error: redactedMessage });
+    }
+  });
+
+  // Normalize Prompt Endpoint
+  app.post('/api/prompts/normalize', async (req, res) => {
+    try {
+      const connectionId = req.headers['x-connection-id'] as string;
+      const session = CredentialService.getSession(connectionId);
+      if (!session) {
+        return res.status(401).json({ error: '算力连接已失效，请重新连接' });
+      }
+
+      const {
+        userPromptChinese,
+        sceneAnalysis,
+        identityLockEnglish,
+        primaryStyle,
+        secondaryStyle,
+        styleStrength,
+      } = req.body;
+
+      const ai = await GeminiClientFactory.getClientForSession(session);
+      const models = ModelRouter.getEffectiveModels(session);
+      const normalized = await SceneAnalyzer.normalizePrompt(
+        ai,
+        userPromptChinese || '动作姿态演化',
+        sceneAnalysis,
+        identityLockEnglish || '',
+        primaryStyle || '照片级写实',
+        secondaryStyle || '',
+        styleStrength ?? 0.5,
+        models.analysisModel
+      );
+
+      return res.json(normalized);
+    } catch (err: unknown) {
+      const { redactedMessage } = sanitizeError(err);
+      return res.status(500).json({ error: redactedMessage });
+    }
+  });
+
+  // First Frame Generation & QA Endpoint
+  app.post('/api/first-frames/generate-and-qa', upload.fields([
+    { name: 'sceneImage', maxCount: 1 },
+    { name: 'masterImages', maxCount: 4 },
+    { name: 'masterImage', maxCount: 1 },
+    { name: 'refImages', maxCount: 4 },
+  ]), async (req, res) => {
+    try {
+      const connectionId = req.headers['x-connection-id'] as string;
+      const session = CredentialService.getSession(connectionId);
+      if (!session) {
+        return res.status(401).json({ error: '算力连接已失效，请重新连接' });
+      }
+
+      const files = req.files as { [fieldname: string]: Express.Multer.File[] };
+      const sceneFile = files['sceneImage']?.[0];
+      const masterFiles = [
+        ...(files['masterImages'] || []),
+        ...(files['masterImage'] || []),
+      ];
+
+      if (!sceneFile || masterFiles.length === 0) {
+        return res.status(400).json({ error: '缺少场景图或角色母板图 (masterImages)' });
+      }
+
+      const identitySpec = JSON.parse(req.body.identitySpec || '{}');
+      const actionPose = req.body.actionPose || '';
+      const sceneMode = req.body.sceneMode || 'replace_primary_person';
+
+      const ai = await GeminiClientFactory.getClientForSession(session);
+      const models = ModelRouter.getEffectiveModels(session);
+
+      const refFiles = files['refImages'] || [];
+      const references = (refFiles.length > 0 ? refFiles : masterFiles).slice(0, 4).map((f, i) => ({
+        id: `ref_${i}`,
+        blob: new Blob([f.buffer], { type: f.mimetype }),
+        mimeType: f.mimetype,
+        width: 1080,
+        height: 1080,
+        angle: (i === 0 ? 'front' : i === 1 ? '45_degree' : 'full_body') as any,
+        qualityScore: 90,
+        qualityIssues: [],
+        sortOrder: i,
+      }));
+
+      const masterBuffers = masterFiles.slice(0, 4).map((f) => f.buffer);
+      const masterMimeTypes = masterFiles.slice(0, 4).map((f) => f.mimetype || 'image/jpeg');
+
+      const candidates = await FirstFrameGenerator.generateFirstFrameCandidates(
+        ai,
+        models.imageModel,
+        sceneFile.buffer,
+        sceneFile.mimetype || 'image/jpeg',
+        identitySpec,
+        references,
+        actionPose,
+        undefined,
+        masterBuffers,
+        masterMimeTypes,
+        sceneMode
+      );
+
+      const candidate = candidates[0];
+      const candidateBuf = Buffer.from(await candidate.blob.arrayBuffer());
+
+      const qaReport = await VisualQaService.qaFirstFrame(
+        ai,
+        models.analysisModel,
+        masterFiles[0].buffer,
+        masterFiles[0].mimetype || 'image/jpeg',
+        sceneFile.buffer,
+        sceneFile.mimetype || 'image/jpeg',
+        candidateBuf,
+        candidate.mimeType,
+        identitySpec,
+        sceneMode
+      );
+
+      const candidateBase64 = candidateBuf.toString('base64');
+      const dataUrl = `data:${candidate.mimeType};base64,${candidateBase64}`;
+
+      return res.json({
+        candidateId: candidate.id,
+        dataUrl,
+        qaReport,
+      });
+    } catch (err: unknown) {
+      const { redactedMessage } = sanitizeError(err);
+      return res.status(500).json({ error: redactedMessage });
+    }
+  });
+
+  // Prompt Suggestion Endpoint based on uploaded image and character master reference
+  app.post('/api/prompts/suggest', upload.fields([
+    { name: 'sceneImage', maxCount: 1 },
+    { name: 'characterImage', maxCount: 1 },
+  ]), async (req, res) => {
+    try {
+      const connectionId = req.headers['x-connection-id'] as string;
+      const session = CredentialService.getSession(connectionId);
+      if (!session) {
+        return res.status(401).json({ error: '算力连接已失效或未建立，请重新连接算力服务' });
+      }
+
+      const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+      const sceneImageFile = files?.['sceneImage']?.[0];
+      let characterImageFile = files?.['characterImage']?.[0];
+
+      const {
+        characterId,
+        durationSeconds,
+        motionIntensity,
+        primaryStyle,
+        secondaryStyle,
+        cameraPreset,
+        userPrompt,
+      } = req.body;
+
+      let charImageBuffer: Buffer | null = characterImageFile ? characterImageFile.buffer : null;
+      let charMimeType: string = characterImageFile ? (characterImageFile.mimetype || 'image/jpeg') : 'image/jpeg';
+
+      if (!charImageBuffer && characterId) {
+        let storedChar = serverCharacterStore.get(characterId);
+      if (!storedChar && characterId && durableCharacterService.isAvailable()) {
+        const durableChar = await durableCharacterService.getHydrated(characterId);
+        if (durableChar) { storedChar = durableChar; serverCharacterStore.set(characterId, durableChar); }
+      }
+        if (storedChar && storedChar.referenceImages.length > 0) {
+          charImageBuffer = storedChar.referenceImages[0].buffer;
+          charMimeType = storedChar.referenceImages[0].mimeType || 'image/jpeg';
+        }
+      }
+
+      // We must have at least a scene image or character image
+      if (!sceneImageFile && !charImageBuffer) {
+        return res.status(400).json({ error: '未接收到有效参考图片，请先上传场景图或选择包含母板图的角色' });
+      }
+
+      const ai = await GeminiClientFactory.getClientForSession(session);
+      const modelName = session.analysisModel || 'gemini-2.5-flash';
+
+      const requestedDuration = durationSeconds ? `${durationSeconds}` : '8';
+      const requestedStyle = [primaryStyle, secondaryStyle].filter(Boolean).join(', ') || 'Cinematic, Realistic Photography';
+      const requestedMotion = motionIntensity === 'minimal'
+        ? 'micro-movements only (subtle breathing, eye blink, soft hair sway)'
+        : motionIntensity === 'expressive'
+        ? 'larger expressiveness (noticeable head tilt, expressive gaze, hand gesture)'
+        : 'natural motion (gentle head sway, subtle eye gaze shift, gentle hand gesture)';
+      const requestedCamera = cameraPreset === 'slow_push'
+        ? 'slow smooth camera push-in towards subject'
+        : cameraPreset === 'slow_pull'
+        ? 'slow smooth camera pull-back revealing background depth'
+        : cameraPreset === 'subtle_pan'
+        ? 'subtle smooth horizontal camera pan'
+        : cameraPreset === 'vertical_boom'
+        ? 'smooth vertical camera pedestal motion'
+        : cameraPreset === 'subtle_orbit'
+        ? 'gentle slow arc orbit camera movement around subject'
+        : cameraPreset === 'tracking_shot'
+        ? 'smooth parallel tracking camera motion'
+        : cameraPreset === 'close_up'
+        ? 'tight close-up portrait framing with eye focus'
+        : 'locked camera, stable framing, no zoom, no pan';
+
+      const userMotionContext = userPrompt && userPrompt.trim()
+        ? `【用户额外指定的特定动作与氛围需求】：${userPrompt.trim()}`
+        : '';
+
+      const promptSystemInstruction = `你是一个专门为 Image-to-Video 生成稳定 vlog 提示词的专家助手。
+你的任务是根据“输入图片内容 + 目标视频时长”生成一个合理、稳定、高通过率、低漂移的图生视频提示词。
+
+请严格遵循以下原则与推理步骤：
+
+1. 先分析图片：
+   - 观察人物视角（正脸 / 三分之二侧脸 / 侧脸）、景别（近景 / 中近景 / 半身 / 全身）、是否看镜头。
+   - 确认当前姿势是否已经完整成立，手部、头部、手机、头发、配饰是否有明显固定位置。
+   - 判断背景适合静态 vlog 还是轻微动态 vlog。
+
+2. 锁定不可改变的内容（高优先级）：
+   - 锁定人脸身份 (Maintain character identity)
+   - 锁定构图与景别 (Keep original framing and camera angle)
+   - 锁定服装与饰品 (Maintain exact clothing and accessories)
+   - 锁定背景环境与灯光 (Keep background scene and lighting)
+   - 锁定手部位置 (Keep hand positions stable, zero hand drifting)
+   - 锁定身体朝向 (Maintain torso orientation, do NOT turn body)
+   - 不主动转正脸 (If side-profile, do NOT force face to turn frontal)
+   - 不主动重新摆姿势 (Do NOT re-pose; original pose is final pose)
+
+3. 动作密度必须匹配目标视频时长 (${requestedDuration}秒)：
+   - 4秒：仅允许 1 个极轻微主动态（如轻柔呼吸、眼神微调或极轻表情变幻）。
+   - 8秒：允许 1–2 个连续轻动作（如倾听微颔首 + 微弱发丝/眼神轻移）。
+   - 10–12秒：允许 2 个连贯轻动作（如微颔首 + 眼神缓和回归镜头）。
+   - 15–30秒：拆成多段，每段只做 1 个轻动作，动作间自然平滑衔接。
+
+4. 动作必须服从原图姿势：
+   - 原始姿势即为最终姿势，只允许在原姿势上叠加微小动态。禁止写成重新摆 pose、走动、转身或夸张体态变幻。
+
+5. 默认 Vlog 真实日常风格：
+   - 优先真实生活感 (Authentic everyday vlog)、自然人像摄影感 (Natural portrait photography)、轻松日常，绝不带有夸张表演感、舞蹈感或广告摆拍感。
+
+6. 默认稳定性优先：
+   - 宁可动作幅度极微，也绝不出现脸漂、手漂、姿势漂、身体扭转或换脸现象。
+
+【用户选定参数】:
+- 目标视频时长: ${requestedDuration} 秒
+- 动作幅度: ${requestedMotion}
+- 视觉风格: ${requestedStyle}
+- 运镜轨迹: ${requestedCamera}
+${userMotionContext ? `- ${userMotionContext}` : ''}
+
+【输出格式】
+直接生成一条符合上述规则的英文提示词纯文本 (English Prompt)：
+- 开头："Create a ${requestedDuration}-second realistic vlog portrait video based on the uploaded image."
+- 中段描述：描述原始姿势、视觉焦点、锁定要素（identity, pose, outfit, background），以及符合时长 (${requestedDuration}s) 的微弱自然动作（${requestedMotion}）。
+- 结尾："Authentic vlog style, natural portrait photography, ${requestedCamera}, ${requestedStyle}, steady posture, consistent lighting, smooth motion, high quality."
+
+必须仅输出最终英文提示词文本，不要包含 Markdown 标记、标签列表或解释说明。`;
+
+      const contentsParts: any[] = [];
+
+      // Primary scene image
+      if (sceneImageFile) {
+        contentsParts.push({
+          inlineData: {
+            mimeType: sceneImageFile.mimetype || 'image/jpeg',
+            data: sceneImageFile.buffer.toString('base64'),
+          },
+        });
+        contentsParts.push({ text: '【主参考图：场景与动作画面】' });
+      }
+
+      // Secondary character master image
+      if (charImageBuffer) {
+        contentsParts.push({
+          inlineData: {
+            mimeType: charMimeType,
+            data: charImageBuffer.toString('base64'),
+          },
+        });
+        contentsParts.push({ text: '【身份参考图：角色母板】' });
+      }
+
+      contentsParts.push({ text: promptSystemInstruction });
+
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: [
+          {
+            role: 'user',
+            parts: contentsParts,
+          },
+        ],
+      });
+
+      const suggestedPrompt = response.text ? response.text.trim().replace(/^["'“‘`]+|["'”’`]+$/g, '') : '';
+      if (!suggestedPrompt) {
+        throw new Error('模型未能生成有效提示词，请稍后重试');
+      }
+
+      return res.json({ prompt: suggestedPrompt });
+    } catch (err: unknown) {
+      const { redactedMessage } = sanitizeError(err);
+      return res.status(500).json({ error: redactedMessage });
+    }
+  });
+
+  // Async Video Task Start Endpoint
+  app.post('/api/videos/start', upload.fields([
+    { name: 'firstFrame', maxCount: 1 },
+    { name: 'sceneImage', maxCount: 1 },
+    { name: 'masterImages', maxCount: 4 },
+    { name: 'masterImage', maxCount: 1 },
+  ]), async (req, res) => {
+    try {
+      const connectionId = req.headers['x-connection-id'] as string;
+      const session = CredentialService.getSession(connectionId);
+      if (!session) {
+        return res.status(401).json({ error: '算力连接已失效，请重新连接' });
+      }
+
+      const storageConfig = assertProductionStorageConfig();
+      if (!storageConfig.valid) {
+        const isDrift = storageConfig.bucketDriftDetected;
+        const failureReason = isDrift ? 'storage_configuration_drift' : 'storage_configuration_missing';
+        const httpStatus = isDrift ? 503 : 400;
+        const customUserMessage = isDrift
+          ? `存储服务 Bucket 配置漂移：VEO_OUTPUT_BUCKET (${storageConfig.environmentBucket}) 与预期生产 Bucket (${storageConfig.expectedBucket}) 不一致。`
+          : '存储服务配置缺失：未在环境变量中配置 VEO_OUTPUT_BUCKET。';
+
+        console.error(`[Video Start] 拒绝启动 Veo 任务：Storage config invalid (${failureReason}), env: "${storageConfig.environmentBucket}", expected: "${storageConfig.expectedBucket}"`);
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'submit',
+          httpStatus,
+          customUserMessage,
+          endpointPathRedacted: '/api/videos/start',
+        });
+        return res.status(httpStatus).json({
+          accepted: false,
+          serverPersisted: false,
+          status: 'failed',
+          submissionState: 'not_submitted',
+          failureReason,
+          error: isDrift
+            ? `Storage configuration drift: VEO_OUTPUT_BUCKET (${storageConfig.environmentBucket}) does not match expected production bucket (${storageConfig.expectedBucket}).`
+            : 'Storage configuration missing: VEO_OUTPUT_BUCKET environment variable is required.',
+          predictLongRunningCalls: 0,
+          structuredError: errObj,
+        });
+      }
+
+      const requestedTaskId = req.body.taskId;
+
+      // P0-5: Firestore is the idempotency authority across Cloud Run instances.
+      // Always check the durable task before consulting the process-local cache.
+      if (requestedTaskId && firestoreTaskRepository.isAvailable()) {
+        const durableExisting = await firestoreTaskRepository.getTask(requestedTaskId);
+        if (durableExisting) {
+          serverVideoTaskStore.set(requestedTaskId, durableExisting);
+          if (['submitting', 'submitted', 'polling', 'polling_timeout', 'generation_succeeded', 'artifact_persisting', 'artifact_persisted', 'qa_pending', 'submission_outcome_unknown'].includes(durableExisting.status as string)) {
+            return res.json({
+              accepted: true,
+              serverPersisted: true,
+              taskId: durableExisting.taskId,
+              status: durableExisting.status,
+              submissionState: durableExisting.status === 'submission_outcome_unknown'
+                ? 'outcome_unknown'
+                : (durableExisting.operationName ? 'submitted' : 'submitting'),
+              operationNamePresent: Boolean(durableExisting.operationName),
+              isIdempotentReuse: true,
+              createdAt: durableExisting.createdAt,
+              updatedAt: durableExisting.updatedAt,
+              engine: durableExisting.modelId,
+              operationName: durableExisting.operationName,
+            });
+          }
+          if (durableExisting.status === 'completed' && durableExisting.artifactPersisted) {
+            return res.json({
+              accepted: true,
+              serverPersisted: true,
+              taskId: durableExisting.taskId,
+              status: 'completed',
+              submissionState: 'submitted',
+              operationNamePresent: Boolean(durableExisting.operationName),
+              isIdempotentReuse: true,
+              createdAt: durableExisting.createdAt,
+              updatedAt: durableExisting.updatedAt,
+              engine: durableExisting.modelId,
+              videoDataUrl: durableExisting.videoDataUrl || `/api/videos/stream/${durableExisting.taskId}`,
+              sizeBytes: durableExisting.sizeBytes,
+              durationSeconds: durableExisting.durationSeconds,
+              qaReport: durableExisting.qaReport,
+              diagnostics: durableExisting.diagnostics,
+            });
+          }
+        }
+      }
+
+      const files = req.files as { [fieldname: string]: Express.Multer.File[] };
+      const ffFile = files['firstFrame']?.[0];
+      const sceneFile = files['sceneImage']?.[0];
+      const masterFiles = [
+        ...(files['masterImages'] || []),
+        ...(files['masterImage'] || []),
+      ];
+
+      if (!ffFile && !sceneFile) {
+        return res.status(400).json({ error: '缺少首帧图或场景输入图' });
+      }
+
+      const characterId = req.body.characterId || '';
+      let characterDescription = req.body.characterDescription || '';
+      let identitySpec = req.body.identitySpec ? JSON.parse(req.body.identitySpec || '{}') : { lockedTraits: [] };
+
+      let storedChar = serverCharacterStore.get(characterId);
+      if (!storedChar && characterId && durableCharacterService.isAvailable()) {
+        const durableChar = await durableCharacterService.getHydrated(characterId);
+        if (durableChar) { storedChar = durableChar; serverCharacterStore.set(characterId, durableChar); }
+      }
+      if (storedChar) {
+        characterDescription = storedChar.description;
+        identitySpec = storedChar.identitySpec;
+      }
+
+      const rawUserPrompt = req.body.rawUserPrompt || req.body.normalizedPrompt || '';
+      const compiledPrompt = req.body.compiledPrompt || req.body.normalizedPrompt || '';
+      const promptCompilerVersion = req.body.promptCompilerVersion || PromptCompiler.VERSION;
+      const motionIntensity = req.body.motionIntensity || 'natural';
+      const visualStyle = req.body.visualStyle || 'photorealistic';
+      const cameraPreset = req.body.cameraPreset || 'locked_camera';
+
+      // Clean negative prompt blocks and bracket tags before sending to Veo
+      const normalizedPrompt = PromptCompiler.cleanUserMotionPrompt(compiledPrompt || rawUserPrompt);
+      const sceneMode = req.body.sceneMode || 'replace_primary_person';
+      const durationSeconds = Number(req.body.durationSeconds) || 4;
+      const aspectRatio = req.body.aspectRatio || '9:16';
+      const resolution = req.body.resolution || '720p';
+      const generateAudio = req.body.generateAudio === 'true' || req.body.generateAudio === true;
+
+      const ai = await GeminiClientFactory.getClientForSession(session);
+      const models = ModelRouter.getEffectiveModels(session);
+
+      let masterBuffers = masterFiles.slice(0, 3).map((f) => f.buffer);
+      let masterMimeTypes = masterFiles.slice(0, 3).map((f) => f.mimetype || 'image/jpeg');
+
+      if (masterBuffers.length === 0 && storedChar && storedChar.referenceImages.length > 0) {
+        masterBuffers = storedChar.referenceImages.slice(0, 3).map((r) => r.buffer);
+        masterMimeTypes = storedChar.referenceImages.slice(0, 3).map((r) => r.mimeType || 'image/jpeg');
+      }
+
+
+      const imageIsTargetCharacter = req.body.imageIsTargetCharacter === 'true' || req.body.imageIsTargetCharacter === true || req.body.isTargetCharacter === 'true' || req.body.isTargetCharacter === true;
+      const manualApproved = req.body.manualApproved === 'true' || req.body.manualApproved === true;
+
+      // Identity Lock Step 1: Determine Identity Source Mode
+      const sourceMode = IdentityLockService.determineIdentitySourceMode({
+        sceneMode,
+        imageIsTargetCharacter,
+      });
+
+      // M2-1/M2-2 fail closed: every identity mode requires at least one durable master reference.
+      if (masterBuffers.length === 0) {
+        console.warn(`[Video Start] 拒绝启动 Veo: 缺失目标角色母板图 (identity_reference_missing)`);
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'submit',
+          httpStatus: 400,
+          customUserMessage: '未提供目标角色母板图 (master image)，无法执行强制角色身份质检。',
+          endpointPathRedacted: '/api/videos/start',
+        });
+
+        return res.status(400).json({
+          accepted: false,
+          serverPersisted: false,
+          status: 'failed',
+          submissionState: 'not_submitted',
+          failureReason: 'identity_reference_missing',
+          error: errObj.userMessage,
+          predictLongRunningCalls: 0,
+          structuredError: errObj,
+        });
+      }
+
+      const rawSceneBuf = sceneFile ? sceneFile.buffer : ffFile!.buffer;
+      const rawSceneMime = sceneFile ? (sceneFile.mimetype || 'image/jpeg') : (ffFile!.mimetype || 'image/jpeg');
+
+      // Identity Lock Step 2: Rebuild First Frame if required
+      let approvedFirstFrameBuf = rawSceneBuf;
+      let approvedFirstFrameMime = rawSceneMime;
+      let rebuildExecuted = false;
+
+      if (sourceMode === 'IDENTITY_REBUILD_REQUIRED') {
+        const rebuildResult = await IdentityLockService.rebuildFirstFrame({
+          ai,
+          imageModelName: models.imageModel || 'gemini-3.1-flash-image',
+          sceneImageBuffer: rawSceneBuf,
+          sceneMimeType: rawSceneMime,
+          identitySpec,
+          masterBuffers,
+          masterMimeTypes,
+          sceneMode,
+          userPrompt: rawUserPrompt || compiledPrompt,
+          imageIsTargetCharacter,
+        });
+        approvedFirstFrameBuf = Buffer.from(await rebuildResult.candidateFirstFrame.blob.arrayBuffer());
+        approvedFirstFrameMime = rebuildResult.candidateFirstFrame.mimeType;
+        rebuildExecuted = rebuildResult.rebuildExecuted;
+      }
+
+      // First frame local rules inspection
+      const ffCheck = FirstFrameChecker.checkBuffer(approvedFirstFrameBuf, approvedFirstFrameMime);
+      if (!ffCheck.valid) {
+        return res.status(400).json({ error: ffCheck.errors.join('; ') });
+      }
+
+      // Identity Lock Step 3: Evaluate First Frame Identity Gate
+      // Use the complete uploaded identity pack (up to 4 masters), not only masterBuffers[0].
+      const gateResult = await IdentityLockService.evaluateIdentityGate({
+        ai,
+        analysisModel: session.analysisModel || 'gemini-3.6-flash',
+        masterImageBuffer: masterBuffers[0],
+        masterMimeType: masterMimeTypes[0],
+        masterImageBuffers: masterBuffers,
+        masterMimeTypes,
+        sceneImageBuffer: rawSceneBuf,
+        sceneMimeType: rawSceneMime,
+        candidateBuffer: approvedFirstFrameBuf,
+        candidateMimeType: approvedFirstFrameMime,
+        identitySpec,
+        sceneMode,
+        imageIsTargetCharacter,
+        manualApproved,
+      });
+
+      if (!gateResult.canStartVeo) {
+        console.warn(`[Video Start] 拒绝启动 Veo: Identity Gate 未通过 (status: ${gateResult.status}, score: ${gateResult.identityQaScore})`);
+        const isReview = gateResult.status === 'review';
+        const failureReason = isReview ? 'identity_qa_review_required' : 'identity_qa_failed';
+        const httpStatus = isReview ? 422 : 400;
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'submit',
+          httpStatus,
+          customUserMessage: isReview
+            ? '角色一致性处于人工复核区间 (REVIEW)，需要明确人工批准后方可提交 Veo 渲染。'
+            : '角色一致性质检未通过 (Identity QA failed)，拒绝启动 Veo 渲染。',
+          endpointPathRedacted: '/api/videos/start',
+        });
+
+        return res.status(httpStatus).json({
+          accepted: false,
+          serverPersisted: false,
+          status: 'failed',
+          submissionState: 'not_submitted',
+          failureReason,
+          error: errObj.userMessage,
+          qaReport: gateResult.identityQaReport,
+          firstFrameIdentityQaStatus: gateResult.status,
+          identityQaScore: gateResult.identityQaScore,
+          identityCriticalIssues: gateResult.identityCriticalIssues,
+          requiresManualApproval: isReview,
+          predictLongRunningCalls: 0,
+          structuredError: errObj,
+        });
+      }
+
+      // Identity Lock Step 4: Prepare Motion-First I2V submission
+      const submissionPrep = IdentityLockService.prepareI2VSubmission({
+        userPrompt: compiledPrompt || rawUserPrompt,
+        durationSeconds,
+        cameraPreset,
+        identityGatePassed: gateResult.canStartVeo,
+      });
+
+      const firstFrameHash = crypto.createHash('sha256').update(approvedFirstFrameBuf).digest('hex');
+      const promptHash = crypto.createHash('sha256').update(normalizedPrompt).digest('hex');
+
+      const idempotencyKey = crypto.createHash('sha256').update([
+        characterId || 'no_char',
+        firstFrameHash,
+        promptHash,
+        durationSeconds,
+        models.videoModel,
+        resolution,
+      ].join('_')).digest('hex');
+
+
+
+      const taskId = req.body.taskId || `vtask_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const now = Date.now();
+      const providerStorageTaskKey = DurableVideoRetryService.getAttemptTaskKey(taskId, 1);
+      const expectedProviderStorageUri = resolveVeoStorageUri(providerStorageTaskKey);
+
+      // Persist QA anchors before the provider call. Cloud Run memory/local files are never
+      // accepted as post-generation identity evidence.
+      const qaApprovedFirstFrameObjectPath = `veo/${taskId}/qa/approved-first-frame`;
+      await gcsArtifactStore.uploadImageArtifact({
+        objectPath: qaApprovedFirstFrameObjectPath,
+        buffer: approvedFirstFrameBuf,
+        contentType: approvedFirstFrameMime,
+      });
+
+      const qaMasterImageObjectPaths: string[] = [];
+      for (let i = 0; i < masterBuffers.slice(0, 3).length; i++) {
+        const objectPath = `veo/${taskId}/qa/master-${i}`;
+        await gcsArtifactStore.uploadImageArtifact({
+          objectPath,
+          buffer: masterBuffers[i],
+          contentType: masterMimeTypes[i] || 'image/jpeg',
+        });
+        qaMasterImageObjectPaths.push(objectPath);
+      }
+
+      const sceneImgBuf = sceneFile ? sceneFile.buffer : approvedFirstFrameBuf;
+      const sceneImgMime = sceneFile ? (sceneFile.mimetype || 'image/jpeg') : approvedFirstFrameMime;
+      const sceneImageUrl = saveImageBufferToFile(taskId, sceneImgBuf, sceneImgMime);
+      const initialLeaseOwner = process.env.K_REVISION || process.env.K_SERVICE || `pid_${process.pid}`;
+      const initialExecutionId = `exec_${crypto.randomUUID()}`;
+      const initialLeaseStartedAt = Date.now();
+      const initialLeaseExpiresAt = initialLeaseStartedAt + 180000;
+
+      const taskRecord: ServerVideoTaskRecord = {
+        id: taskId,
+        taskId,
+        sceneImageUrl,
+        status: 'preparing',
+        modelId: models.videoModel,
+        projectId: session.projectId || 'xp-vertex-project',
+        region: session.region || session.location || 'us-central1',
+        durationSeconds,
+        aspectRatio,
+        resolution,
+        generateAudio,
+        firstFrameHash,
+        promptHash,
+        submitHttpStatus: null,
+        pollHttpStatus: null,
+        pollAttempt: 0,
+        createdAt: now,
+        updatedAt: now,
+        idempotencyKey,
+        rawUserPrompt,
+        compiledPrompt,
+        veoSafePrompt: PromptCompiler.normalizeForVeo(compiledPrompt, rawUserPrompt, { durationSeconds, hasPerson: true }),
+        promptCompilerVersion,
+        motionIntensity,
+        visualStyle,
+        cameraPreset,
+        schemaVersion: 'v1.1-stable',
+        connectionId,
+        sceneMode: sceneMode || 'animate_existing_character',
+        characterId,
+        characterDescription,
+        identitySpec,
+        identitySourceMode: sourceMode,
+        firstFrameIdentityQaStatus: gateResult.status,
+        identityQaScore: gateResult.identityQaScore,
+        identityCriticalIssues: gateResult.identityCriticalIssues,
+        identityQaStatus: 'not_run',
+        providerAttempt: 1,
+        providerStorageTaskKey,
+        expectedProviderStorageUri,
+        providerStorageIntentPersistedAt: now,
+        executionId: initialExecutionId,
+        leaseOwner: initialLeaseOwner,
+        leaseExpiresAt: initialLeaseExpiresAt,
+        heartbeatAt: initialLeaseStartedAt,
+        attempt: 1,
+        maxAttempts: 3,
+        stateVersion: 1,
+        statusVersion: 1,
+        qaAttempt: 1,
+        retryCount: 0,
+        retrySubmissionState: 'none',
+        retryHistory: [],
+        artifactHistory: [],
+        qaApprovedFirstFrameObjectPath,
+        qaApprovedFirstFrameMimeType: approvedFirstFrameMime,
+        qaMasterImageObjectPaths,
+        qaMasterImageMimeTypes: masterMimeTypes.slice(0, qaMasterImageObjectPaths.length),
+      };
+
+      // Ensure task creation in Firestore before invoking background Veo execution
+      if (!firestoreTaskRepository.isAvailable()) {
+        console.warn('[Firestore Task Creation] Firestore unavailable.');
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'submit',
+          httpStatus: 503,
+          customUserMessage: '存储服务 (Firestore) 当前不可用，无法创建视频生成任务。',
+          endpointPathRedacted: '/api/videos/start',
+        });
+        return res.status(503).json({
+          accepted: false,
+          serverPersisted: false,
+          storageAuthority: 'unavailable',
+          taskId,
+          status: 'failed',
+          submissionState: 'not_submitted',
+          error: '存储服务不可用',
+          structuredError: errObj,
+        });
+      }
+
+      try {
+        taskRecord.evidenceSource = 'firestore';
+        // Task creation, provider admission, and the initial execution lease commit in one
+        // Firestore transaction. There is no post-create lease-acquisition gap.
+        await firestoreTaskRepository.createTask(taskRecord);
+      } catch (fsErr: any) {
+        console.error('[Firestore Task Creation Error]:', fsErr);
+        const errStr = String(fsErr?.message || fsErr);
+
+        // createTask uses Firestore create() semantics. If another instance won the
+        // same taskId race, return the authoritative existing task instead of invoking Veo twice.
+        const alreadyExists = fsErr?.code === 6 || fsErr?.code === 'ALREADY_EXISTS' || /already exists/i.test(errStr);
+        if (alreadyExists) {
+          const existing = await firestoreTaskRepository.getTask(taskId).catch(() => null);
+          if (existing) {
+            serverVideoTaskStore.set(taskId, existing);
+            return res.json({
+              accepted: true,
+              serverPersisted: true,
+              taskId: existing.taskId,
+              status: existing.status,
+              submissionState: existing.status === 'preparing'
+                ? 'reserved'
+                : existing.status === 'submission_outcome_unknown'
+                  ? 'outcome_unknown'
+                  : existing.operationName
+                    ? 'submitted'
+                    : existing.status === 'submitting'
+                      ? 'submitting'
+                      : 'not_submitted',
+              operationNamePresent: Boolean(existing.operationName),
+              isIdempotentReuse: true,
+              createdAt: existing.createdAt,
+              updatedAt: existing.updatedAt,
+              engine: existing.modelId,
+              operationName: existing.operationName,
+              videoDataUrl: existing.videoDataUrl,
+            });
+          }
+        }
+        const admissionBusy = fsErr?.code === 'PROVIDER_ADMISSION_BUSY';
+        if (admissionBusy) {
+          const artifactBucket = getVeoBucketName();
+          const orphanQaPaths = [qaApprovedFirstFrameObjectPath, ...qaMasterImageObjectPaths];
+          await Promise.all(orphanQaPaths.map((objectPath) =>
+            gcsArtifactStore.deleteVideoArtifact(artifactBucket, objectPath).catch(() => false)
+          ));
+          const errObj = createStructuredError({
+            source: 'internal_api',
+            failureStage: 'submit',
+            httpStatus: 409,
+            customUserMessage: '当前已有视频任务占用 Veo 生成槽位。为避免重复提交或重复扣费，请先等待该任务进入完成、失败或人工审核状态。',
+            endpointPathRedacted: '/api/videos/start',
+          });
+          return res.status(409).json({
+            accepted: false,
+            serverPersisted: false,
+            status: 'failed',
+            submissionState: 'not_submitted',
+            failureReason: 'provider_admission_busy',
+            blockingTaskId: fsErr?.blockingTaskId,
+            blockingStatus: fsErr?.blockingStatus,
+            predictLongRunningCalls: 0,
+            error: errObj.userMessage,
+            structuredError: errObj,
+          });
+        }
+
+        const isQuotaOrTransient =
+          fsErr?.code === 8 ||
+          fsErr?.code === 14 ||
+          fsErr?.code === 'RESOURCE_EXHAUSTED' ||
+          fsErr?.code === 'UNAVAILABLE' ||
+          errStr.includes('RESOURCE_EXHAUSTED') ||
+          errStr.includes('Quota') ||
+          errStr.includes('UNAVAILABLE');
+
+        const httpStatus = isQuotaOrTransient ? 503 : 500;
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'submit',
+          httpStatus,
+          customUserMessage: `Firestore 任务持久化失败 (${fsErr?.message || fsErr})，视频生成流程已安全终止。`,
+          endpointPathRedacted: '/api/videos/start',
+        });
+
+        return res.status(httpStatus).json({
+          accepted: false,
+          serverPersisted: false,
+          storageAuthority: getStorageAuthority(),
+          taskId,
+          status: 'failed',
+          submissionState: 'not_submitted',
+          error: isQuotaOrTransient ? '存储服务不可用或超额 (Firestore error)' : 'Firestore 任务持久化失败',
+          structuredError: errObj,
+        });
+      }
+
+      serverVideoTaskStore.set(taskId, taskRecord);
+      saveTasksToDisk(serverVideoTaskStore);
+
+      // P0-5: Provider submission is part of the request durability boundary.
+      // Do not rely on fire-and-forget work after a Cloud Run HTTP response. The request
+      // waits only until the provider operation/result is durably persisted; long-running
+      // generation remains asynchronous and is resumed through polling/recovery.
+      await (async () => {
+        let finalVeoPrompt = submissionPrep.compiledMotionPrompt || PromptCompiler.compileI2VMotionPrompt({
+          userMotionPrompt: normalizedPrompt,
+          durationSeconds,
+          cameraPreset,
+        });
+        if (/[\u4e00-\u9fa5]/.test(finalVeoPrompt)) {
+          try {
+            const cleanPrompt = PromptCompiler.cleanUserMotionPrompt(finalVeoPrompt);
+            const translationRes = await callWithRetry(
+              () =>
+                ai.models.generateContent({
+                  model: session.analysisModel || 'gemini-2.5-flash',
+                  contents: [
+                    {
+                      role: 'user',
+                      parts: [
+                        {
+                          text: `Translate and refine the following Chinese video motion prompt into a concise, safe, positive English motion description suitable for Google Veo 3.1 video generation model.
+Rules:
+1. Output ONLY a single line of safe, positive English text describing character motion, facial expression, or camera movement. No markdown, no quotes, no explanations.
+2. Filter out any sensitive, explicit, anatomical, or policy-violating words (avoid terms related to body parts, clothing removal, or extreme actions).
+3. Keep key motion and atmospheric details: duration ${durationSeconds}s, character actions, lighting, camera framing.
+
+Chinese Prompt:
+${cleanPrompt}`
+                        }
+                      ]
+                    }
+                  ]
+                }),
+              { actionName: 'Veo 提示词中译英', maxRetries: 2, initialDelayMs: 2000 }
+            );
+            const englishPrompt = translationRes.text?.trim().replace(/^["'“‘`]+|["'”’`]+$/g, '');
+            if (englishPrompt && englishPrompt.length > 10) {
+              finalVeoPrompt = englishPrompt;
+              console.log(`[Veo Prompt Auto-Translated]: ${cleanPrompt.slice(0, 50)}... -> ${finalVeoPrompt}`);
+            }
+          } catch (err) {
+            console.warn('[Veo Prompt Translation Failed, falling back to original]:', err);
+          }
+        }
+
+        try {
+          const authorizedTask = await taskStateMachineService.authorizeProviderSubmission({
+            taskId,
+            executionId: taskRecord.executionId!,
+            providerStorageTaskKey,
+            expectedProviderStorageUri,
+          });
+          Object.assign(taskRecord, authorizedTask);
+          serverVideoTaskStore.set(taskId, authorizedTask);
+        } catch (authorizationErr: any) {
+          const message = `Provider 调用授权失败，Veo 未被调用: ${authorizationErr?.message || authorizationErr}`;
+          console.error(`[Pre-Provider Authorization Failed] Task ${taskId}:`, authorizationErr);
+          const failedTask = await taskStateMachineService.failPreparingBeforeProvider({
+            taskId,
+            executionId: taskRecord.executionId!,
+            message,
+          }).catch(() => null);
+          if (failedTask) serverVideoTaskStore.set(taskId, failedTask);
+          return;
+        }
+
+        console.log(`[Video Start] Durable Provider authorization committed; invoking Veo (taskId: ${taskId}, 时长: ${durationSeconds}s, 模型: ${models.videoModel})...`);
+
+        try {
+          const submitTimeoutMs = 120000;
+          const startResult = await Promise.race([
+            VideoGenerator.startVideoGeneration(
+              ai,
+              session,
+              models.videoModel,
+              approvedFirstFrameBuf,
+              approvedFirstFrameMime,
+              masterBuffers,
+              masterMimeTypes,
+              finalVeoPrompt,
+              identitySpec,
+              undefined,
+              '',
+              sceneMode,
+              characterDescription,
+              durationSeconds,
+              taskId,
+              expectedProviderStorageUri
+            ),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('云端视频模型提交接口响应超时 (120s)，请检查 API 配额或算力连接后重试。')), submitTimeoutMs)
+            )
+          ]);
+
+          const rec = serverVideoTaskStore.get(taskId);
+          if (!rec) return;
+
+          rec.submitHttpStatus = 200;
+          rec.updatedAt = Date.now();
+
+          if (startResult.videoBuffer) {
+            try {
+              const artifactMeta = await gcsArtifactStore.uploadVideoArtifact({
+                taskId,
+                videoBuffer: startResult.videoBuffer,
+                contentType: 'video/mp4',
+              });
+              ephemeralVideoStore.set(taskId, startResult.videoBuffer);
+              const settledTask = await settlePersistedVideoThroughQa({
+                taskId,
+                videoBuffer: startResult.videoBuffer,
+                artifactMeta,
+                session,
+                ai,
+                analysisModel: session.analysisModel || 'gemini-3.6-flash',
+                patch: {
+                  diagnostics: startResult.diagnostics,
+                  submitHttpStatus: 200,
+                },
+              });
+              serverVideoTaskStore.set(taskId, settledTask);
+              await taskStateMachineService.releaseLease(taskId, taskRecord.executionId);
+              console.log(`[Video Start Sync Settled] Task ${taskId} => ${settledTask.status} after durable video QA`);
+              return;
+            } catch (persistErr: any) {
+              console.error(`[Video Start GCS/QA Error] Task ${taskId}:`, persistErr);
+              const errObj = createStructuredError({
+                source: 'artifact_persist',
+                failureStage: 'artifact_persist',
+                httpStatus: 500,
+                customUserMessage: `视频生成成功但持久化或进入 QA 失败: ${persistErr?.message || persistErr}`,
+                endpointPathRedacted: '/api/videos/start',
+              });
+              const updates: Partial<ServerVideoTaskRecord> = {
+                status: 'artifact_persist_failed',
+                artifactPersisted: false,
+                error: `视频产物持久化失败: ${persistErr?.message || persistErr}`,
+                structuredError: errObj,
+                updatedAt: Date.now(),
+              };
+              if (firestoreTaskRepository.isAvailable()) await safeUpdateTaskRecord(taskId, updates);
+              return;
+            }
+          }
+
+          if (startResult.operationName) {
+            const submitted = await safeUpdateTaskRecord(taskId, {
+              status: 'submitted',
+              operationName: startResult.operationName,
+              diagnostics: startResult.diagnostics,
+              submitHttpStatus: 200,
+            });
+            await safeUpdateTaskRecord(taskId, {
+              status: 'polling',
+              operationName: startResult.operationName,
+              diagnostics: startResult.diagnostics,
+              submitHttpStatus: 200,
+              stateVersion: submitted.stateVersion,
+            });
+            await taskStateMachineService.releaseLease(taskId, taskRecord.executionId);
+            console.log(`[Video Start Success] 任务 ${taskId} 成功获取 OperationName: ${startResult.operationName}`);
+            return;
+          }
+
+          const updates: Partial<ServerVideoTaskRecord> = {
+            status: 'submission_outcome_unknown',
+            error: '云端返回响应但未能获取到有效 Operation Name，提单状态未知。',
+            submitHttpStatus: 200,
+          };
+          if (firestoreTaskRepository.isAvailable()) {
+            await safeUpdateTaskRecord(taskId, updates);
+          } else {
+            Object.assign(rec, updates);
+            serverVideoTaskStore.set(taskId, rec);
+            saveTasksToDisk(serverVideoTaskStore);
+          }
+        } catch (invokeErr: any) {
+          console.error(`[Video Start Failed] Task ${taskId} 提交失败:`, invokeErr);
+          const rec = serverVideoTaskStore.get(taskId);
+          if (rec) {
+            const httpStatus = invokeErr?.httpStatus || 500;
+            const rawSubmitError = String(invokeErr?.message || invokeErr || '');
+            const definitiveHttpStatuses = new Set([400, 401, 403, 404, 409, 422, 429]);
+            const isAmbiguousSubmitFailure =
+              !definitiveHttpStatuses.has(Number(invokeErr?.httpStatus)) &&
+              /(响应超时|timeout|timed out|ECONNRESET|socket hang up|fetch failed|network error|connection reset|aborted)/i.test(rawSubmitError);
+
+            const errObj = createStructuredError({
+              source: 'vertex_submit',
+              failureStage: 'submit',
+              httpStatus: isAmbiguousSubmitFailure ? 504 : httpStatus,
+              rawError: invokeErr,
+              customUserMessage: isAmbiguousSubmitFailure
+                ? 'Veo 提交请求的结果无法确认。为避免重复扣费，系统已阻止新的 Veo 提交；请先核实或清理该未知任务。'
+                : undefined,
+              endpointPathRedacted: '/api/videos/start',
+            });
+            const updates: Partial<ServerVideoTaskRecord> = isAmbiguousSubmitFailure
+              ? {
+                  status: 'submission_outcome_unknown',
+                  failureReason: 'submission_outcome_unknown' as any,
+                  retryMode: 'NO_RETRY',
+                  error: 'Veo 提交结果未知，禁止自动或直接重新生成，以避免重复扣费。',
+                  structuredError: errObj,
+                  submitHttpStatus: null,
+                }
+              : {
+                  status: 'failed',
+                  error: invokeErr?.message || errObj.userMessage || '提单被云端明确拒绝或失败，可安全重试。',
+                  structuredError: errObj,
+                  submitHttpStatus: httpStatus,
+                };
+            if (firestoreTaskRepository.isAvailable()) {
+              await safeUpdateTaskRecord(taskId, updates);
+            } else {
+              Object.assign(rec, updates);
+              serverVideoTaskStore.set(taskId, rec);
+              saveTasksToDisk(serverVideoTaskStore);
+            }
+            if (taskRecord.executionId) {
+              await taskStateMachineService.releaseLease(taskId, taskRecord.executionId).catch(() => false);
+            }
+          }
+        }
+      })();
+
+      // Return only after the provider submission outcome has been durably recorded.
+      const durableTask = await firestoreTaskRepository.getTask(taskId);
+      return res.json({
+        accepted: durableTask?.status !== 'failed',
+        serverPersisted: true,
+        taskId,
+        status: durableTask?.status || 'preparing',
+        submissionState: durableTask?.status === 'submission_outcome_unknown'
+          ? 'outcome_unknown'
+          : durableTask?.operationName
+            ? 'submitted'
+            : durableTask?.status === 'submitting'
+              ? 'submitting'
+              : durableTask?.status === 'preparing'
+                ? 'reserved'
+                : 'not_submitted',
+        operationNamePresent: Boolean(durableTask?.operationName),
+        operationName: durableTask?.operationName,
+        isIdempotentReuse: false,
+        createdAt: durableTask?.createdAt || taskRecord.createdAt,
+        updatedAt: durableTask?.updatedAt || taskRecord.updatedAt,
+        engine: durableTask?.modelId || models.videoModel,
+        videoDataUrl: durableTask?.videoDataUrl,
+        artifactPersisted: durableTask?.artifactPersisted,
+        qaReport: durableTask?.qaReport,
+        identityQaStatus: durableTask?.identityQaStatus,
+        requiresManualApproval: durableTask?.status === 'qa_pending' && durableTask?.identityQaStatus === 'review',
+      });
+    } catch (err: unknown) {
+      const httpStatus = (err as any)?.httpStatus || 500;
+      const source = (err as any)?.source || 'vertex_submit';
+      const failureStage = (err as any)?.failureStage || 'submit';
+      const errObj = createStructuredError({
+        source,
+        failureStage,
+        httpStatus,
+        rawError: err,
+        endpointPathRedacted: '/api/videos/start',
+      });
+
+      // A process-memory record is never durable evidence. If Firestore persistence failed,
+      // report serverPersisted=false rather than manufacturing a local authoritative task.
+      const serverPersisted = false;
+
+      return res.status(httpStatus).json({
+        accepted: false,
+        serverPersisted,
+        taskId: req.body?.taskId || null,
+        status: 'failed',
+        submissionState: 'not_submitted',
+        operationNamePresent: false,
+        isIdempotentReuse: false,
+        error: errObj.userMessage || '启动视频生成任务失败',
+        structuredError: errObj,
+      });
+    }
+  });
+
+  // Video Task List Endpoint for Task History Page Syncing
+  app.get('/api/videos/list', async (req, res) => {
+    try {
+      const connectionId = req.headers['x-connection-id'] as string;
+      const now = Date.now();
+      let hasUpdates = false;
+
+      if (!firestoreTaskRepository.isAvailable()) {
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'internal_api',
+          httpStatus: 503,
+          customUserMessage: '存储服务不可用 (Firestore unavailable)。无法获取任务列表。',
+          endpointPathRedacted: '/api/videos/list',
+        });
+        return res.status(503).json({
+          tasks: [],
+          storageAuthority: 'unavailable',
+          error: '存储服务不可用',
+          structuredError: errObj,
+        });
+      }
+
+      let tasksFromStore: ServerVideoTaskRecord[] = [];
+      try {
+        const limitParam = parseInt(req.query.limit as string, 10);
+        const fetchLimit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(100, limitParam) : 20;
+        tasksFromStore = await firestoreTaskRepository.listTasks(fetchLimit);
+        for (const t of tasksFromStore) {
+          serverVideoTaskStore.set(t.taskId || t.id, t);
+        }
+      } catch (fsErr: any) {
+        console.warn('[Firestore listTasks Error]:', fsErr?.message || fsErr);
+        const errStr = String(fsErr?.message || fsErr);
+        const isTransient = fsErr?.code === 14 || fsErr?.code === 'UNAVAILABLE' || fsErr?.code === 8 || fsErr?.code === 'RESOURCE_EXHAUSTED' || errStr.includes('UNAVAILABLE') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('Quota') || errStr.includes('timeout');
+        const httpCode = isTransient ? 503 : 500;
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'internal_api',
+          httpStatus: httpCode,
+          customUserMessage: `Firestore 读取任务列表失败: ${fsErr?.message || fsErr}`,
+          endpointPathRedacted: '/api/videos/list',
+        });
+        return res.status(httpCode).json({
+          tasks: [],
+          storageAuthority: 'firestore',
+          error: '存储服务读取异常',
+          structuredError: errObj,
+        });
+      }
+
+      for (let i = 0; i < tasksFromStore.length; i++) {
+        const candidate = tasksFromStore[i];
+        if (candidate?.status !== 'preparing') continue;
+        try {
+          const reconciled = await taskStateMachineService.reconcileStalePreparingTask({
+            taskId: candidate.taskId || candidate.id,
+            now,
+          });
+          tasksFromStore[i] = reconciled.task;
+          serverVideoTaskStore.set(reconciled.task.taskId || reconciled.task.id, reconciled.task);
+          if (reconciled.failed) hasUpdates = true;
+        } catch (prepErr) {
+          console.warn('[Pre-Provider Preparing Reconcile Warning]:', prepErr);
+        }
+      }
+
+      const tasks = tasksFromStore
+        .filter((rec) => {
+          if (!rec) return false;
+          if (connectionId && rec.connectionId) {
+            return rec.connectionId === connectionId;
+          }
+          return true;
+        })
+        .map((rec) => {
+          // A missing operation after the request durability window is ambiguous, not a
+          // proven provider rejection. Keep admission fail-closed to prevent duplicate cost.
+          const isStuckWithoutOpName = rec.status === 'submitting' && !rec.operationName && (now - rec.createdAt) > 30000;
+          const isKnownOperationTimedOut = Boolean(rec.operationName)
+            && (rec.status === 'polling' || (rec.status as string) === 'submitted')
+            && (now - rec.createdAt) > 1800000;
+
+          if (isStuckWithoutOpName) {
+            rec.status = 'submission_outcome_unknown';
+            rec.failureReason = 'submission_outcome_unknown' as any;
+            rec.retryMode = 'NO_RETRY';
+            rec.error = 'Veo 提交结果未知，已阻止新的 Veo 提交，以避免重复扣费。';
+            rec.structuredError = createStructuredError({
+              source: 'vertex_submit',
+              failureStage: 'submit',
+              httpStatus: 504,
+              customUserMessage: 'Veo 提交结果未知，已阻止新的 Veo 提交；请先核实或清理该任务。',
+              endpointPathRedacted: '/api/videos/list',
+            });
+            rec.updatedAt = now;
+            hasUpdates = true;
+            firestoreTaskRepository.updateTask(rec.taskId || rec.id, {
+              status: 'submission_outcome_unknown',
+              failureReason: rec.failureReason,
+              retryMode: 'NO_RETRY',
+              error: rec.error,
+              structuredError: rec.structuredError,
+              updatedAt: now,
+            }).catch(() => {});
+          } else if (isKnownOperationTimedOut) {
+            rec.status = 'polling_timeout';
+            rec.failureReason = 'polling_timeout';
+            rec.retryMode = 'RETRY_POLL';
+            rec.error = 'Veo 长任务轮询超时，但已有 Operation Name，保留任务并继续阻止新的 Veo 提交。';
+            rec.structuredError = createStructuredError({
+              source: 'vertex_polling',
+              failureStage: 'polling',
+              httpStatus: 504,
+              customUserMessage: '云端长任务轮询超时，但 Provider Operation 已存在。请继续恢复/轮询该 Operation，禁止直接重新生成。',
+              endpointPathRedacted: '/api/videos/list',
+            });
+            rec.updatedAt = now;
+            hasUpdates = true;
+            firestoreTaskRepository.updateTask(rec.taskId || rec.id, {
+              status: 'polling_timeout',
+              failureReason: 'polling_timeout',
+              retryMode: 'RETRY_POLL',
+              error: rec.error,
+              structuredError: rec.structuredError,
+              updatedAt: now,
+            }).catch(() => {});
+          }
+
+          const isCompletedWithoutVideo = rec.status === 'completed' && !rec.videoDataUrl;
+          const effectiveStatus = isCompletedWithoutVideo ? 'failed' : rec.status;
+
+          let effectiveFailureReason = rec.failureReason;
+          let effectiveRetryMode = rec.retryMode;
+          let userMsg: string | null = null;
+
+          if (effectiveStatus === 'failed') {
+            if (isCompletedWithoutVideo) {
+              const isRai = rec.failureReason === 'output_rai_filtered' || rec.failureReason === 'input_safety_blocked';
+              effectiveFailureReason = isRai ? rec.failureReason : 'artifact_missing';
+              effectiveRetryMode = isRai ? 'REWRITE_INPUT_THEN_REGENERATE' : 'RETRY_DOWNLOAD';
+              userMsg = isRai
+                ? 'Google安全过滤未返回视频，请调整输入图片或动作描述后重新生成。'
+                : '云端任务已完成，但视频文件尚未成功持久化，正在恢复已有产物。';
+            } else {
+              effectiveFailureReason = rec.failureReason || rec.structuredError?.failureReason || 'unknown';
+              effectiveRetryMode = rec.retryMode || rec.structuredError?.retryMode || 'SAFE_TO_REGENERATE';
+              userMsg = rec.structuredError?.userMessage || (typeof rec.error === 'string' ? rec.error : null) || (effectiveFailureReason === 'output_rai_filtered' ? 'Google安全过滤未返回视频，请调整输入图片或动作描述后重新生成。' : '视频生成未成功完成');
+            }
+          }
+
+          const techMsg = rec.structuredError?.technicalMessageRedacted || (typeof rec.error === 'string' ? rec.error : null);
+
+          return {
+            id: rec.id || rec.taskId,
+            taskId: rec.taskId,
+            characterId: rec.characterId || '',
+            characterName: rec.characterName || '默认虚拟角色',
+            sceneMode: rec.sceneMode || 'animate_existing_character',
+            sceneImageUrl: rec.sceneImageUrl || null,
+            userPromptChinese: rec.rawUserPrompt || rec.compiledPrompt || '8s 动效视频生成',
+            normalizedPromptEnglish: rec.compiledPrompt || rec.rawUserPrompt || '',
+            veoSafePrompt: rec.veoSafePrompt || null,
+            failureReason: effectiveFailureReason || null,
+            retryMode: effectiveRetryMode || null,
+            status: effectiveStatus,
+            progressStage: effectiveStatus === 'completed'
+              ? '视频生成完成'
+              : effectiveStatus === 'failed'
+              ? (userMsg || '视频生成未成功完成')
+              : effectiveStatus === 'preparing'
+                ? '准备提交 Veo（尚未调用 Provider）'
+                : '云端渲染中...',
+            progressPercent: effectiveStatus === 'completed' ? 100 : effectiveStatus === 'failed' ? 0 : effectiveStatus === 'preparing' ? 20 : 75,
+            resultVideoUrl: rec.videoDataUrl || null,
+            videoUri: rec.videoUri || null,
+            outputUri: rec.outputUri || null,
+            projectId: rec.projectId || null,
+            region: rec.region || null,
+            externalOperationName: rec.operationName || null,
+            error: effectiveStatus === 'failed' ? {
+              code: rec.structuredError?.source?.toUpperCase() || 'SERVER_FAILED',
+              stage: rec.structuredError?.failureStage || 'polling',
+              failureReason: effectiveFailureReason,
+              retryMode: effectiveRetryMode,
+              messageChinese: userMsg || '视频生成未成功完成',
+              technicalMessageRedacted: techMsg || 'Veo 渲染未输出视频数据',
+              httpStatus: rec.structuredError?.httpStatus || 400,
+              googleStatus: rec.structuredError?.googleStatus || null,
+              googleReason: rec.structuredError?.googleReason || null,
+              retryable: effectiveRetryMode !== 'NO_RETRY',
+              recommendedAction: effectiveRetryMode === 'REWRITE_INPUT_THEN_REGENERATE'
+                ? '请修改提示词或更换图片后重试'
+                : '请在下方点击【重试】',
+            } : null,
+            createdAt: rec.createdAt,
+            updatedAt: rec.updatedAt,
+            settings: {
+              aspectRatio: rec.aspectRatio || '9:16',
+              durationSeconds: rec.durationSeconds || 8,
+              resolution: rec.resolution || '720p',
+            }
+          };
+        })
+        .sort((a, b) => b.createdAt - a.createdAt);
+
+      if (hasUpdates) {
+        saveTasksToDisk(serverVideoTaskStore);
+      }
+
+      res.json({
+        tasks,
+        storageAuthority: getStorageAuthority(),
+      });
+    } catch (err) {
+      console.error('Failed to list video tasks:', err);
+      res.status(500).json({ error: '获取视频任务列表失败' });
+    }
+  });
+
+  // Delete Single Video Task Endpoint
+  app.delete('/api/videos/:taskId', async (req, res) => {
+    try {
+      const { taskId } = req.params;
+      if (!taskId) {
+        return res.status(400).json({ error: 'taskId 为必填项' });
+      }
+      if (!firestoreTaskRepository.isAvailable()) {
+        return res.status(503).json({
+          success: false,
+          storageAuthority: 'unavailable',
+          error: 'Firestore unavailable; task deletion was not performed.',
+        });
+      }
+
+      const existingTask = await firestoreTaskRepository.getTask(taskId);
+      if (!existingTask) {
+        return res.json({ success: true, deleted: false, deletedTaskId: taskId, storageAuthority: 'firestore' });
+      }
+
+      if (!isProviderTaskDeletionSafe(existingTask)) {
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'internal_api',
+          httpStatus: 409,
+          customUserMessage: '当前任务仍可能占用 Veo Provider，禁止删除。请先恢复或核实 Provider Operation，避免释放算力槽后发生重复提交或重复扣费。',
+          endpointPathRedacted: '/api/videos/:taskId',
+        });
+        return res.status(409).json({
+          success: false,
+          deleted: false,
+          failureReason: 'provider_task_delete_blocked',
+          taskId,
+          status: existingTask.status,
+          operationNamePresent: Boolean(existingTask.operationName),
+          retryMode: existingTask.retryMode || 'NO_RETRY',
+          storageAuthority: 'firestore',
+          error: errObj.userMessage,
+          structuredError: errObj,
+        });
+      }
+
+      const deleted = await firestoreTaskRepository.deleteTask(taskId);
+      if (deleted) {
+        serverVideoTaskStore.delete(taskId);
+        ephemeralVideoStore.delete(taskId);
+        ephemeralImageStore.delete(taskId);
+      }
+      return res.json({ success: true, deleted, deletedTaskId: taskId, storageAuthority: 'firestore' });
+    } catch (err) {
+      console.error('Failed to delete video task:', err);
+      return res.status(500).json({ error: '删除视频任务失败', storageAuthority: 'firestore' });
+    }
+  });
+
+  // Clear All Failed Tasks Endpoint
+  app.post('/api/videos/clear-failed', async (req, res) => {
+    try {
+      if (!firestoreTaskRepository.isAvailable()) {
+        return res.status(503).json({
+          success: false,
+          storageAuthority: 'unavailable',
+          error: 'Firestore unavailable; no tasks were deleted.',
+        });
+      }
+
+      const connectionId = req.headers['x-connection-id'] as string;
+      const tasks = await firestoreTaskRepository.listTasks(100);
+      let deletedCount = 0;
+      let protectedCount = 0;
+      for (const rec of tasks) {
+        const matchesConnection = !connectionId || !rec.connectionId || rec.connectionId === connectionId;
+        const isFailedOrStuck = rec.status === 'failed' ||
+          rec.status === 'artifact_persist_failed' ||
+          (rec.status as string) === 'submit_failed_safe_to_retry' ||
+          (rec.status as string) === 'orphaned_local_task';
+        if (!matchesConnection || !isFailedOrStuck) continue;
+        if (!isProviderTaskDeletionSafe(rec)) {
+          protectedCount++;
+          continue;
+        }
+
+        if (await firestoreTaskRepository.deleteTask(rec.taskId || rec.id)) {
+          serverVideoTaskStore.delete(rec.taskId || rec.id);
+          ephemeralVideoStore.delete(rec.taskId || rec.id);
+          ephemeralImageStore.delete(rec.taskId || rec.id);
+          deletedCount++;
+        }
+      }
+
+      return res.json({ success: true, deletedCount, protectedCount, storageAuthority: 'firestore' });
+    } catch (err) {
+      console.error('Failed to clear failed video tasks:', err);
+      return res.status(500).json({ error: '清空失败任务失败', storageAuthority: 'firestore' });
+    }
+  });
+
+  // Task Recovery Endpoint
+  app.post('/api/videos/recover-task', async (req, res) => {
+    try {
+      const { taskId, operationName, modelId, durationSeconds } = req.body;
+      if (!taskId || !operationName) {
+        return res.status(400).json({ error: 'taskId 与 operationName 为必填项' });
+      }
+      const operationNameString = String(operationName).trim();
+      const operationNameLooksValid = operationNameString.length <= 2048
+        && !/\s/.test(operationNameString)
+        && /(^|\/)operations\/[^/]+$/.test(operationNameString);
+      if (!operationNameLooksValid) {
+        return res.status(400).json({
+          success: false,
+          failureReason: 'provider_operation_name_invalid',
+          error: 'operationName 格式无效，必须是 Provider 返回的完整 Operation Name。',
+        });
+      }
+      if (!firestoreTaskRepository.isAvailable()) {
+        return res.status(503).json({
+          success: false,
+          storageAuthority: 'unavailable',
+          error: 'Firestore unavailable; recovery record was not created.',
+        });
+      }
+
+      const connectionId = req.headers['x-connection-id'] as string;
+      const session = CredentialService.getSession(connectionId);
+      if (!session) {
+        return res.status(401).json({
+          success: false,
+          failureReason: 'compute_session_unavailable',
+          error: '算力连接已失效，无法核实 Provider Operation。',
+        });
+      }
+
+      const existing = await firestoreTaskRepository.getTask(taskId);
+      if (existing && existing.status !== 'submission_outcome_unknown') {
+        serverVideoTaskStore.set(taskId, existing);
+        return res.json({
+          success: true,
+          providerVerified: false,
+          message: '任务已在 Firestore 持久化存储中，未修改现有 Provider 状态',
+          task: existing,
+          storageAuthority: 'firestore',
+        });
+      }
+
+      // An operationName supplied by a client is not evidence by itself. Reuse the
+      // production Provider polling path: a successful read proves that this operation
+      // exists and is accessible with the active/reconstructed credential session.
+      const ai = await GeminiClientFactory.getClientForSession(session);
+      let verification: Awaited<ReturnType<typeof VideoGenerator.pollVeoOperation>>;
+      try {
+        verification = await VideoGenerator.pollVeoOperation(ai, session, operationNameString);
+      } catch (verifyErr: any) {
+        const errObj = createStructuredError({
+          source: 'vertex_polling',
+          failureStage: 'polling',
+          httpStatus: 422,
+          rawError: verifyErr,
+          customUserMessage: '无法核实该 Provider Operation；任务保持 submission_outcome_unknown，未释放算力槽，也未发起新的 Veo 生成。',
+          endpointPathRedacted: '/api/videos/recover-task',
+        });
+        return res.status(422).json({
+          success: false,
+          providerVerified: false,
+          failureReason: 'provider_operation_not_verified',
+          status: existing?.status || 'not_found',
+          storageAuthority: 'firestore',
+          error: errObj.userMessage,
+          structuredError: errObj,
+        });
+      }
+
+      const expectedStoragePrefix = resolveVeoStorageUri(taskId);
+      const linkage = evaluateProviderOperationLinkage({
+        taskId,
+        operationDone: Boolean(verification.done),
+        videoUri: verification.videoUri,
+        expectedStoragePrefix,
+      });
+      if (!linkage.proven) {
+        const isStillRunning = linkage.reason === 'operation_still_running';
+        const errObj = createStructuredError({
+          source: 'vertex_polling',
+          failureStage: 'polling',
+          httpStatus: isStillRunning ? 409 : 422,
+          customUserMessage: isStillRunning
+            ? 'Provider Operation 已核实存在，但尚未完成，当前无法证明它属于该 unknown task。任务继续保持锁定；待 Operation 完成后再次恢复。'
+            : 'Provider Operation 存在，但其输出无法证明属于该 taskId。任务继续保持 submission_outcome_unknown，未释放算力槽。',
+          endpointPathRedacted: '/api/videos/recover-task',
+        });
+        return res.status(isStillRunning ? 409 : 422).json({
+          success: false,
+          providerVerified: true,
+          providerTaskLinked: false,
+          failureReason: 'provider_operation_linkage_not_proven',
+          linkageReason: linkage.reason,
+          expectedStoragePrefix,
+          status: existing?.status || 'not_found',
+          storageAuthority: 'firestore',
+          error: errObj.userMessage,
+          structuredError: errObj,
+        });
+      }
+
+      if (existing && existing.status === 'submission_outcome_unknown') {
+        const reconciled = await taskStateMachineService.transitionTask({
+          taskId,
+          toStatus: 'polling',
+          expectedStateVersion: existing.stateVersion ?? existing.statusVersion ?? 1,
+          patch: {
+            operationName: operationNameString,
+            retryMode: 'RETRY_POLL',
+            failureReason: null as any,
+            error: null as any,
+            structuredError: null as any,
+            submitHttpStatus: existing.submitHttpStatus ?? 200,
+            pollHttpStatus: 200,
+            pollAttempt: (existing.pollAttempt || 0) + 1,
+            executionId: null as any,
+            leaseOwner: null as any,
+            leaseExpiresAt: null as any,
+            heartbeatAt: null as any,
+          },
+        });
+        serverVideoTaskStore.set(taskId, reconciled);
+        return res.json({
+          success: true,
+          providerVerified: true,
+          providerTaskLinked: true,
+          providerDone: Boolean(verification.done),
+          message: '已绑定经 GCS task 专属输出证明的 Provider Operation，并恢复现有任务轮询；未发起新的 Veo 生成。',
+          task: reconciled,
+          storageAuthority: 'firestore',
+        });
+      }
+
+      const now = Date.now();
+      const recoveredRecord: ServerVideoTaskRecord = {
+        id: taskId,
+        taskId,
+        operationName: operationNameString,
+        status: 'polling',
+        modelId: modelId || session.videoModel || 'veo-3.1-fast-generate-001',
+        projectId: session.projectId,
+        region: session.region || session.location || 'us-central1',
+        connectionId: session.connectionId,
+        durationSeconds: Number(durationSeconds) || 4,
+        aspectRatio: '9:16',
+        resolution: '720p',
+        generateAudio: false,
+        submitHttpStatus: 200,
+        pollHttpStatus: 200,
+        pollAttempt: 1,
+        createdAt: now - 10000,
+        updatedAt: now,
+        evidenceSource: 'firestore',
+      };
+
+      await firestoreTaskRepository.createTask(recoveredRecord);
+      serverVideoTaskStore.set(taskId, recoveredRecord);
+      return res.json({
+        success: true,
+        providerVerified: true,
+        providerTaskLinked: true,
+        providerDone: Boolean(verification.done),
+        message: '已通过 GCS task 专属输出核实 Provider Operation，并安全初始化 Firestore 恢复任务；未发起新的 Veo 生成。',
+        task: recoveredRecord,
+        storageAuthority: 'firestore',
+      });
+    } catch (err: any) {
+      console.error('Failed to recover video task:', err);
+      const isAdmissionBusy = err?.code === 'PROVIDER_ADMISSION_BUSY';
+      return res.status(isAdmissionBusy ? 409 : 500).json({
+        success: false,
+        storageAuthority: 'firestore',
+        failureReason: isAdmissionBusy ? 'provider_admission_busy' : 'recovery_failed',
+        blockingTaskId: isAdmissionBusy ? err?.blockingTaskId : undefined,
+        blockingStatus: isAdmissionBusy ? err?.blockingStatus : undefined,
+        error: err?.message || '恢复视频任务失败',
+      });
+    }
+  });
+
+  // Debug endpoint for task store inspection
+  app.get('/api/videos/debug-store', async (_req, res) => {
+    if (!firestoreTaskRepository.isAvailable()) {
+      return res.status(503).json({
+        storageAuthority: 'unavailable',
+        evidenceSource: 'unavailable',
+        memoryCacheEnabled: true,
+        memoryCacheCount: serverVideoTaskStore.size,
+        count: 0,
+        tasks: [],
+        error: 'Firestore unavailable; memory cache is intentionally not returned as authoritative evidence.',
+      });
+    }
+
+    try {
+      const tasksFromStore = await firestoreTaskRepository.listTasks(100);
+      for (const task of tasksFromStore) {
+        serverVideoTaskStore.set(task.taskId || task.id, task);
+      }
+      const tasks = tasksFromStore.map((rec) => ({
+        id: rec.id || rec.taskId,
+        connectionId: rec.connectionId,
+        status: rec.status,
+        operationName: rec.operationName || null,
+        modelId: rec.modelId,
+        durationSeconds: rec.durationSeconds,
+        createdAt: rec.createdAt,
+        updatedAt: rec.updatedAt,
+        idempotencyKey: rec.idempotencyKey || null,
+        error: rec.error || null,
+        evidenceSource: 'firestore',
+      }));
+      return res.json({
+        storageAuthority: 'firestore',
+        memoryCacheEnabled: true,
+        memoryCacheCount: serverVideoTaskStore.size,
+        count: tasks.length,
+        tasks,
+      });
+    } catch (err: any) {
+      return res.status(503).json({
+        storageAuthority: 'firestore',
+        evidenceSource: 'firestore',
+        count: 0,
+        tasks: [],
+        error: err?.message || 'Firestore diagnostic read failed.',
+      });
+    }
+  });
+
+  // Task Audit Endpoint (Read-only System & Task Audit)
+  app.get('/api/videos/audit', async (_req, res) => {
+    const kService = process.env.K_SERVICE || 'not_deployed';
+    const kRevision = process.env.K_REVISION || 'not_deployed';
+    const buildVersion = '9.0.0-v9.0-cinema';
+    const schemaVersion = 'v2.0-stable';
+
+    const isDeployedService0804 = kService === 'service-0804' && kRevision !== 'not_deployed';
+    const disclaimer = !isDeployedService0804
+      ? '以下结果仅来自构建或预览环境，不能代表service-0804线上任务。'
+      : null;
+
+    if (!firestoreTaskRepository.isAvailable()) {
+      const errObj = createStructuredError({
+        source: 'internal_api',
+        failureStage: 'internal_api',
+        httpStatus: 503,
+        customUserMessage: '存储服务不可用 (Firestore unavailable)。无法进行审计查询。',
+        endpointPathRedacted: '/api/videos/audit',
+      });
+      return res.status(503).json({
+        K_SERVICE: kService,
+        K_REVISION: kRevision,
+        buildVersion,
+        schemaVersion,
+        evidenceSource: 'unavailable',
+        storageAuthority: 'unavailable',
+        memoryCacheEnabled: true,
+        disclaimer,
+        taskCount: 0,
+        tasks: [],
+        error: '存储服务不可用',
+        structuredError: errObj,
+      });
+    }
+
+    const storageAuthority = getStorageAuthority();
+    const globalEvidenceSource = 'firestore';
+
+    let tasksFromStore: ServerVideoTaskRecord[] = [];
+    try {
+      tasksFromStore = await firestoreTaskRepository.listTasks(100);
+      for (const t of tasksFromStore) {
+        serverVideoTaskStore.set(t.taskId || t.id, t);
+      }
+    } catch (fsErr: any) {
+      console.warn('[Firestore Audit listTasks Error]:', fsErr?.message || fsErr);
+      const errStr = String(fsErr?.message || fsErr);
+      const isTransient = fsErr?.code === 14 || fsErr?.code === 'UNAVAILABLE' || fsErr?.code === 8 || fsErr?.code === 'RESOURCE_EXHAUSTED' || errStr.includes('UNAVAILABLE') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('Quota') || errStr.includes('timeout');
+      const httpCode = isTransient ? 503 : 500;
+      const errObj = createStructuredError({
+        source: 'internal_api',
+        failureStage: 'internal_api',
+        httpStatus: httpCode,
+        customUserMessage: `Firestore 读取审计任务失败: ${fsErr?.message || fsErr}`,
+        endpointPathRedacted: '/api/videos/audit',
+      });
+      return res.status(httpCode).json({
+        K_SERVICE: kService,
+        K_REVISION: kRevision,
+        buildVersion,
+        schemaVersion,
+        evidenceSource: 'firestore',
+        storageAuthority: 'firestore',
+        memoryCacheEnabled: true,
+        disclaimer,
+        taskCount: 0,
+        tasks: [],
+        error: '存储服务读取异常',
+        structuredError: errObj,
+      });
+    }
+
+    const tasks = tasksFromStore.map((rec) => {
+      const createdAtEpochMs = Number(rec.createdAt) || Date.now();
+      const dateObj = new Date(createdAtEpochMs);
+      const createdAtUtcIso = dateObj.toISOString();
+      const createdAtLocalIso = dateObj.toISOString();
+
+      const pollAttempt = Number(rec.pollAttempt) || 0;
+      const hasOperationName = Boolean(rec.operationName);
+
+      // Enforce lastPolledAt = null if pollAttempt === 0
+      const lastPolledAt = pollAttempt > 0 ? (rec.lastPolledAt || rec.updatedAt || null) : null;
+
+      // Enforce status mapping
+      let mappedStatus: AuditTaskStatus = rec.status as AuditTaskStatus;
+      if ((rec.status as string) === 'processing' || (rec.status as string) === 'submitted' || (rec.status as string) === 'draft') {
+        mappedStatus = 'polling';
+      } else if ((rec.status as string) === 'submit_failed_safe_to_retry') {
+        mappedStatus = 'failed';
+      }
+
+      // Enforce submissionState mapping
+      let submissionState: TaskSubmissionState = 'not_submitted';
+      if (mappedStatus === 'polling' || mappedStatus === 'polling_timeout' || mappedStatus === 'completed') {
+        submissionState = 'submitted';
+      } else if (mappedStatus === 'submitting') {
+        submissionState = 'submitting';
+      } else if (mappedStatus === 'validating' || mappedStatus === 'preparing') {
+        submissionState = 'reserved';
+      } else if (mappedStatus === 'submission_outcome_unknown') {
+        submissionState = 'outcome_unknown';
+      } else if (mappedStatus === 'failed') {
+        submissionState = hasOperationName ? 'submitted' : 'not_submitted';
+      } else if (mappedStatus === 'orphaned_local_task') {
+        submissionState = 'not_submitted';
+      }
+
+      // Enforce RAI fields (must be null if no upstream response received)
+      const hasGoogleResponse = Boolean(rec.submitHttpStatus || rec.pollHttpStatus || rec.operationName);
+      const raiMediaFilteredCount = hasGoogleResponse && rec.raiMediaFilteredCount !== undefined ? rec.raiMediaFilteredCount : null;
+      const raiStatus = hasGoogleResponse && rec.raiStatus ? rec.raiStatus : 'unknown';
+
+      return {
+        taskId: rec.taskId || rec.id,
+        createdAtEpochMs,
+        createdAtUtcIso,
+        createdAtLocalIso,
+        status: mappedStatus,
+        submissionState,
+        idempotencyKeyPrefix: rec.idempotencyKey ? rec.idempotencyKey.slice(0, 8) : null,
+        operationNamePresent: hasOperationName,
+        operationNamePrefix: hasOperationName && rec.operationName ? (rec.operationName.slice(0, 24) + '...') : null,
+        pollAttempt,
+        lastPolledAt,
+        lastSubmitAttemptAt: rec.lastSubmitAttemptAt || rec.createdAt || null,
+        submitTimedOutAt: rec.submitTimedOutAt || (mappedStatus === 'submission_outcome_unknown' ? rec.updatedAt : null),
+        upstreamEndpoint: rec.upstreamEndpoint || (hasOperationName ? `${rec.region || 'us-central1'}-aiplatform.googleapis.com` : null),
+        upstreamHttpStatus: rec.submitHttpStatus || rec.pollHttpStatus || null,
+        upstreamErrorCode: rec.upstreamErrorCode || rec.structuredError?.source || null,
+        upstreamErrorMessage: rec.upstreamErrorMessage || rec.error || null,
+        raiMediaFilteredCount,
+        raiStatus,
+        outputBucket: rec.outputBucket || null,
+        outputObjectPath: rec.outputObjectPath || null,
+        artifactPersisted: Boolean(rec.artifactPersisted),
+        evidenceSource: rec.evidenceSource || 'firestore',
+        K_REVISION: kRevision,
+      };
+    });
+
+    const storageConfig = assertProductionStorageConfig();
+    const expectedVeoOutputBucket = storageConfig.expectedBucket;
+    const environmentVeoOutputBucket = storageConfig.environmentBucket;
+    const effectiveVeoOutputBucket = storageConfig.effectiveBucket;
+    const bucketDriftDetected = storageConfig.bucketDriftDetected;
+    const storageConfigValid = storageConfig.valid;
+    const resolvedStorageUriPrefix = storageConfigValid ? `gs://${effectiveVeoOutputBucket}/veo/` : null;
+    const storageConfigSource = bucketDriftDetected
+      ? 'drift_rejected'
+      : (process.env.VEO_OUTPUT_BUCKET ? 'env' : 'missing');
+
+    return res.json({
+      K_SERVICE: kService,
+      K_REVISION: kRevision,
+      buildVersion,
+      schemaVersion,
+      evidenceSource: globalEvidenceSource,
+      storageAuthority,
+      artifactAuthority: 'cloud_storage',
+      expectedVeoOutputBucket,
+      environmentVeoOutputBucket,
+      effectiveVeoOutputBucket,
+      bucketDriftDetected,
+      storageConfigValid,
+      resolvedStorageUriPrefix,
+      storageConfigSource,
+      VEO_OUTPUT_BUCKET: effectiveVeoOutputBucket || null,
+      veoOutputBucket: effectiveVeoOutputBucket || null,
+      gcsEnabled: storageConfigValid,
+      memoryCacheEnabled: true,
+      disclaimer,
+      taskCount: tasks.length,
+      tasks,
+    });
+  });
+
+  // Async Video Task Status Query Endpoint
+  app.get('/api/videos/status/:taskId', async (req, res) => {
+    try {
+      const { taskId } = req.params;
+      if (!firestoreTaskRepository.isAvailable()) {
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'internal_api',
+          httpStatus: 503,
+          customUserMessage: '存储服务不可用 (Firestore unavailable)。无法查询任务状态。',
+          endpointPathRedacted: `/api/videos/status/${taskId}`,
+        });
+        return res.status(503).json({
+          storageAuthority: 'unavailable',
+          status: 'failed',
+          error: '存储服务不可用',
+          structuredError: errObj,
+        });
+      }
+
+      let record: ServerVideoTaskRecord | null = null;
+      try {
+        record = await firestoreTaskRepository.getTask(taskId);
+      } catch (fsErr: any) {
+        console.error(`[Firestore Status Query Error] Task ${taskId}:`, fsErr);
+        const errStr = String(fsErr?.message || fsErr);
+        const isTransient = fsErr?.code === 14 || fsErr?.code === 'UNAVAILABLE' || fsErr?.code === 8 || fsErr?.code === 'RESOURCE_EXHAUSTED' || errStr.includes('UNAVAILABLE') || errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('Quota') || errStr.includes('timeout');
+        const httpCode = isTransient ? 503 : 500;
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'internal_api',
+          httpStatus: httpCode,
+          customUserMessage: `Firestore 读取任务状态失败: ${fsErr?.message || fsErr}`,
+          endpointPathRedacted: `/api/videos/status/${taskId}`,
+        });
+        return res.status(httpCode).json({
+          storageAuthority: 'firestore',
+          status: 'failed',
+          error: '存储服务读取异常',
+          structuredError: errObj,
+        });
+      }
+
+      if (!record) {
+        const errObj = createStructuredError({
+          source: 'internal_api',
+          failureStage: 'internal_api',
+          httpStatus: 404,
+          customUserMessage: '视频生成任务不存在或已失效。',
+          endpointPathRedacted: `/api/videos/status/${taskId}`,
+        });
+        return res.status(404).json(errObj);
+      }
+
+      // Update memory cache with authority record from Firestore
+      serverVideoTaskStore.set(taskId, record);
+
+      if (record.status === 'preparing') {
+        const reconciled = await taskStateMachineService.reconcileStalePreparingTask({ taskId });
+        record = reconciled.task;
+        serverVideoTaskStore.set(taskId, record);
+        if (record.status === 'preparing') {
+          return res.json({
+            status: 'preparing',
+            submissionState: 'reserved',
+            providerInvocationAuthorized: false,
+            progressStage: '准备提交 Veo（尚未调用 Provider）',
+            elapsedSeconds: Math.floor((Date.now() - record.createdAt) / 1000),
+          });
+        }
+      }
+
+      if (record.status === 'qa_pending') {
+        if (
+          record.identityQaStatus === 'review' ||
+          record.automaticRetryPlan?.action === 'MANUAL_REVIEW'
+        ) {
+          return res.json({
+            status: 'qa_pending',
+            videoDataUrl: record.videoDataUrl || `/api/videos/stream/${taskId}`,
+            sizeBytes: record.sizeBytes,
+            durationSeconds: record.durationSeconds,
+            qaReport: record.qaReport,
+            identityQaStatus: 'review',
+            requiresManualApproval: true,
+            reviewActions: ['accepted', 'rejected'],
+            humanReviewDecision: record.humanReviewDecision,
+            humanReviewRecord: record.humanReviewRecord,
+            stateVersion: record.stateVersion,
+            automaticRetryPlan: record.automaticRetryPlan,
+            retryHistory: record.retryHistory,
+            artifactPersisted: true,
+          });
+        }
+
+        const qaConnectionId = (req.headers['x-connection-id'] as string) || record.connectionId;
+        const qaSession = CredentialService.getSession(qaConnectionId);
+        if (!qaSession) {
+          return res.json({
+            status: 'qa_pending',
+            videoDataUrl: record.videoDataUrl || `/api/videos/stream/${taskId}`,
+            qaReport: record.qaReport,
+            identityQaStatus: record.identityQaStatus || 'not_run',
+            requiresConnection: true,
+            artifactPersisted: true,
+          });
+        }
+
+        const qaVideoBuffer = await gcsArtifactStore.fetchArtifactBuffer(
+          record.outputBucket!,
+          record.outputObjectPath!,
+          { session: qaSession }
+        );
+        const qaAi = await GeminiClientFactory.getClientForSession(qaSession);
+        const settled = await settlePersistedVideoThroughQa({
+          taskId,
+          videoBuffer: qaVideoBuffer,
+          artifactMeta: {
+            outputBucket: record.outputBucket!,
+            outputObjectPath: record.outputObjectPath!,
+            videoUri: record.videoUri!,
+            sizeBytes: record.sizeBytes || qaVideoBuffer.length,
+            contentType: record.contentType || 'video/mp4',
+            artifactPersistedAt: record.artifactPersistedAt || Date.now(),
+          },
+          session: qaSession,
+          ai: qaAi,
+          analysisModel: qaSession.analysisModel || 'gemini-3.6-flash',
+          patch: { pollAttempt: record.pollAttempt, pollHttpStatus: record.pollHttpStatus },
+        });
+        serverVideoTaskStore.set(taskId, settled);
+        return res.json({
+          status: settled.status,
+          videoDataUrl: settled.videoDataUrl || `/api/videos/stream/${taskId}`,
+          sizeBytes: settled.sizeBytes,
+          durationSeconds: settled.durationSeconds,
+          qaReport: settled.qaReport,
+          identityQaStatus: settled.identityQaStatus,
+          requiresManualApproval: settled.status === 'qa_pending' && settled.identityQaStatus === 'review',
+          artifactPersisted: settled.artifactPersisted,
+          diagnostics: settled.diagnostics,
+          automaticRetryPlan: settled.automaticRetryPlan,
+          retryHistory: settled.retryHistory,
+        });
+      }
+
+      if (record.status === 'completed') {
+        return res.json({
+          status: 'completed',
+          videoDataUrl: record.videoDataUrl,
+          sizeBytes: record.sizeBytes,
+          durationSeconds: record.durationSeconds,
+          qaReport: record.qaReport,
+          diagnostics: record.diagnostics,
+        });
+      }
+
+      if (record.status === 'failed') {
+        if (record.failureReason === 'pre_provider_abandoned' || record.failureReason === 'pre_provider_authorization_failed') {
+          return res.json({
+            status: 'failed',
+            submissionState: 'not_submitted',
+            providerInvocationAuthorized: false,
+            failureReason: record.failureReason,
+            retryMode: record.retryMode || 'SAFE_TO_REGENERATE',
+            error: record.error,
+            structuredError: record.structuredError,
+          });
+        }
+        const force = req.query.force === 'true' || req.query.forceQuery === 'true' || req.query.retry === 'true';
+        if (!force || !record.operationName) {
+          const errObj = createStructuredError({
+            source: 'vertex_polling',
+            failureStage: 'polling',
+            httpStatus: 500,
+            customUserMessage: record.error || '视频生成任务已失败。',
+            endpointPathRedacted: `/api/videos/status/${taskId}`,
+          });
+          return res.json({
+            status: 'failed',
+            error: record.error || '视频生成失败',
+            structuredError: errObj,
+          });
+        }
+      }
+
+      if (
+        record.status === 'generating' &&
+        record.retrySubmissionState === 'reserved' &&
+        !record.operationName
+      ) {
+        const reconciled = await taskStateMachineService.reconcileStaleAutomaticRetryReservation({ taskId });
+        record = reconciled.task;
+        serverVideoTaskStore.set(taskId, record);
+        if (reconciled.reclaimed) {
+          return res.json({
+            status: record.status,
+            submissionState: 'not_submitted',
+            providerInvocationAuthorized: false,
+            failureReason: record.failureReason,
+            retryMode: record.retryMode,
+            error: record.error,
+            structuredError: record.structuredError,
+          });
+        }
+      }
+
+      if (
+        record.status === 'generating' &&
+        !record.operationName &&
+        record.retryProviderAuthorizedAt &&
+        record.retryProviderAuthorizedIdempotencyKey === record.providerRetryIdempotencyKey
+      ) {
+        const authorizedAgeMs = Date.now() - record.retryProviderAuthorizedAt;
+        if (authorizedAgeMs > 180000) {
+          const unknown = await taskStateMachineService.markAutomaticRetryOutcomeUnknown({
+            taskId,
+            idempotencyKey: record.providerRetryIdempotencyKey || 'missing',
+            message: 'AUTOMATIC_RETRY_AUTHORIZATION_STALE: retry crossed the durable Provider authorization boundary but no submission result was persisted; refusing automatic resubmission.',
+          });
+          return res.json({
+            status: unknown.status,
+            error: unknown.error,
+            structuredError: unknown.structuredError,
+            failureReason: unknown.failureReason,
+            retryMode: unknown.retryMode,
+          });
+        }
+      }
+
+      if (record.status === 'submission_outcome_unknown') {
+        return res.json({
+          status: 'submission_outcome_unknown',
+          error: record.error,
+          structuredError: record.structuredError,
+          providerAttempt: record.providerAttempt,
+          automaticRetryPlan: record.automaticRetryPlan,
+          retryHistory: record.retryHistory,
+          requiresManualReview: true,
+        });
+      }
+
+      if (record.status === 'submitting' || !record.operationName) {
+        return res.json({
+          status: 'submitting',
+          progressStage: '正在向云端提交视频渲染引擎...',
+          elapsedSeconds: Math.floor((Date.now() - record.createdAt) / 1000),
+          pollAttempt: record.pollAttempt,
+        });
+      }
+
+      record.pollAttempt = (record.pollAttempt || 0) + 1;
+
+      // Query status from Veo Operation once
+      const connectionId = (req.headers['x-connection-id'] as string) || record.connectionId;
+      const session = CredentialService.getSession(connectionId);
+      if (!session) {
+        const errObj = createStructuredError({
+          source: 'authentication',
+          failureStage: 'internal_api',
+          httpStatus: 401,
+          customUserMessage: '算力连接已失效，请重新连接算力服务。',
+          endpointPathRedacted: `/api/videos/status/${taskId}`,
+        });
+        return res.status(401).json(errObj);
+      }
+
+      // If videoUri is already recorded from a completed cloud operation, try directly re-fetching video stream first
       if (record.videoUri) {
         try {
           let accessToken: string | undefined;
