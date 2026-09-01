@@ -201,6 +201,14 @@ jobs:
           test "$SESSION_STATUS" = '404'
           jq -e '.error == "DIRECTOR_PROJECT_NOT_FOUND"' session.json
 
+          # Regression probe for the incident that caused the original 503:
+          # an invalid/reserved document ID must not disable the shared
+          # Firestore client for subsequent valid requests.
+          RESERVED_STATUS="$(curl -sS -o reserved-session.json -w '%{http_code}' "$SERVICE_URL/api/director/project-session/__step_4_0_3_c_missing__")"
+          test "$RESERVED_STATUS" != '503'
+          POST_RESERVED_PERSIST_STATUS="$(curl -sS -o post-reserved-persistence.json -w '%{http_code}' "$SERVICE_URL/api/director/persistence/latest")"
+          test "$POST_RESERVED_PERSIST_STATUS" = '200' -o "$POST_RESERVED_PERSIST_STATUS" = '404'
+
           PERSIST_STATUS="$(curl -sS -o persistence.json -w '%{http_code}' "$SERVICE_URL/api/director/persistence/latest")"
           test "$PERSIST_STATUS" = '200' -o "$PERSIST_STATUS" = '404'
           if [ "$PERSIST_STATUS" = '200' ]; then

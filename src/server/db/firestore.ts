@@ -64,7 +64,40 @@ export function getFirestoreRuntimeConfig(): { projectId: string; databaseId: st
   };
 }
 
+function isFirestoreAvailabilityError(error: any): boolean {
+  if (!error) return true;
+
+  const code = error.code;
+  const numericCode = Number(code);
+  const status = Number(error.status || error.statusCode);
+  const message = String(error.message || error);
+
+  return (
+    numericCode === 7 || code === 'PERMISSION_DENIED' || status === 403 ||
+    numericCode === 16 || code === 'UNAUTHENTICATED' || status === 401 ||
+    numericCode === 8 || code === 'RESOURCE_EXHAUSTED' || status === 429 ||
+    numericCode === 14 || code === 'UNAVAILABLE' ||
+    message.includes('PERMISSION_DENIED') ||
+    message.includes('UNAUTHENTICATED') ||
+    message.includes('RESOURCE_EXHAUSTED') ||
+    message.includes('UNAVAILABLE') ||
+    message.includes('Could not load the default credentials') ||
+    message.includes('has not been used in project') ||
+    message.includes('API disabled') ||
+    message.includes('is not enabled') ||
+    message.includes('DATABASE_NOT_FOUND') ||
+    (message.includes('NOT_FOUND') && message.toLowerCase().includes('database'))
+  );
+}
+
 export function markFirestoreUnavailable(err?: any): void {
+  if (err && !isFirestoreAvailabilityError(err)) {
+    // Invalid document IDs, schema errors, and other request-level failures
+    // must not poison the shared client for every later request in the same
+    // Cloud Run instance.
+    console.warn('[Firestore DB] Keeping Firestore available after non-infrastructure error:', err?.message || err);
+    return;
+  }
   if (err) {
     console.warn('[Firestore DB] Marking Firestore unavailable due to runtime error:', err?.message || err);
   }
