@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Archive, Film, Image as ImageIcon, Loader2, Music2, RefreshCw, ServerCrash } from 'lucide-react';
 import { useDirectorCloud } from './DirectorCloudPersistenceProvider';
+import { useProjectSession } from '../context/ProjectSessionContext';
 import { assetPreviewSummary, assetSummary, type DirectorAssetRecord } from '../services/assetRegistry/assetRegistryTypes';
-import { listProjectAssets } from '../services/assetRegistry/assetRegistryClient';
 
 interface ProjectAssetSummaryProps {
   projectId?: string;
@@ -12,8 +12,14 @@ const EMPTY_ASSETS: DirectorAssetRecord[] = [];
 
 export const ProjectAssetSummary: React.FC<ProjectAssetSummaryProps> = ({ projectId: projectIdProp }) => {
   const { record } = useDirectorCloud();
-  const projectId = (projectIdProp || record?.snapshot.projectId || '').trim();
-  const [assets, setAssets] = useState<DirectorAssetRecord[]>(EMPTY_ASSETS);
+  const {
+    projectId: sessionProjectId,
+    episodeId: sessionEpisodeId,
+    assets: sessionAssets,
+    refreshSession,
+  } = useProjectSession();
+  const projectId = (projectIdProp || sessionProjectId || record?.snapshot.projectId || '').trim();
+  const assets = sessionProjectId === projectId ? sessionAssets : EMPTY_ASSETS;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -22,8 +28,7 @@ export const ProjectAssetSummary: React.FC<ProjectAssetSummaryProps> = ({ projec
     setLoading(true);
     setError('');
     try {
-      const response = await listProjectAssets(projectId);
-      setAssets(response.assets);
+      await refreshSession(projectId, sessionEpisodeId, { silent: true });
     } catch (cause: any) {
       setError(cause?.message || String(cause));
     } finally {
@@ -32,12 +37,12 @@ export const ProjectAssetSummary: React.FC<ProjectAssetSummaryProps> = ({ projec
   };
 
   useEffect(() => {
-    setAssets(EMPTY_ASSETS);
     if (projectId) void load();
     // The project identity is the only input that should trigger this compact
-    // homepage projection. Asset Library owns interactive filter refreshes.
+    // homepage projection. Asset Library owns interactive filter refreshes;
+    // both consume the same Project Session asset array.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [projectId, sessionEpisodeId]);
 
   const summary = useMemo(() => assetSummary(assets), [assets]);
   const previewSummary = useMemo(() => assetPreviewSummary(assets), [assets]);

@@ -7,6 +7,8 @@ import {
   Sparkles,
   Upload,
 } from 'lucide-react';
+import { useProjectSession } from '../context/ProjectSessionContext';
+import { assetPreviewContentUrl } from '../services/assetRegistry/assetRegistryClient';
 import { characterRepository } from '../repositories/characterRepository';
 import type { CharacterProfile } from '../types';
 import { getRefImageUrl, refToBlob } from '../utils/imageHelper';
@@ -108,7 +110,13 @@ function newBlobKey(shotUid: string) {
 }
 
 export const ManualKeyframePage: React.FC = () => {
-  const initial = useMemo(() => syncLocalShotPipeline(), []);
+  const {
+    projectId: sessionProjectId,
+    episodeId: sessionEpisodeId,
+    assets: registryAssets,
+    syncLocalChanges,
+  } = useProjectSession();
+  const [initial, setInitial] = useState(() => syncLocalShotPipeline());
   const [manifest, setManifest] = useState<KeyframeAssetManifest | null>(initial?.assets || null);
   const [characters, setCharacters] = useState<CharacterProfile[]>([]);
   const [previews, setPreviews] = useState<Record<string, string>>({});
@@ -121,6 +129,28 @@ export const ManualKeyframePage: React.FC = () => {
     () => new Map((initial?.blueprint.blueprints || []).map((item) => [item.shotUid, item])),
     [initial?.blueprint],
   );
+
+  const registryKeyframeByShot = useMemo(() => {
+    const map = new Map<string, typeof registryAssets[number]>();
+    for (const asset of registryAssets) {
+      if (
+        asset.assetType === 'IMAGE'
+        && asset.mediaType === 'KEYFRAME'
+        && asset.status !== 'DELETED'
+        && (!sessionEpisodeId || asset.episodeId === sessionEpisodeId)
+      ) {
+        map.set(asset.shotUid, asset);
+      }
+    }
+    return map;
+  }, [registryAssets, sessionEpisodeId]);
+
+  useEffect(() => {
+    if (!sessionProjectId) return;
+    const next = syncLocalShotPipeline();
+    setInitial(next);
+    setManifest(next?.assets || null);
+  }, [sessionEpisodeId, sessionProjectId]);
 
   useEffect(() => {
     characterRepository.getAll().then(setCharacters).catch(() => setCharacters([]));
@@ -227,6 +257,11 @@ export const ManualKeyframePage: React.FC = () => {
       if (!file.type.startsWith('image/')) throw new Error('请选择图片文件。');
       if (file.size > 20 * 1024 * 1024) throw new Error('单张图片不能超过 20MB。');
       const validation = await replaceBlob(shotUid, file, { source: 'upload', fileName: file.name });
+      try {
+        await syncLocalChanges();
+      } catch {
+        setError('本地已保存，云端 Registry 将在后台重试同步。');
+      }
       setMessage(validation?.status === 'WARNING'
         ? `关键帧已上传，但画幅为 ${validation.actualAspectRatio}，项目期望 ${validation.expectedAspectRatio}。可裁切或改用其他画幅。`
         : '关键帧已上传。请直接人工检查并决定 PASS / 重做。');
@@ -267,6 +302,11 @@ export const ManualKeyframePage: React.FC = () => {
         model: result.model,
         createdAt: result.generatedAt,
       });
+      try {
+        await syncLocalChanges();
+      } catch {
+        setError('本地已保存，云端 Registry 将在后台重试同步。');
+      }
       setMessage(validation?.status === 'WARNING'
         ? `${asset.shotLabel} 已生成，但实际画幅 ${validation.actualAspectRatio} 与期望 ${validation.expectedAspectRatio} 不同。`
         : `${asset.shotLabel} 已生成关键帧。系统不会自动 QA，请你人工检查。`);
@@ -330,7 +370,7 @@ export const ManualKeyframePage: React.FC = () => {
     );
   }
 
-  const prepared = manifest.assets.filter((asset) => Boolean(asset.blobKey)).length;
+  const prepared = manifest.assets.filter((asset) => Boolean(asset.blobKey || registryKeyframeByShot.has(asset.shotUid))).length;
   const passed = manifest.assets.filter((asset) => asset.status === 'PASS').length;
 
   return (
@@ -352,13 +392,17 @@ export const ManualKeyframePage: React.FC = () => {
       <section className="space-y-5">
         {manifest.assets.map((asset) => {
           const blueprint = blueprintByShot.get(asset.shotUid);
+          const registryAsset = registryKeyframeByShot.get(asset.shotUid);
+          const previewSource = registryAsset
+            ? assetPreviewContentUrl(registryAsset.assetId, 'original')
+            : previews[asset.shotUid];
           const busy = busyShot === asset.shotUid;
           const resolvedPolicy = policyForShot(asset.shotUid);
           return (
             <article key={asset.uid} className="grid gap-5 rounded-2xl border border-[#2D2D33] bg-[#111114] p-4 sm:p-5 xl:grid-cols-[260px_1fr]">
               <div className="space-y-3">
-                <div className="overflow-hidden rounded-xl border border-[#303036] bg-[#09090B]" style={{ aspectRatio: resolvedPolicy.expectedAspectRatio.replace(':', '/') }}>{previews[asset.shotUid] ? <img src={previews[asset.shotUid]} alt={`${asset.shotLabel} keyframe`} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-xs text-slate-600">尚无图片</div>}</div>
-                <div className="flex items-center justify-between"><span className="font-mono text-sm font-black text-violet-300">{asset.shotLabel}</span><span className={`text-xs font-black ${asset.status === 'PASS' ? 'text-emerald-300' : asset.blobKey ? 'text-amber-300' : 'text-slate-500'}`}>{asset.status === 'PASS' ? 'HUMAN PASS' : asset.blobKey ? '待人工确认' : '待图片'}</span></div>
+                <div className="overflow-hidden rounded-xl border border-[#303036] bg-[#09090B]" style={{ aspectRatio: resolvedPolicy.expectedAspectRatio.replace(':', '/') }}>{previewSource ? <img src={previewSource} alt={`${asset.shotLabel} keyframe`} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-xs text-slate-600">尚无图片</div>}</div>
+                <div className="flex items-center justify-between"><span className="font-mono text-sm font-black text-violet-300">{asset.shotLabel}</span><span className={`text-xs font-black ${asset.status === 'PASS' ? 'text-emerald-300' : asset.blobKey || registryAsset ? 'text-amber-300' : 'text-slate-500'}`}>{asset.status === 'PASS' ? 'HUMAN PASS' : asset.blobKey || registryAsset ? '待人工确认' : '待图片'}</span></div>
               </div>
 
               <div className="space-y-4">

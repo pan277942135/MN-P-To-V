@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, Settings2, ShieldCheck } from 'lucide-react';
 import { FormatPolicyEditor } from '../components/FormatPolicyEditor';
 import { useDirectorCloud } from '../components/DirectorCloudPersistenceProvider';
+import { useProjectSession } from '../context/ProjectSessionContext';
 import { DIRECTOR_DRAFT_KEY } from '../services/director/keyframeBlueprint';
 import {
   DEFAULT_FORMAT_POLICY,
@@ -42,16 +43,21 @@ function policyFromDraft(draft: DirectorDraftLike, cloudPolicy?: unknown): Produ
 
 export const ProjectSettingsPage: React.FC = () => {
   const { record } = useDirectorCloud();
+  const {
+    project: sessionProject,
+    syncLocalChanges,
+  } = useProjectSession();
   const initialDraft = useMemo(() => readDraft(), []);
-  const [policy, setPolicy] = useState(() => policyFromDraft(initialDraft, record?.snapshot.formatPolicy));
+  const [policy, setPolicy] = useState(() => policyFromDraft(initialDraft, record?.snapshot.formatPolicy || sessionProject?.formatPolicy));
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [message, setMessage] = useState('');
 
   useEffect(() => {
-    if (record?.snapshot.formatPolicy && !hasFormatPolicy(initialDraft.formatPolicy)) {
-      setPolicy(policyFromDraft(initialDraft, record.snapshot.formatPolicy));
+    const cloudPolicy = record?.snapshot.formatPolicy || sessionProject?.formatPolicy;
+    if (cloudPolicy && !hasFormatPolicy(initialDraft.formatPolicy)) {
+      setPolicy(policyFromDraft(initialDraft, cloudPolicy));
     }
-  }, [initialDraft, record?.snapshot.formatPolicy]);
+  }, [initialDraft, record?.snapshot.formatPolicy, sessionProject?.formatPolicy]);
 
   const save = () => {
     const draft = readDraft();
@@ -66,9 +72,10 @@ export const ProjectSettingsPage: React.FC = () => {
     setPolicy(nextPolicy);
     setSavedAt(Date.now());
     setMessage('Production Format Policy 已保存，Director Cloud 将自动同步。');
+    void syncLocalChanges().catch(() => undefined);
   };
 
-  const title = record?.snapshot.projectTitle || initialDraft.title || '当前 Director 项目';
+  const title = String(sessionProject?.projectTitle || record?.snapshot.projectTitle || initialDraft.title || '当前 Director 项目');
 
   return (
     <div className="mx-auto max-w-[1100px] space-y-6 px-4 py-6 sm:px-6 lg:px-8">
@@ -96,4 +103,3 @@ export const ProjectSettingsPage: React.FC = () => {
     </div>
   );
 };
-

@@ -17,6 +17,7 @@ import { ComputeSettingsPage } from './pages/ComputeSettingsPage';
 import { AssetLibraryPage } from './pages/AssetLibraryPage';
 import { DirectorContextPage } from './pages/DirectorContextPage';
 import { ProjectSettingsPage } from './pages/ProjectSettingsPage';
+import { ProjectSessionProvider } from './context/ProjectSessionContext';
 
 export function AppContent() {
   const [activeTab, setActiveTab] = useState<NavTab>('director');
@@ -105,7 +106,9 @@ export default function App() {
   return (
     <ConnectionProvider>
       <DirectorCloudPersistenceProvider>
-        <AppContent />
+        <ProjectSessionProvider>
+          <AppContent />
+        </ProjectSessionProvider>
       </DirectorCloudPersistenceProvider>
     </ConnectionProvider>
   );

@@ -32,6 +32,7 @@ import {
   normalizeFormatPolicy,
   type ProductionFormatPolicy,
 } from '../services/formatPolicy/formatPolicy';
+import { useProjectSession } from '../context/ProjectSessionContext';
 
 interface DirectorProjectDraft {
   title?: string;
@@ -160,7 +161,8 @@ function formatSavedAt(value?: number) {
 }
 
 export const KeyframeBlueprintPage: React.FC = () => {
-  const initial = useMemo(() => initializePage(), []);
+  const { projectId: sessionProjectId, episodeId: sessionEpisodeId } = useProjectSession();
+  const initial = useMemo(() => initializePage(), [sessionEpisodeId, sessionProjectId]);
   const [draft, setDraft] = useState<KeyframeBlueprintDraft | null>(initial.draft);
   const [approval, setApproval] = useState<KeyframeBlueprintApproval | null>(initial.approval);
   const [message, setMessage] = useState(

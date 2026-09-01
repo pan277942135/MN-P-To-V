@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { EpisodeSpec, ShotSpec } from '../domain/episode/episodeTypes';
 import { useDirectorCloud } from '../components/DirectorCloudPersistenceProvider';
+import { useProjectSession } from '../context/ProjectSessionContext';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -116,7 +117,8 @@ function pipelineLabel(shot: DirectorShot) {
 
 export const DirectorConsolePage: React.FC = () => {
   const { record } = useDirectorCloud();
-  const [episodeId, setEpisodeId] = useState(() => localStorage.getItem('zaojing_director_episode_id') || 'MN-EP001');
+  const { episodeId: sessionEpisodeId } = useProjectSession();
+  const [episodeId, setEpisodeId] = useState(() => sessionEpisodeId || localStorage.getItem('zaojing_director_episode_id') || 'MN-EP001');
   const [episodes, setEpisodes] = useState<DirectorSnapshot[]>([]);
   const [snapshot, setSnapshot] = useState<DirectorSnapshot | null>(null);
   const [capabilities, setCapabilities] = useState<DirectorCapabilities>(FALLBACK_CAPABILITIES);
@@ -124,6 +126,10 @@ export const DirectorConsolePage: React.FC = () => {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
   const [lastRun, setLastRun] = useState<any>(null);
+
+  useEffect(() => {
+    if (sessionEpisodeId && sessionEpisodeId !== episodeId) setEpisodeId(sessionEpisodeId);
+  }, [episodeId, sessionEpisodeId]);
 
   const loadEpisode = useCallback(async (targetId: string, quiet = false) => {
     const cleanId = targetId.trim();

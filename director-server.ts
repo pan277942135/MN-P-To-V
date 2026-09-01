@@ -5,6 +5,7 @@ import { createDirectorCloudPersistenceRouter } from './src/server/services/dire
 import { createProjectBindingRouter } from './src/server/services/projectBindingRouter';
 import { createDirectorAssetRouter } from './src/server/services/assetRegistry/assetRegistryRouter';
 import { createDirectorContextRouter } from './src/server/services/directorContext/directorContextRouter';
+import { createProjectSessionRouter } from './src/server/services/projectSessionRouter';
 
 async function loadEpisodeServerModule() {
   const previousVitest = process.env.VITEST;
@@ -38,6 +39,10 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
   // Cloud Shot/Blueprint data and the Asset Registry. It does not create a new
   // source of truth or open any provider execution path.
   app.use('/api/director', createDirectorContextRouter());
+  // Project Session is the single read entry point for the Director UI. It
+  // composes the existing production snapshot with Registry assets; it does
+  // not replace either source or alter the binding restore contract.
+  app.use('/api/director/project-session', createProjectSessionRouter());
   app.use(episodeApp);
   return app;
 }

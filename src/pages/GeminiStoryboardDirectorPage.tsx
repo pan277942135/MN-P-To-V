@@ -3,6 +3,7 @@ import { ProjectBindingPanel } from '../components/ProjectBindingPanel';
 import { ProjectAssetSummary } from '../components/ProjectAssetSummary';
 import { FormatPolicyEditor } from '../components/FormatPolicyEditor';
 import { useDirectorCloud } from '../components/DirectorCloudPersistenceProvider';
+import { useProjectSession } from '../context/ProjectSessionContext';
 import {
   CheckCircle2,
   ChevronDown,
@@ -242,6 +243,7 @@ function hydrateRestoredStoryboard(value: unknown): StoryboardDraft | null {
 
 export const GeminiStoryboardDirectorPage: React.FC = () => {
   const { record } = useDirectorCloud();
+  const { projectId: sessionProjectId } = useProjectSession();
   const [draft, setDraft] = useState<DirectorBriefDraft>(() => readSavedDraft());
   const [storyboard, setStoryboard] = useState<StoryboardDraft>(() => readSavedStoryboard());
   const [approvedAt, setApprovedAt] = useState<number | undefined>(() => readApproval());
@@ -651,7 +653,7 @@ export const GeminiStoryboardDirectorPage: React.FC = () => {
 
       <ProjectBindingPanel onRestored={handleProjectRestored} />
 
-      <ProjectAssetSummary projectId={record?.snapshot.projectId} />
+      <ProjectAssetSummary projectId={sessionProjectId || record?.snapshot.projectId} />
 
       <section className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4 sm:p-5">
         <div className="flex gap-3">

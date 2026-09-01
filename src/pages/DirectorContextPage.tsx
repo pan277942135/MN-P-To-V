@@ -13,9 +13,7 @@ import {
   Volume2,
 } from 'lucide-react';
 import { useDirectorCloud } from '../components/DirectorCloudPersistenceProvider';
-import {
-  getProjectDirectorContext,
-} from '../services/directorContext/directorContextClient';
+import { useProjectSession } from '../context/ProjectSessionContext';
 import type {
   DirectorContext,
   DirectorContextAsset,
@@ -46,32 +44,46 @@ function shotMissing(shot: DirectorContextShot): string[] {
 
 export const DirectorContextPage: React.FC = () => {
   const { record } = useDirectorCloud();
+  const {
+    projectId: sessionProjectId,
+    episodeId: sessionEpisodeId,
+    directorContext: sessionContext,
+    refreshSession,
+  } = useProjectSession();
   const [manualProjectId, setManualProjectId] = useState('');
   const [context, setContext] = useState<DirectorContext | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const projectId = manualProjectId.trim() || record?.snapshot.projectId?.trim() || '';
+  const projectId = manualProjectId.trim() || sessionProjectId || record?.snapshot.projectId?.trim() || '';
 
   const load = useCallback(async (targetProjectId = projectId) => {
     if (!targetProjectId) return;
     setLoading(true);
     setError('');
     try {
-      const next = await getProjectDirectorContext(targetProjectId);
-      setContext(next);
+      const next = await refreshSession(
+        targetProjectId,
+        targetProjectId === sessionProjectId ? sessionEpisodeId : '',
+        { silent: true },
+      );
+      setContext(next?.directorContext || null);
     } catch (cause: any) {
       setContext(null);
       setError(cause?.message || String(cause));
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, refreshSession, sessionEpisodeId, sessionProjectId]);
 
   useEffect(() => {
+    if (sessionContext && sessionProjectId === projectId && !manualProjectId.trim()) {
+      setContext(sessionContext);
+      return;
+    }
     setContext(null);
     if (projectId) void load(projectId);
-  }, [projectId, load]);
+  }, [load, manualProjectId, projectId, sessionContext, sessionProjectId]);
 
   const shotsCovered = useMemo(
     () => context?.shots.filter((shot) => shot.assets.length > 0).length || 0,

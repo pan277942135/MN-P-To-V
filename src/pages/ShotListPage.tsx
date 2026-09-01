@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ChevronDown,
   ChevronUp,
@@ -27,6 +27,7 @@ import {
   type ProductionFormatPolicy,
 } from '../services/formatPolicy/formatPolicy';
 import { DIRECTOR_DRAFT_KEY } from '../services/director/keyframeBlueprint';
+import { useProjectSession } from '../context/ProjectSessionContext';
 
 function createShot(): GeneratedStoryboardShot {
   return {
@@ -63,11 +64,17 @@ function readFormatPolicy(): ProductionFormatPolicy {
 }
 
 export const ShotListPage: React.FC = () => {
-  const initial = useMemo(() => readCurrentStoryboard() || emptyStoryboard(), []);
+  const { projectId: sessionProjectId, episodeId: sessionEpisodeId } = useProjectSession();
+  const initial = useMemo(() => readCurrentStoryboard() || emptyStoryboard(), [sessionEpisodeId, sessionProjectId]);
   const formatPolicy = useMemo(() => readFormatPolicy(), []);
   const [storyboard, setStoryboard] = useState<StoryboardDraftForWorkflow>(initial);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!sessionProjectId) return;
+    setStoryboard(readCurrentStoryboard() || emptyStoryboard());
+  }, [sessionEpisodeId, sessionProjectId]);
 
   const totalDuration = storyboard.shots.reduce(
     (sum, shot) => sum + Math.max(1, Number(shot.durationSeconds || 1)),

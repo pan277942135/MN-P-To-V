@@ -13,10 +13,10 @@ import {
   X,
 } from 'lucide-react';
 import { useDirectorCloud } from '../components/DirectorCloudPersistenceProvider';
+import { useProjectSession } from '../context/ProjectSessionContext';
 import {
   assetPreviewContentUrl,
   assetPreviewUrl,
-  listProjectAssets,
   requestAssetPreview,
   requestProjectPreviews,
   updateDirectorAsset,
@@ -106,6 +106,16 @@ function mediaOptions(assetType: string): string[] {
   return assetType ? [assetType] : [];
 }
 
+function matchesFilters(asset: DirectorAssetRecord, filters: AssetFilters): boolean {
+  return (
+    (!filters.episodeId || asset.episodeId === filters.episodeId.trim())
+    && (!filters.shotUid || asset.shotUid === filters.shotUid.trim())
+    && (!filters.assetType || asset.assetType === filters.assetType)
+    && (!filters.mediaType || asset.mediaType === filters.mediaType)
+    && (!filters.status || asset.status === filters.status)
+  );
+}
+
 function Preview({ asset }: { asset: DirectorAssetRecord }) {
   const src = assetPreviewUrl(asset);
   const label = assetTitle(asset);
@@ -134,6 +144,14 @@ function Preview({ asset }: { asset: DirectorAssetRecord }) {
 
 export const AssetLibraryPage: React.FC = () => {
   const { record } = useDirectorCloud();
+  const {
+    projectId: sessionProjectId,
+    project: sessionProject,
+    episodeId: sessionEpisodeId,
+    assets: sessionAssets,
+    refreshSession,
+    hydrateAsset,
+  } = useProjectSession();
   const [manualProjectId, setManualProjectId] = useState('');
   const [filters, setFilters] = useState<AssetFilters>({
     episodeId: '',
@@ -149,19 +167,20 @@ export const AssetLibraryPage: React.FC = () => {
   const [previewingProject, setPreviewingProject] = useState(false);
   const [error, setError] = useState('');
 
-  const projectId = (record?.snapshot.projectId || manualProjectId).trim();
-  const currentEpisodeId = record?.snapshot.episodeId || '';
+  const projectId = (manualProjectId || sessionProjectId || record?.snapshot.projectId || '').trim();
+  const currentEpisodeId = sessionEpisodeId || record?.snapshot.episodeId || '';
   const summary = useMemo(() => assetSummary(assets), [assets]);
   const availableMediaTypes = useMemo(() => mediaOptions(filters.assetType || ''), [filters.assetType]);
 
   useEffect(() => {
-    if (!record?.snapshot.projectId) return;
-    setManualProjectId(record.snapshot.projectId);
+    if (!sessionProjectId && !record?.snapshot.projectId) return;
+    const nextProjectId = sessionProjectId || record?.snapshot.projectId || '';
+    setManualProjectId(nextProjectId);
     setFilters((current) => ({
       ...current,
-      episodeId: current.episodeId || record.snapshot.episodeId || '',
+      episodeId: current.episodeId || sessionEpisodeId || record?.snapshot.episodeId || '',
     }));
-  }, [record?.snapshot.projectId, record?.snapshot.episodeId]);
+  }, [record?.snapshot.episodeId, record?.snapshot.projectId, sessionEpisodeId, sessionProjectId]);
 
   useEffect(() => {
     if (filters.mediaType && availableMediaTypes.length > 0 && !availableMediaTypes.includes(filters.mediaType)) {
@@ -178,18 +197,25 @@ export const AssetLibraryPage: React.FC = () => {
     setLoading(true);
     setError('');
     try {
-      const result = await listProjectAssets(projectId, filters);
-      setAssets(result.assets);
+      await refreshSession(projectId, filters.episodeId || currentEpisodeId, { silent: true });
     } catch (cause: any) {
       setError(cause?.message || String(cause));
     } finally {
       setLoading(false);
     }
-  }, [filters, projectId]);
+  }, [currentEpisodeId, filters.episodeId, projectId, refreshSession]);
 
   useEffect(() => {
     if (projectId) void loadAssets();
-  }, [projectId, loadAssets]);
+    // Registry reads are session reads. Interactive filters are applied below
+    // in memory and never create a second page-owned asset source.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentEpisodeId, filters.episodeId, projectId]);
+
+  useEffect(() => {
+    if (sessionProjectId !== projectId) return;
+    setAssets(sessionAssets.filter((asset) => matchesFilters(asset, filters)));
+  }, [filters, projectId, sessionAssets, sessionProjectId]);
 
   const updateFilter = (key: keyof AssetFilters, value: string) => {
     setFilters((current) => ({ ...current, [key]: value }));
@@ -200,7 +226,7 @@ export const AssetLibraryPage: React.FC = () => {
     setError('');
     try {
       const updated = await updateDirectorAsset(asset.assetId, { review: { status } });
-      setAssets((current) => current.map((item) => item.assetId === updated.assetId ? updated : item));
+      hydrateAsset(updated);
     } catch (cause: any) {
       setError(cause?.message || String(cause));
     } finally {
@@ -235,7 +261,7 @@ export const AssetLibraryPage: React.FC = () => {
     }
   };
 
-  if (!projectId && !record) {
+  if (!projectId) {
     return (
       <div className="mx-auto max-w-[1400px] space-y-6 px-4 py-6 sm:px-6 lg:px-8">
         <PageHeading />
@@ -266,7 +292,7 @@ export const AssetLibraryPage: React.FC = () => {
           <div>
             <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-emerald-400">Project Asset Summary</div>
             <div className="mt-1 flex flex-wrap items-center gap-2">
-              <h2 className="text-xl font-black text-white">{record?.snapshot.projectTitle || '当前项目'}</h2>
+              <h2 className="text-xl font-black text-white">{String(sessionProject?.projectTitle || record?.snapshot.projectTitle || '当前项目')}</h2>
               <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 font-mono text-[10px] text-slate-400">{projectId}</span>
             </div>
           </div>

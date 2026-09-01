@@ -1,51 +1,52 @@
-import React, { useMemo, useState } from 'react';
-import { Check, Cloud, Copy, KeyRound, Link2, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Check, Cloud, Copy, KeyRound, Link2, Loader2, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react';
 import { useDirectorCloud } from './DirectorCloudPersistenceProvider';
+import { useProjectSession } from '../context/ProjectSessionContext';
+import { createProjectBinding, type ProjectBindingRestoreResponse } from '../services/director/projectBindingClient';
 import {
-  createProjectBinding,
-  restoreProjectByBinding,
-  type ProjectBindingRestoreResponse,
-} from '../services/director/projectBindingClient';
-import type { DirectorCloudRecord } from '../services/director/directorCloudPersistence';
+  clearProjectBindingHistory,
+  readProjectBindingHistory,
+  rememberProjectBinding,
+  removeProjectBinding,
+  type ProjectBindingHistoryEntry,
+} from '../services/director/projectBindingHistory';
 
 interface ProjectBindingPanelProps {
   onRestored?: (payload: ProjectBindingRestoreResponse) => void;
 }
 
-function restoredCloudRecord(payload: ProjectBindingRestoreResponse): DirectorCloudRecord {
-  return {
-    snapshot: {
-      schema: 'zaojing.director.cloud.v1',
-      projectId: payload.project.projectId,
-      episodeId: payload.episode.episodeId,
-      seriesTitle: payload.project.seriesTitle,
-      projectTitle: payload.project.projectTitle,
-      clientUpdatedAt: Number(payload.episode.clientUpdatedAt || 0),
-      stages: payload.stages,
-      ...(payload.project.formatPolicy ? { formatPolicy: payload.project.formatPolicy } : {}),
-    },
-    serverUpdatedAt: payload.serverUpdatedAt,
-  };
-}
-
 export const ProjectBindingPanel: React.FC<ProjectBindingPanelProps> = ({ onRestored }) => {
-  const { record, setRecord } = useDirectorCloud();
-  const [bindingCode, setBindingCode] = useState('');
+  const { record } = useDirectorCloud();
+  const {
+    projectId: sessionProjectId,
+    project: sessionProject,
+    shots: sessionShots,
+    restoreWithBinding,
+  } = useProjectSession();
+  const [bindingCode, setBindingCode] = useState(() => readProjectBindingHistory()[0]?.bindingCode || '');
   const [createdCode, setCreatedCode] = useState('');
   const [restored, setRestored] = useState<ProjectBindingRestoreResponse | null>(null);
+  const [history, setHistory] = useState<ProjectBindingHistoryEntry[]>(() => readProjectBindingHistory());
   const [busy, setBusy] = useState<'create' | 'restore' | ''>('');
   const [copied, setCopied] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
   const current = record?.snapshot;
+  const currentProjectId = sessionProjectId || current?.projectId?.trim() || '';
+  const currentProjectTitle = String(sessionProject?.projectTitle || current?.projectTitle || '未命名项目');
   const currentShotCount = useMemo(() => {
+    if (sessionShots.length) return sessionShots.length;
     const storyboard = current?.stages?.storyboard as { shots?: unknown[] } | undefined;
     return Array.isArray(storyboard?.shots) ? storyboard.shots.length : 0;
-  }, [current]);
+  }, [current, sessionShots.length]);
+
+  useEffect(() => {
+    if (!bindingCode && history[0]?.bindingCode) setBindingCode(history[0].bindingCode);
+  }, [bindingCode, history]);
 
   const generateBinding = async () => {
-    const projectId = current?.projectId?.trim() || '';
+    const projectId = currentProjectId;
     if (!projectId) {
       setError('当前项目尚未同步到 Director Cloud，请先保存项目或等待云端同步完成。');
       setMessage('');
@@ -57,6 +58,11 @@ export const ProjectBindingPanel: React.FC<ProjectBindingPanelProps> = ({ onRest
     try {
       const result = await createProjectBinding(projectId);
       setCreatedCode(result.bindingCode);
+      setHistory(rememberProjectBinding({
+        bindingCode: result.bindingCode,
+        projectId,
+        projectTitle: currentProjectTitle,
+      }));
       setCopied(false);
       setMessage('项目绑定码已生成。请将它输入到另一台设备的“恢复已有项目”入口。');
     } catch (cause: any) {
@@ -78,8 +84,8 @@ export const ProjectBindingPanel: React.FC<ProjectBindingPanelProps> = ({ onRest
     }
   };
 
-  const restore = async () => {
-    const code = bindingCode.trim();
+  const restore = async (bindingCodeInput = bindingCode) => {
+    const code = bindingCodeInput.trim();
     if (!code) {
       setError('请输入项目绑定码。');
       setMessage('');
@@ -89,8 +95,9 @@ export const ProjectBindingPanel: React.FC<ProjectBindingPanelProps> = ({ onRest
     setError('');
     setMessage('');
     try {
-      const payload = await restoreProjectByBinding(code);
-      setRecord(restoredCloudRecord(payload));
+      const result = await restoreWithBinding(code);
+      const payload = result.payload;
+      setHistory(readProjectBindingHistory());
       setRestored(payload);
       setBindingCode('');
       onRestored?.(payload);
@@ -100,6 +107,24 @@ export const ProjectBindingPanel: React.FC<ProjectBindingPanelProps> = ({ onRest
     } finally {
       setBusy('');
     }
+  };
+
+  const selectHistory = (entry: ProjectBindingHistoryEntry) => {
+    setHistory(rememberProjectBinding(entry));
+    setBindingCode(entry.bindingCode);
+    setMessage(entry.projectTitle + ' 的绑定码已填入。');
+    setError('');
+  };
+
+  const deleteHistory = (entry: ProjectBindingHistoryEntry) => {
+    setHistory(removeProjectBinding(entry.bindingCode));
+    if (bindingCode.toUpperCase() === entry.bindingCode.toUpperCase()) setBindingCode('');
+  };
+
+  const clearHistory = () => {
+    clearProjectBindingHistory();
+    setHistory([]);
+    setBindingCode('');
   };
 
   return (
@@ -145,6 +170,40 @@ export const ProjectBindingPanel: React.FC<ProjectBindingPanelProps> = ({ onRest
         <div className="rounded-xl border border-[#303044] bg-[#11111A] p-4">
           <div className="flex items-center gap-2 text-sm font-black text-white"><RefreshCw className="h-4 w-4 text-emerald-300" /> 新设备</div>
           <p className="mt-1 text-xs leading-5 text-slate-400">在电脑 B、手机或新浏览器输入电脑 A 生成的绑定码。</p>
+          {history.length > 0 && (
+            <div className="mt-4 rounded-xl border border-[#303044] bg-[#0B0B12] p-3" data-testid="project-binding-history">
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="recent-project-binding" className="text-[11px] font-bold uppercase tracking-wider text-slate-500">最近项目</label>
+                <button type="button" onClick={clearHistory} className="text-[11px] font-bold text-slate-500 hover:text-rose-300">清空历史</button>
+              </div>
+              <select
+                id="recent-project-binding"
+                value={history.some((entry) => entry.bindingCode === bindingCode) ? bindingCode : ''}
+                onChange={(event) => {
+                  const entry = history.find((item) => item.bindingCode === event.target.value);
+                  if (entry) selectHistory(entry);
+                }}
+                className="mt-2 w-full rounded-xl border border-[#3A3A50] bg-[#09090F] px-3 py-2.5 text-sm text-white outline-none focus:border-indigo-400/70"
+              >
+                <option value="">选择最近项目…</option>
+                {history.map((entry) => (
+                  <option key={entry.bindingCode} value={entry.bindingCode}>
+                    {entry.projectTitle} · {new Date(entry.lastOpenedAt).toLocaleDateString('zh-CN')}
+                  </option>
+                ))}
+              </select>
+              <div className="mt-2 space-y-1">
+                {history.slice(0, 3).map((entry) => (
+                  <div key={entry.bindingCode} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-white/[0.03]">
+                    <button type="button" onClick={() => selectHistory(entry)} className="min-w-0 flex-1 truncate text-left font-bold text-indigo-100 hover:text-white">{entry.projectTitle}</button>
+                    <span className="shrink-0 text-[10px] text-slate-600">{new Date(entry.lastOpenedAt).toLocaleDateString('zh-CN')}</span>
+                    <button type="button" onClick={() => void restore(entry.bindingCode)} disabled={busy !== ''} className="shrink-0 rounded-lg border border-emerald-400/20 px-2 py-1 text-[10px] font-black text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-40">打开</button>
+                    <button type="button" aria-label={'删除 ' + entry.projectTitle + ' 绑定历史'} onClick={() => deleteHistory(entry)} className="rounded p-1 text-slate-600 hover:bg-rose-500/10 hover:text-rose-300"><Trash2 className="h-3.5 w-3.5" /></button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <label htmlFor="project-binding-code" className="mt-4 block text-[11px] font-bold uppercase tracking-wider text-slate-500">Binding Code</label>
           <input id="project-binding-code" value={bindingCode} onChange={(event) => setBindingCode(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void restore(); }} placeholder="ZJ-Ab7K-x2M8" autoComplete="off" spellCheck={false} className="mt-1.5 w-full rounded-xl border border-[#3A3A50] bg-[#09090F] px-3 py-3 font-mono text-sm tracking-[0.08em] text-white outline-none focus:border-indigo-400/70" />
           <button type="button" onClick={restore} disabled={busy !== ''} className="mt-3 inline-flex items-center gap-2 rounded-xl border border-emerald-400/30 bg-emerald-500/15 px-4 py-2.5 text-sm font-black text-emerald-100 disabled:cursor-not-allowed disabled:opacity-50">
