@@ -276,6 +276,11 @@ export const ProjectSessionProvider: React.FC<React.PropsWithChildren> = ({ chil
     // history but no matching local project, the shortcut opens that project.
     if (currentProjectId === recent.projectId) {
       bindingCodeRef.current = recent.bindingCode;
+      if (stateRef.current.bindingCode !== recent.bindingCode) {
+        const next = { ...stateRef.current, bindingCode: recent.bindingCode };
+        stateRef.current = next;
+        setState(next);
+      }
       return;
     }
     void restoreWithBinding(recent.bindingCode).catch((cause) => {

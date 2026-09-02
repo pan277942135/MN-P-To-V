@@ -35,6 +35,12 @@ export interface DirectorCloudRestoreBundle {
   serverUpdatedAt: number;
 }
 
+export interface DirectorProjectRepositoryLike {
+  isAvailable(): boolean;
+  getRestoreBundle(projectId: string, episodeId?: string): Promise<DirectorCloudRestoreBundle | null>;
+  listRestoreBundles(projectId: string): Promise<DirectorCloudRestoreBundle[]>;
+}
+
 function clean(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -330,6 +336,43 @@ class FirestoreDirectorProjectRepository {
         },
         serverUpdatedAt: Number(episodeData.updatedAt || projectData.updatedAt || 0),
       };
+    } catch (error) {
+      markFirestoreUnavailable(error);
+      throw error;
+    }
+  }
+
+  /**
+   * Read every persisted Episode for an AI project context. This is a read-only
+   * projection over the existing Director Cloud tree; it does not introduce a
+   * second episode store or alter the production snapshot schema.
+   */
+  async listRestoreBundles(projectIdInput: string): Promise<DirectorCloudRestoreBundle[]> {
+    const db = getFirestoreInstance();
+    if (!db) throw new Error('DIRECTOR_FIRESTORE_UNAVAILABLE');
+    const projectId = clean(projectIdInput);
+    if (!projectId) throw new Error('DIRECTOR_PROJECT_ID_REQUIRED');
+
+    try {
+      const projectRef = db.collection(DIRECTOR_PROJECT_COLLECTION).doc(projectId);
+      const projectDoc = await projectRef.get();
+      if (!projectDoc.exists) return [];
+
+      const episodeSnapshot = await projectRef.collection('episodes').get();
+      const episodeIds = episodeSnapshot.docs
+        .map((document) => ({
+          id: document.id,
+          updatedAt: Number(document.data()?.updatedAt || 0),
+        }))
+        .sort((left, right) => right.updatedAt - left.updatedAt)
+        .map((episode) => episode.id);
+
+      const bundles: DirectorCloudRestoreBundle[] = [];
+      for (const episodeId of episodeIds) {
+        const bundle = await this.getRestoreBundle(projectId, episodeId);
+        if (bundle) bundles.push(bundle);
+      }
+      return bundles;
     } catch (error) {
       markFirestoreUnavailable(error);
       throw error;

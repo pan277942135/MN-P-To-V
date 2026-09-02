@@ -80,6 +80,7 @@ export interface DirectorContextShotLocation {
 export interface DirectorContextSourceLike {
   isAvailable(): boolean;
   getRestoreBundle(projectId: string, episodeId?: string): Promise<DirectorCloudRestoreBundle | null>;
+  listRestoreBundles?(projectId: string): Promise<DirectorCloudRestoreBundle[]>;
   findShotLocation(shotUid: string): Promise<DirectorContextShotLocation | null>;
 }
 
@@ -90,6 +91,10 @@ class FirestoreDirectorContextSource implements DirectorContextSourceLike {
 
   public getRestoreBundle(projectId: string, episodeId?: string) {
     return firestoreDirectorProjectRepository.getRestoreBundle(projectId, episodeId);
+  }
+
+  public listRestoreBundles(projectId: string) {
+    return firestoreDirectorProjectRepository.listRestoreBundles(projectId);
   }
 
   public async findShotLocation(shotUidInput: string): Promise<DirectorContextShotLocation | null> {
@@ -275,6 +280,9 @@ function buildShot(
     action,
     dialogue: text(raw.dialogue, raw.voiceover, storyboard.dialogue, storyboard.voiceover),
     status: text(raw.status, video.status, videoBlueprint.status, keyframeQa.autoStatus, keyframeQa.status, keyframeAsset.status, 'DRAFT'),
+    ...(Object.keys(storyboard).length > 0 ? { storyboard } : {}),
+    ...(Object.keys(blueprint).length > 0 ? { blueprint } : {}),
+    ...(Object.keys(videoBlueprint).length > 0 ? { videoBlueprint } : {}),
     ...(formatPolicy ? { formatPolicy } : {}),
     assets: assetsByShot.get(shotUid) || [],
   };
@@ -326,6 +334,39 @@ export class DirectorContextService {
       throw contextError('DIRECTOR_EPISODE_ID_REQUIRED', 'episodeId 不能为空。', 400);
     }
     return this.buildContext(projectId, episodeId);
+  }
+
+  public async getProjectContexts(projectIdInput: string): Promise<DirectorContext[]> {
+    const projectId = clean(projectIdInput);
+    if (!projectId) {
+      throw contextError('DIRECTOR_PROJECT_ID_REQUIRED', 'projectId 不能为空。', 400);
+    }
+    if (!this.source.isAvailable()) {
+      throw contextError('DIRECTOR_CONTEXT_STORAGE_UNAVAILABLE', 'Director Context Firestore 当前不可用。', 503);
+    }
+
+    // The optional method keeps existing lightweight test doubles and older
+    // source adapters compatible. Production Firestore uses the full Episode
+    // subcollection projection; the fallback returns the active Episode.
+    if (!this.source.listRestoreBundles) {
+      return [await this.getDirectorContext(projectId)];
+    }
+
+    const bundles = await this.source.listRestoreBundles(projectId);
+    if (!bundles.length) {
+      throw contextError('DIRECTOR_PROJECT_NOT_FOUND', '找不到指定 Director 项目。', 404);
+    }
+
+    const contexts: DirectorContext[] = [];
+    for (const bundle of bundles) {
+      const episodeId = text(bundle.episode?.episodeId, bundle.project?.activeEpisodeId);
+      if (!episodeId) continue;
+      contexts.push(await this.buildContext(projectId, episodeId));
+    }
+    if (!contexts.length) {
+      throw contextError('DIRECTOR_PROJECT_NOT_FOUND', '找不到指定 Director 项目的 Episode。', 404);
+    }
+    return contexts;
   }
 
   public async getShotContext(shotUidInput: string): Promise<DirectorShotContext> {

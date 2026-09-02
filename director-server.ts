@@ -7,6 +7,7 @@ import { createDirectorAssetRouter } from './src/server/services/assetRegistry/a
 import { createDirectorContextRouter } from './src/server/services/directorContext/directorContextRouter';
 import { createProjectSessionRouter } from './src/server/services/projectSessionRouter';
 import { createFirestoreDiagnosticRouter } from './src/server/services/firestoreDiagnosticRouter';
+import { createAiDirectorRouter } from './src/server/services/aiDirector/aiDirectorRouter';
 
 async function loadEpisodeServerModule() {
   const previousVitest = process.env.VITEST;
@@ -44,6 +45,10 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
   // composes the existing production snapshot with Registry assets; it does
   // not replace either source or alter the binding restore contract.
   app.use('/api/director/project-session', createProjectSessionRouter());
+  // AI Director Gateway is a separate, read-only bearer-token surface. It
+  // composes the existing Context/Registry/Preview services and does not
+  // change any /api/director production route or Firestore source of truth.
+  app.use('/api/ai', createAiDirectorRouter());
   app.use('/api/debug/firestore', createFirestoreDiagnosticRouter());
   app.use(episodeApp);
   return app;

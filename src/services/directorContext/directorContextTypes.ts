@@ -64,6 +64,10 @@ export interface DirectorContextShot {
   action: string;
   dialogue: string;
   status: string;
+  /** Existing production payloads exposed as read-only context data. */
+  storyboard?: Record<string, unknown>;
+  blueprint?: Record<string, unknown>;
+  videoBlueprint?: Record<string, unknown>;
   formatPolicy?: ShotFormatPolicy;
   assets: DirectorContextAsset[];
 }
