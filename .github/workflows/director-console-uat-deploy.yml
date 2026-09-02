@@ -109,19 +109,6 @@ jobs:
             echo "$POLICY_BEFORE" >&2
           fi
 
-      - name: Grant and verify runtime GCS V4 signing IAM
-        shell: bash
-        run: |
-          set -euo pipefail
-          gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
-            --project="$PROJECT_ID" \
-            --member="serviceAccount:$RUNTIME_SA" \
-            --role='roles/iam.serviceAccountTokenCreator' \
-            --quiet
-          POLICY="$(gcloud iam service-accounts get-iam-policy "$RUNTIME_SA" --project="$PROJECT_ID" --format=json)"
-          jq -e --arg member "serviceAccount:$RUNTIME_SA" '
-            any(.bindings[]?; .role == "roles/iam.serviceAccountTokenCreator" and any((.members // [])[]; . == $member))
-          ' <<<"$POLICY" >/dev/null
 
       - name: Build and push formal React Studio image
         id: image
