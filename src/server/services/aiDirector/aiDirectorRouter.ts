@@ -43,6 +43,7 @@ function errorResponse(res: express.Response, error: any, fallbackCode: string, 
     ok: false,
     error: errorCode(error, fallbackCode),
     message: errorMessage(error, status, fallbackMessage),
+    ...(error?.reason ? { reason: error.reason } : {}),
   });
 }
 

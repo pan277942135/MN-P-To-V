@@ -37,6 +37,7 @@ import {
 } from '../directorContext/directorContextService';
 import {
   aiDirectorStorage,
+  AiDirectorStorageError,
   resolveAiObjectRef,
   type AiDirectorStorageLike,
   type AiObjectRef,
@@ -56,12 +57,14 @@ export interface AiDirectorContextSourceLike {
 export class AiDirectorServiceError extends Error {
   public readonly code: string;
   public readonly statusCode: number;
+  public readonly reason?: string;
 
-  constructor(code: string, message: string, statusCode: number) {
+  constructor(code: string, message: string, statusCode: number, reason?: string) {
     super(message);
     this.name = 'AiDirectorServiceError';
     this.code = code;
     this.statusCode = statusCode;
+    this.reason = reason;
   }
 }
 
@@ -490,8 +493,9 @@ export class AiDirectorService {
     }
     try {
       return await this.storage.getSignedUrl(ref, expiresAt);
-    } catch {
-      throw new AiDirectorServiceError('AI_PREVIEW_SIGNING_FAILED', '生成资产 Signed URL 失败。', 503);
+    } catch (error: any) {
+      const reason = error instanceof AiDirectorStorageError ? error.errorCode : 'SIGNING_CONFIG_ERROR';
+      throw new AiDirectorServiceError('AI_PREVIEW_SIGNING_FAILED', '生成资产 Signed URL 失败。', 503, reason);
     }
   }
 

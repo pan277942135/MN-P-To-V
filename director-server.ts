@@ -8,6 +8,7 @@ import { createDirectorContextRouter } from './src/server/services/directorConte
 import { createProjectSessionRouter } from './src/server/services/projectSessionRouter';
 import { createFirestoreDiagnosticRouter } from './src/server/services/firestoreDiagnosticRouter';
 import { createAiDirectorRouter } from './src/server/services/aiDirector/aiDirectorRouter';
+import { createGcsSigningDiagnosticRouter } from './src/server/services/gcsSigningDiagnosticRouter';
 
 async function loadEpisodeServerModule() {
   const previousVitest = process.env.VITEST;
@@ -50,6 +51,7 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
   // change any /api/director production route or Firestore source of truth.
   app.use('/api/ai', createAiDirectorRouter());
   app.use('/api/debug/firestore', createFirestoreDiagnosticRouter());
+  app.use('/api/debug/gcs-signing', createGcsSigningDiagnosticRouter());
   app.use(episodeApp);
   return app;
 }

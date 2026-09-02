@@ -17,6 +17,18 @@ export interface AiDirectorStorageLike {
   putObject(input: { objectPath: string; buffer: Buffer; mimeType: string }): Promise<AiStoredObject>;
   getObject(ref: AiObjectRef): Promise<{ buffer: Buffer; mimeType: string }>;
   getSignedUrl(ref: AiObjectRef, expiresAt: Date): Promise<string>;
+  diagnoseSigning?(objectPath?: string): Promise<{ bucket: string; object: string; signingAvailable: boolean; errorCode?: string }>;
+}
+
+export type AiStorageErrorCode = 'GCS_NOT_FOUND' | 'GCS_PERMISSION_DENIED' | 'SIGN_BLOB_FAILED' | 'SIGNING_CONFIG_ERROR';
+
+export class AiDirectorStorageError extends Error {
+  public readonly errorCode: AiStorageErrorCode;
+  constructor(errorCode: AiStorageErrorCode, message: string) {
+    super(message);
+    this.name = 'AiDirectorStorageError';
+    this.errorCode = errorCode;
+  }
 }
 
 function clean(value: unknown): string {
@@ -113,13 +125,33 @@ class AiDirectorStorage implements AiDirectorStorageLike {
   public async getSignedUrl(ref: AiObjectRef, expiresAt: Date): Promise<string> {
     const bucket = clean(ref.bucket);
     const objectPath = clean(ref.objectPath);
-    if (!bucket || !objectPath) throw new Error('AI_DIRECTOR_OBJECT_REF_INVALID');
-    const [url] = await getStorageClient().bucket(bucket).file(objectPath).getSignedUrl({
-      version: 'v4',
-      action: 'read',
-      expires: expiresAt,
-    });
-    return url;
+    if (!bucket || !objectPath) throw new AiDirectorStorageError('SIGNING_CONFIG_ERROR', 'AI_DIRECTOR_OBJECT_REF_INVALID');
+    try {
+      const [url] = await getStorageClient().bucket(bucket).file(objectPath).getSignedUrl({
+        version: 'v4', action: 'read', expires: expiresAt,
+      });
+      return url;
+    } catch (error: any) {
+      const message = String(error?.message || error || '').toLowerCase();
+      const errorCode: AiStorageErrorCode = message.includes('not found') || message.includes('no such object')
+        ? 'GCS_NOT_FOUND'
+        : message.includes('permission') || message.includes('forbidden') || message.includes('access denied')
+          ? 'GCS_PERMISSION_DENIED'
+          : message.includes('signblob') || message.includes('sign blob') || message.includes('iam.serviceaccounts.signblob')
+            ? 'SIGN_BLOB_FAILED'
+            : 'SIGNING_CONFIG_ERROR';
+      throw new AiDirectorStorageError(errorCode, 'GCS Signed URL generation failed.');
+    }
+  }
+
+  public async diagnoseSigning(objectPath = 'projects/__gcs_signing_diagnostic__/probe.txt') {
+    const bucket = this.bucketName();
+    try {
+      await this.getSignedUrl({ bucket, objectPath }, new Date(Date.now() + 15 * 60 * 1000));
+      return { bucket, object: objectPath, signingAvailable: true };
+    } catch (error: any) {
+      return { bucket, object: objectPath, signingAvailable: false, errorCode: error?.errorCode || 'SIGN_BLOB_FAILED' };
+    }
   }
 }
 
