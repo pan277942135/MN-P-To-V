@@ -170,6 +170,14 @@ jobs:
           grep -q '"keyframeImageModel":"gemini-3.1-flash-image"' capabilities.json
           grep -q '"keyframeQaEnabled":false' capabilities.json
 
+          # AI Director Gateway must be reachable but must reject anonymous
+          # context reads. A positive token probe is intentionally omitted:
+          # token creation requires a real project Binding Code and must never
+          # be performed by deployment automation.
+          AI_CONTEXT_STATUS="$(curl -sS -o ai-context-unauthorized.json -w '%{http_code}' "$SERVICE_URL/api/ai/projects/uat-ai-gateway-auth-smoke/context")"
+          test "$AI_CONTEXT_STATUS" = '401'
+          jq -e '.ok == false and .error == "AI_TOKEN_REQUIRED"' ai-context-unauthorized.json
+
           FIRESTORE_STATUS="$(curl -sS -o firestore.json -w '%{http_code}' "$SERVICE_URL/api/debug/firestore")"
           test "$FIRESTORE_STATUS" = '200'
           jq -e --arg project "$PROJECT_ID" --arg database "$FIRESTORE_DATABASE_ID" --arg sa "$RUNTIME_SA" '
