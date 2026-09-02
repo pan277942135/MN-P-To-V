@@ -88,6 +88,7 @@ export interface AiDirectorShot {
   action: string;
   dialogue: string;
   status: string;
+  storyboard?: Record<string, unknown>;
   formatPolicy?: ShotFormatPolicy;
   /** Existing production blueprint payload, exposed read-only to AI consumers. */
   blueprint: Record<string, unknown>;

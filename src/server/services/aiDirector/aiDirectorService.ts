@@ -200,6 +200,7 @@ export class AiDirectorService {
       action: sourceShot.action,
       dialogue: sourceShot.dialogue,
       status: sourceShot.status,
+      ...(sourceShot.storyboard ? { storyboard: sourceShot.storyboard } : {}),
       ...(sourceShot.formatPolicy ? { formatPolicy: sourceShot.formatPolicy } : {}),
       blueprint,
       ...(sourceShot.videoBlueprint ? { videoBlueprint: sourceShot.videoBlueprint } : {}),
@@ -250,6 +251,8 @@ export class AiDirectorService {
     const expiresAt = expiresAtDate.toISOString();
     const prefix = projectPackagePrefix(projectId, packageId);
     const packageAssets = context.assets;
+    const packageSourceAssets = await this.loadAssets(projectId);
+    const rawAssetsById = new Map(packageSourceAssets.map((asset) => [asset.assetId, asset]));
     const imagePreviews: AiReviewPackageFile[] = [];
     const videoPreviews: AiReviewPackageFile[] = [];
 
@@ -261,10 +264,10 @@ export class AiDirectorService {
     for (const asset of previewAssets) {
       try {
         if (asset.type === 'IMAGE') {
-          const stored = await this.copyImagePreview(prefix, asset, expiresAtDate);
+          const stored = await this.copyImagePreview(prefix, asset, expiresAtDate, rawAssetsById.get(asset.assetId));
           if (stored) imagePreviews.push(stored);
         } else if (asset.type === 'VIDEO') {
-          const stored = await this.copyVideoPreview(prefix, asset, expiresAtDate);
+          const stored = await this.copyVideoPreview(prefix, asset, expiresAtDate, rawAssetsById.get(asset.assetId));
           if (stored) videoPreviews.push(stored);
         }
       } catch (error) {
@@ -299,7 +302,7 @@ export class AiDirectorService {
 
     const contactSheet = await this.buildContactSheet(hasPreviewScope
       ? packageAssets.filter((asset) => asset.type === 'IMAGE')
-      : []);
+      : [], rawAssetsById);
     const contactSheetObject = await this.storage.putObject({
       objectPath: path.posix.join(prefix, 'contact_sheet.jpg'),
       buffer: contactSheet,
@@ -365,6 +368,7 @@ export class AiDirectorService {
       action: shot.action,
       dialogue: shot.dialogue,
       status: shot.status,
+      ...(shot.storyboard ? { storyboard: shot.storyboard } : {}),
       ...(shot.formatPolicy ? { formatPolicy: shot.formatPolicy } : {}),
       blueprint: shot.blueprint || {},
       ...(shot.videoBlueprint ? { videoBlueprint: shot.videoBlueprint } : {}),
@@ -510,8 +514,8 @@ export class AiDirectorService {
     );
   }
 
-  private async readAssetObject(asset: AiDirectorAsset): Promise<{ buffer: Buffer; mimeType: string } | null> {
-    const rawAsset = await this.assets.getAsset(asset.assetId);
+  private async readAssetObject(asset: AiDirectorAsset, rawAssetInput?: DirectorAssetRecord): Promise<{ buffer: Buffer; mimeType: string } | null> {
+    const rawAsset = rawAssetInput || await this.assets.getAsset(asset.assetId);
     if (!rawAsset) return null;
     const stored = rawAsset.preview;
     const candidates = rawAsset.assetType === 'IMAGE'
@@ -535,8 +539,9 @@ export class AiDirectorService {
     prefix: string,
     asset: AiDirectorAsset,
     expiresAt: Date,
+    rawAsset?: DirectorAssetRecord,
   ): Promise<AiReviewPackageFile | null> {
-    const source = await this.readAssetObject(asset);
+    const source = await this.readAssetObject(asset, rawAsset);
     if (!source?.buffer?.length) return null;
     const buffer = await sharp(source.buffer).jpeg({ quality: 88, mozjpeg: true }).toBuffer();
     const objectPath = path.posix.join(prefix, 'previews', 'images', `${safeSegment(asset.assetId)}.jpg`);
@@ -552,8 +557,9 @@ export class AiDirectorService {
     prefix: string,
     asset: AiDirectorAsset,
     expiresAt: Date,
+    rawAsset?: DirectorAssetRecord,
   ): Promise<AiReviewPackageFile | null> {
-    const source = await this.readAssetObject(asset);
+    const source = await this.readAssetObject(asset, rawAsset);
     if (!source?.buffer?.length) return null;
     const extension = extensionForMime(source.mimeType || asset.metadata.mimeType, '.mp4');
     const objectPath = path.posix.join(prefix, 'previews', 'videos', `${safeSegment(asset.assetId)}${extension}`);
@@ -565,11 +571,11 @@ export class AiDirectorService {
     );
   }
 
-  private async buildContactSheet(assets: AiDirectorAsset[]): Promise<Buffer> {
+  private async buildContactSheet(assets: AiDirectorAsset[], rawAssetsById = new Map<string, DirectorAssetRecord>()): Promise<Buffer> {
     const tiles: Array<{ assetId: string; buffer: Buffer }> = [];
     for (const asset of assets.slice(0, MAX_CONTACT_SHEET_IMAGES)) {
       try {
-        const source = await this.readAssetObject(asset);
+        const source = await this.readAssetObject(asset, rawAssetsById.get(asset.assetId));
         if (!source?.buffer?.length) continue;
         const tile = await sharp(source.buffer)
           .resize({ width: CONTACT_SHEET_TILE_WIDTH, height: CONTACT_SHEET_TILE_HEIGHT, fit: 'contain', background: '#111827' })
