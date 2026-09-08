@@ -41,6 +41,7 @@ export function AppContent() {
   const mainProjectSession = useProjectSession();
   const { project, episode, projectId, episodeId, status, refreshSession } = mainProjectSession;
   const projectFromRoute = routeProjectId(pathname);
+  // Project First Navigation: /projects renders before any Session Restore call.
   const isProjectHome = pathname === '/projects' || pathname === '/projects/';
   const isWorkspace = Boolean(projectFromRoute);
 
