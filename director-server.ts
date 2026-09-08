@@ -6,6 +6,7 @@ import { createProjectBindingRouter } from './src/server/services/projectBinding
 import { createDirectorAssetRouter } from './src/server/services/assetRegistry/assetRegistryRouter';
 import { createDirectorContextRouter } from './src/server/services/directorContext/directorContextRouter';
 import { createProjectSessionRouter } from './src/server/services/projectSessionRouter';
+import { createProjectRegistryRouter } from './src/server/services/projectRegistryRouter';
 import { createFirestoreDiagnosticRouter } from './src/server/services/firestoreDiagnosticRouter';
 import { createAiDirectorRouter } from './src/server/services/aiDirector/aiDirectorRouter';
 import { createGcsSigningDiagnosticRouter } from './src/server/services/gcsSigningDiagnosticRouter';
@@ -34,6 +35,9 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
   // Project Binding is the anonymous, bearer-code entry point for cross-device
   // restore. It is mounted before the Episode preview gate like cloud persistence.
   app.use('/api/director/project-binding', createProjectBindingRouter());
+  // Project Registry is the read/write project index for Project First navigation.
+  // It uses the existing director_projects collection and does not alter Session or AI routes.
+  app.use('/api/director', createProjectRegistryRouter());
   // Asset Registry is a query/index layer over the existing production assets.
   // It is mounted beside cloud persistence so best-effort registration can still
   // complete in the public Director preview without changing the production gate.

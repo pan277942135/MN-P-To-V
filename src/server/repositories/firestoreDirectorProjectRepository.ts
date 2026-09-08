@@ -1,4 +1,5 @@
 import { getFirestoreInstance, markFirestoreUnavailable } from '../db/firestore';
+import { randomUUID } from 'node:crypto';
 import {
   hasFormatPolicy,
   hasShotFormatPolicy,
@@ -23,6 +24,16 @@ export interface DirectorCloudSnapshot {
 export interface DirectorCloudProjectRecord {
   snapshot: DirectorCloudSnapshot;
   serverUpdatedAt: number;
+}
+
+
+export interface DirectorProjectRegistryRecord {
+  projectId: string;
+  title: string;
+  status: string;
+  episodeCount: number;
+  shotCount: number;
+  updatedAt: number;
 }
 
 export interface DirectorCloudRestoreBundle {
@@ -187,6 +198,77 @@ class FirestoreDirectorProjectRepository {
 
       await batch.commit();
       return { snapshot, serverUpdatedAt: now };
+    } catch (error) {
+      markFirestoreUnavailable(error);
+      throw error;
+    }
+  }
+
+  async listProjectRegistryRecords(): Promise<DirectorProjectRegistryRecord[]> {
+    const db = getFirestoreInstance();
+    if (!db) throw new Error('DIRECTOR_FIRESTORE_UNAVAILABLE');
+
+    try {
+      const projectSnapshot = await db.collection(DIRECTOR_PROJECT_COLLECTION).get();
+      const records = await Promise.all(projectSnapshot.docs.map(async (projectDoc: any) => {
+        const data = projectDoc.data() || {};
+        const episodesSnapshot = await projectDoc.ref.collection('episodes').get();
+        const shotSnapshots = await Promise.all(
+          episodesSnapshot.docs.map((episodeDoc: any) => episodeDoc.ref.collection('shots').get()),
+        );
+        return {
+          projectId: projectDoc.id,
+          title: clean(data.projectTitle || data.title || projectDoc.id),
+          status: clean(data.status) || 'ACTIVE',
+          episodeCount: episodesSnapshot.size,
+          shotCount: shotSnapshots.reduce((total, snapshot) => total + snapshot.size, 0),
+          updatedAt: Number(data.updatedAt || 0),
+        };
+      }));
+      return records.sort((left, right) => right.updatedAt - left.updatedAt);
+    } catch (error) {
+      markFirestoreUnavailable(error);
+      throw error;
+    }
+  }
+
+  async createProjectRegistryRecord(input: { title: string; format: string }): Promise<DirectorProjectRegistryRecord> {
+    const db = getFirestoreInstance();
+    if (!db) throw new Error('DIRECTOR_FIRESTORE_UNAVAILABLE');
+    const title = clean(input.title);
+    const format = clean(input.format) || '16:9';
+    if (!title) throw new Error('DIRECTOR_PROJECT_TITLE_REQUIRED');
+    if (!['16:9', '9:16', '1:1'].includes(format)) throw new Error('DIRECTOR_PROJECT_FORMAT_INVALID');
+
+    const now = Date.now();
+    const projectId = 'project-' + randomUUID();
+    const ref = db.collection(DIRECTOR_PROJECT_COLLECTION).doc(projectId);
+    try {
+      await ref.create({
+        schema: DIRECTOR_CLOUD_SCHEMA,
+        projectId,
+        projectTitle: title,
+        seriesTitle: title,
+        status: 'ACTIVE',
+        activeEpisodeId: '',
+        latestClientUpdatedAt: 0,
+        createdAt: now,
+        updatedAt: now,
+        settings: { format },
+        formatPolicy: {
+          defaultAspectRatio: format,
+          allowedAspectRatios: [format],
+          allowShotOverride: true,
+        },
+      });
+      return {
+        projectId,
+        title,
+        status: 'ACTIVE',
+        episodeCount: 0,
+        shotCount: 0,
+        updatedAt: now,
+      };
     } catch (error) {
       markFirestoreUnavailable(error);
       throw error;
