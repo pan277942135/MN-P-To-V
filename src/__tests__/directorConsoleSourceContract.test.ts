@@ -92,13 +92,13 @@ describe('Director Console source contract', () => {
     expect(monitor).toContain('Preview 已锁定执行');
   });
 
-  it('deploys Director UAT while keeping Episode/Veo production disabled and every paid Director call explicit', () => {
+  it('deploys Director UAT with open environment gates while preserving capability configuration', () => {
     const workflow = read('.github/workflows/director-console-uat-deploy.yml');
 
     expect(workflow).toContain('docker build -f Dockerfile');
     expect(workflow).not.toContain('Dockerfile.mvp');
-    expect(workflow).toContain('PUBLIC_PREVIEW_READ_ONLY=1');
-    expect(workflow).toContain('DIRECTOR_PRODUCTION_RUN_ENABLED=0');
+    expect(workflow).toContain('PUBLIC_PREVIEW_READ_ONLY=0');
+    expect(workflow).toContain('DIRECTOR_PRODUCTION_RUN_ENABLED=1');
     expect(workflow).toContain('DIRECTOR_STORYBOARD_GEMINI_ENABLED=1');
     expect(workflow).toContain('DIRECTOR_KEYFRAME_IMAGE_ENABLED=1');
     // Automatic keyframe QA is not part of the active UI flow. The dormant backend
