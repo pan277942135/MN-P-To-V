@@ -81,8 +81,8 @@ describe('Step 3.3 keyframe QA API', () => {
     expect(analyze).toHaveBeenCalledTimes(1);
 
     const blocked = await request(app).post('/api/episodes/EP001/run').send({});
-    expect(blocked.status).toBe(423);
-    expect(blocked.body.error).toBe('PREVIEW_READ_ONLY');
+    expect(blocked.status).toBe(503);
+    expect(blocked.body.error).toBe('EPISODE_STORAGE_UNAVAILABLE');
   });
 
   it('requires explicit QA intent before invoking the provider', async () => {
@@ -110,8 +110,8 @@ describe('Step 3.3 keyframe QA API', () => {
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
       ok: true,
-      readOnlyPreview: true,
-      productionRunEnabled: false,
+      readOnlyPreview: false,
+      productionRunEnabled: true,
       keyframeQaEnabled: true,
       keyframeQaModel: 'gemini-2.5-flash',
     });
