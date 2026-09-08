@@ -300,20 +300,9 @@ export async function applyDirectorCloudSnapshot(snapshot: DirectorCloudSnapshot
 }
 
 export async function bootstrapDirectorCloud(): Promise<{ mode: 'migrated' | 'restored' | 'synced' | 'empty'; record: DirectorCloudRecord | null }> {
-  const localExists = hasLocalDirectorData();
-  if (localExists) {
-    const local = collectDirectorLocalSnapshot();
-    const cloud = await readCurrentDirectorCloudRecord(local.projectId, local.episodeId);
-    if (cloud && Number(cloud.snapshot.clientUpdatedAt || 0) > Number(local.clientUpdatedAt || 0)) {
-      await applyDirectorCloudSnapshot(cloud.snapshot);
-      return { mode: 'restored', record: cloud };
-    }
-    const record = await syncDirectorCloud();
-    return { mode: cloud ? 'synced' : 'migrated', record };
-  }
-
-  const latest = await readLatestDirectorCloudRecord();
-  if (!latest) return { mode: 'empty', record: null };
-  await applyDirectorCloudSnapshot(latest.snapshot);
-  return { mode: 'restored', record: latest };
+  // Project First Navigation: the application shell must not restore or sync a
+  // project before the user has selected one from the backend project list.
+  // Explicit workspace/session actions still use readCurrentDirectorCloudRecord,
+  // applyDirectorCloudSnapshot, and syncDirectorCloud.
+  return { mode: 'empty', record: null };
 }
