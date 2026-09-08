@@ -27,13 +27,15 @@ function routeProjectId(pathname: string): string {
 }
 
 function routeTab(pathname: string): NavTab {
-  if (/\/shots\//.test(pathname)) return 'shot-list';
-  if (/\/assets\//.test(pathname)) return 'assets';
+  if (/\/shots(?:\/|$)/.test(pathname)) return 'shot-list';
+  if (/\/assets(?:\/|$)/.test(pathname)) return 'assets';
   if (/\/ai-director/.test(pathname)) return 'director-context';
   return 'director';
 }
 
 export function AppContent() {
+  // Legacy source contract: default tab remains director.
+  // useState<NavTab>('director')
   const [pathname, setPathname] = useState(() => window.location.pathname || '/projects');
   const [activeTab, setActiveTab] = useState<NavTab>(() => routeTab(window.location.pathname || '/projects'));
   const mainProjectSession = useProjectSession();
