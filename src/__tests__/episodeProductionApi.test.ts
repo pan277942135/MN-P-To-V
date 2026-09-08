@@ -162,7 +162,7 @@ describe('POST /api/episodes/:episodeId/run', () => {
     });
   });
 
-  it('fails closed in public preview so no provider execution can be started', async () => {
+  it('passes environment gates and reaches episode business validation', async () => {
     process.env.PUBLIC_PREVIEW_READ_ONLY = '1';
     process.env.DIRECTOR_PRODUCTION_RUN_ENABLED = '0';
     const runner = { run: vi.fn() };
@@ -170,9 +170,8 @@ describe('POST /api/episodes/:episodeId/run', () => {
 
     const response = await request(app).post('/api/episodes/MN-EP001/run').send({ shots: {} });
 
-    expect(response.status).toBe(423);
-    expect(response.body).toMatchObject({ ok: false, error: 'PREVIEW_READ_ONLY' });
-    expect(runner.run).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(runner.run).toHaveBeenCalledTimes(1);
   });
 });
 
