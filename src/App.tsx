@@ -190,12 +190,14 @@ export function AppContent() {
 
 export default function App() {
   return (
-    <ConnectionProvider>
-      <DirectorCloudPersistenceProvider>
-        <ProjectSessionProvider>
-          <AppContent />
-        </ProjectSessionProvider>
-      </DirectorCloudPersistenceProvider>
-    </ConnectionProvider>
+    <DirectorErrorBoundary>
+      <ConnectionProvider>
+        <DirectorCloudPersistenceProvider>
+          <ProjectSessionProvider>
+            <AppContent />
+          </ProjectSessionProvider>
+        </DirectorCloudPersistenceProvider>
+      </ConnectionProvider>
+    </DirectorErrorBoundary>
   );
 }
