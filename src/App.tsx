@@ -20,6 +20,7 @@ import { ProjectSettingsPage } from './pages/ProjectSettingsPage';
 import { ProjectSessionProvider, useProjectSession } from './context/ProjectSessionContext';
 import { ProjectHomePage } from './pages/ProjectHomePage';
 import { ProjectContextBar } from './components/ProjectContextBar';
+import { DirectorErrorBoundary } from './components/DirectorErrorBoundary';
 
 function routeProjectId(pathname: string): string {
   const match = pathname.match(/^\/projects\/([^/]+)/);
