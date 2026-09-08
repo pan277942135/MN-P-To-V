@@ -10,6 +10,12 @@ interface DirectorErrorBoundaryState {
 
 export class DirectorErrorBoundary extends React.Component<DirectorErrorBoundaryProps, DirectorErrorBoundaryState> {
   state: DirectorErrorBoundaryState = { error: null };
+  private readonly childContent: React.ReactNode;
+
+  constructor(props: DirectorErrorBoundaryProps) {
+    super(props);
+    this.childContent = props.children;
+  }
 
   static getDerivedStateFromError(error: Error): DirectorErrorBoundaryState {
     return { error };
@@ -27,7 +33,7 @@ export class DirectorErrorBoundary extends React.Component<DirectorErrorBoundary
   };
 
   render() {
-    if (!this.state.error) return this.props.children;
+    if (!this.state.error) return this.childContent;
     return (
       <div className="min-h-screen bg-zinc-950 px-6 py-16 text-zinc-100">
         <div className="mx-auto max-w-xl rounded-2xl border border-rose-500/30 bg-zinc-900 p-8 shadow-2xl">
