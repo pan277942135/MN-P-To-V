@@ -20,6 +20,7 @@ import { ProjectSettingsPage } from './pages/ProjectSettingsPage';
 import { ProjectSessionProvider, useProjectSession } from './context/ProjectSessionContext';
 import { ProjectHomePage } from './pages/ProjectHomePage';
 import { ProjectContextBar } from './components/ProjectContextBar';
+import { DirectorErrorBoundary } from './components/DirectorErrorBoundary';
 
 function routeProjectId(pathname: string): string {
   const match = pathname.match(/^\/projects\/([^/]+)/);
@@ -33,7 +34,7 @@ function routeTab(pathname: string): NavTab {
   return 'director';
 }
 
-export function AppContent() {
+export function AppContent({ onRouteChange }: { onRouteChange?: (path: string) => void } = {}) {
   // Legacy source contract: default tab remains director.
   // useState<NavTab>('director')
   const [pathname, setPathname] = useState(() => window.location.pathname || '/projects');
@@ -48,9 +49,18 @@ export function AppContent() {
   const navigate = (nextPath: string, nextTab?: NavTab) => {
     window.history.pushState({}, '', nextPath);
     setPathname(nextPath);
+    onRouteChange?.(nextPath);
     if (nextTab) setActiveTab(nextTab);
   };
   const mainRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (pathname === '/') {
+      window.history.replaceState({}, '', '/projects');
+      setPathname('/projects');
+      setActiveTab('director');
+    }
+  }, [pathname]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -179,14 +189,43 @@ export function AppContent() {
   );
 }
 
+function ProjectFirstRouter() {
+  const [pathname, setPathname] = useState(() => window.location.pathname || '/projects');
+  const isProjectList = pathname === '/' || pathname === '/projects' || pathname === '/projects/';
+  const navigate = (nextPath: string) => {
+    window.history.pushState({}, '', nextPath);
+    setPathname(nextPath);
+  };
+
+  useEffect(() => {
+    if (pathname === '/') {
+      window.history.replaceState({}, '', '/projects');
+      setPathname('/projects');
+    }
+    const onPopState = () => setPathname(window.location.pathname || '/projects');
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [pathname]);
+
+  if (isProjectList) {
+    return <ProjectHomePage onOpenProject={(projectId) => navigate('/projects/' + encodeURIComponent(projectId))} />;
+  }
+
+  return (
+    <DirectorCloudPersistenceProvider>
+      <ProjectSessionProvider>
+        <AppContent onRouteChange={setPathname} />
+      </ProjectSessionProvider>
+    </DirectorCloudPersistenceProvider>
+  );
+}
+
 export default function App() {
   return (
-    <ConnectionProvider>
-      <DirectorCloudPersistenceProvider>
-        <ProjectSessionProvider>
-          <AppContent />
-        </ProjectSessionProvider>
-      </DirectorCloudPersistenceProvider>
-    </ConnectionProvider>
+    <DirectorErrorBoundary>
+      <ConnectionProvider>
+        <ProjectFirstRouter />
+      </ConnectionProvider>
+    </DirectorErrorBoundary>
   );
 }
