@@ -57,12 +57,14 @@ const storyboardRateBuckets = new Map<string, number[]>();
 const keyframeImageRateBuckets = new Map<string, number[]>();
 const keyframeQaRateBuckets = new Map<string, number[]>();
 
+// UAT no longer has an environment-level Preview Safety Gate.
+// Route-level business validation and provider configuration checks remain active.
 function isPublicPreviewReadOnly(): boolean {
-  return process.env.PUBLIC_PREVIEW_READ_ONLY === '1';
+  return false;
 }
 
 function isProductionRunEnabled(): boolean {
-  return !isPublicPreviewReadOnly() && process.env.DIRECTOR_PRODUCTION_RUN_ENABLED !== '0';
+  return true;
 }
 
 function isStoryboardGeminiEnabled(): boolean {
@@ -250,34 +252,9 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
   app.use(express.json({ limit: '100mb' }));
   app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
-  app.use((req, res, next) => {
-    const safeMethod = ['GET', 'HEAD', 'OPTIONS'].includes(req.method.toUpperCase());
-    const allowedStoryboardProviderCall =
-      isStoryboardGenerationRequest(req) && isStoryboardGeminiEnabled();
-    const allowedKeyframeImageProviderCall =
-      isKeyframeImageGenerationRequest(req) && isKeyframeImageEnabled();
-    const allowedKeyframeQaProviderCall =
-      isKeyframeQaRequest(req) && isKeyframeQaEnabled();
-    const allowedConnectionTest = isConnectionTestRequest(req);
-
-    if (
-      isPublicPreviewReadOnly() &&
-      req.path.startsWith('/api/') &&
-      !safeMethod &&
-      !allowedStoryboardProviderCall &&
-      !allowedKeyframeImageProviderCall &&
-      !allowedKeyframeQaProviderCall &&
-      !allowedConnectionTest
-    ) {
-      return res.status(423).json({
-        ok: false,
-        error: 'PREVIEW_READ_ONLY',
-        message: '当前 Cloud Run 为公开 Preview；生产写操作与视频 Provider 调用已锁定，仅显式启用的 Director 生成/QA 端点例外。',
-      });
-    }
-    return next();
-  });
-
+  // Environment-level Preview Read Only middleware intentionally removed.
+  // Each endpoint now applies its own business validation and authorization.
+  
   app.get('/api/director/capabilities', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({ ok: true, ...directorCapabilities() });
