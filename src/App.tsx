@@ -22,14 +22,14 @@ import { ProjectHomePage } from './pages/ProjectHomePage';
 import { ProjectContextBar } from './components/ProjectContextBar';
 
 function routeProjectId(pathname: string): string {
-  const match = pathname.match(/^\\/projects\\/([^/]+)/);
+  const match = pathname.match(/^\/projects\/([^/]+)/);
   return match ? decodeURIComponent(match[1]) : '';
 }
 
 function routeTab(pathname: string): NavTab {
-  if (/\\/shots\\//.test(pathname)) return 'shot-list';
-  if (/\\/assets\\//.test(pathname)) return 'assets';
-  if (/\\/ai-director/.test(pathname)) return 'director-context';
+  if (/\/shots\//.test(pathname)) return 'shot-list';
+  if (/\/assets\//.test(pathname)) return 'assets';
+  if (/\/ai-director/.test(pathname)) return 'director-context';
   return 'director';
 }
 
@@ -66,7 +66,7 @@ export function AppContent() {
   }, [isWorkspace, projectFromRoute, projectId, refreshSession, status]);
 
   useEffect(() => {
-    const legacy = pathname.match(/^\\/(shots|assets|episodes)\\/([^/]+)/);
+    const legacy = pathname.match(/^\/(shots|assets|episodes)\/([^/]+)/);
     if (!legacy || !projectId) return;
     const target = legacy[1] === 'shots' ? 'shots' : legacy[1] === 'assets' ? 'assets' : 'episodes';
     navigate(`/projects/${encodeURIComponent(projectId)}/${target}/${encodeURIComponent(legacy[2])}`, routeTab(pathname));
