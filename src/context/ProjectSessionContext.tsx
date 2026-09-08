@@ -244,17 +244,8 @@ export const ProjectSessionProvider: React.FC<React.PropsWithChildren> = ({ chil
     [refreshSession],
   );
 
-  // Project-first navigation contract:
-  // Project List may render without any Project Session API request.
-  // Session restore is triggered only by an explicit project selection,
-  // a binding restore action, or an already-entered project workspace route.
-  useEffect(() => {
-    if (!state.projectId) return;
-    const timer = window.setInterval(() => {
-      void refreshSession(state.projectId, state.episodeId, { silent: true }).catch(() => undefined);
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [refreshSession, state.episodeId, state.projectId]);
+  // Project-first navigation: no session polling is started here.
+  // Workspace entry, explicit refresh, and data mutations call refreshSession.
 
   const value: ProjectSessionContextValue = {
     ...state,
