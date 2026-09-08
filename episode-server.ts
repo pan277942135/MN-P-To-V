@@ -114,6 +114,10 @@ function isKeyframeQaRequest(req: express.Request) {
   return req.method.toUpperCase() === 'POST' && req.path === '/api/director/keyframes/qa';
 }
 
+function isConnectionTestRequest(req: express.Request) {
+  return req.method.toUpperCase() === 'POST' && req.path === '/api/connections/test';
+}
+
 function consumeRateLimit(bucketMap: Map<string, number[]>, maxCalls: number) {
   const bucket = 'uat-global';
   const now = Date.now();
@@ -254,6 +258,7 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
       isKeyframeImageGenerationRequest(req) && isKeyframeImageEnabled();
     const allowedKeyframeQaProviderCall =
       isKeyframeQaRequest(req) && isKeyframeQaEnabled();
+    const allowedConnectionTest = isConnectionTestRequest(req);
 
     if (
       isPublicPreviewReadOnly() &&
@@ -261,7 +266,8 @@ export async function createApp(dependencies: EpisodeServerDependencies = {}) {
       !safeMethod &&
       !allowedStoryboardProviderCall &&
       !allowedKeyframeImageProviderCall &&
-      !allowedKeyframeQaProviderCall
+      !allowedKeyframeQaProviderCall &&
+      !allowedConnectionTest
     ) {
       return res.status(423).json({
         ok: false,
