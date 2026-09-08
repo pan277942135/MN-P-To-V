@@ -61,8 +61,8 @@ describe('Step 3.2 keyframe image API', () => {
     expect(generate).toHaveBeenCalledTimes(1);
 
     const blocked = await request(app).post('/api/episodes/EP001/run').send({});
-    expect(blocked.status).toBe(423);
-    expect(blocked.body.error).toBe('PREVIEW_READ_ONLY');
+    expect(blocked.status).toBe(503);
+    expect(blocked.body.error).toBe('EPISODE_STORAGE_UNAVAILABLE');
   });
 
   it('rejects generation when explicit intent header is missing', async () => {
@@ -86,8 +86,8 @@ describe('Step 3.2 keyframe image API', () => {
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
       ok: true,
-      readOnlyPreview: true,
-      productionRunEnabled: false,
+      readOnlyPreview: false,
+      productionRunEnabled: true,
       keyframeImageEnabled: true,
       keyframeImageModel: 'gemini-3.1-flash-image',
     });
