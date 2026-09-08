@@ -559,6 +559,7 @@ export async function createApp(dependencies: { s01ProductionService?: S01Produc
 
   // Test & Connect
   app.post('/api/connections/test', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     try {
       const { type } = req.body;
       if (type === 'gemini_api_key') {
