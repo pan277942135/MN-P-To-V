@@ -138,12 +138,13 @@ export const ComputeSettingsPage: React.FC = () => {
         if (!projectId.trim()) {
           throw new Error('请输入 Google Cloud Project ID');
         }
-        if (!serviceAccountJson.trim()) {
-          throw new Error('请上传或粘贴 Service Account JSON 凭据');
-        }
         body.projectId = projectId.trim();
         body.location = location.trim() || 'global';
-        body.serviceAccountJson = serviceAccountJson.trim();
+        // On Cloud Run, an empty credential field intentionally selects ADC.
+        // Local development may still provide Service Account JSON.
+        if (serviceAccountJson.trim()) {
+          body.serviceAccountJson = serviceAccountJson.trim();
+        }
       } else if (activeTab === 'gemini_api_key') {
         if (!apiKey.trim()) {
           if (hasServerSecret) {
@@ -169,7 +170,7 @@ export const ComputeSettingsPage: React.FC = () => {
       await saveToDatabase();
 
       setConnectionInfo(data.info);
-      setSuccessMsg('算力凭据测试通过！完整配置及凭据已成功写入本地数据库 (IndexedDB) 并激活当前算力会话！');
+      setSuccessMsg('配置已保存，Vertex AI 连接测试通过！当前会话已激活。');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMsg(msg);
