@@ -73,8 +73,8 @@ describe('Gemini Storyboard Director API', () => {
     const blocked = await request(app)
       .post('/api/episodes/MN-EP001/run')
       .send({});
-    expect(blocked.status).toBe(423);
-    expect(blocked.body.error).toBe('PREVIEW_READ_ONLY');
+    expect(blocked.status).toBe(503);
+    expect(blocked.body.error).toBe('EPISODE_STORAGE_UNAVAILABLE');
   });
 
   it('exposes Gemini Storyboard capability without making a paid call', async () => {
@@ -87,8 +87,8 @@ describe('Gemini Storyboard Director API', () => {
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
       ok: true,
-      readOnlyPreview: true,
-      productionRunEnabled: false,
+      readOnlyPreview: false,
+      productionRunEnabled: true,
       storyboardGeminiEnabled: true,
       storyboardModel: 'gemini-2.5-flash',
     });
