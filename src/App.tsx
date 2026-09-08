@@ -54,6 +54,14 @@ export function AppContent() {
   const mainRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
+    if (pathname === '/') {
+      window.history.replaceState({}, '', '/projects');
+      setPathname('/projects');
+      setActiveTab('director');
+    }
+  }, [pathname]);
+
+  useEffect(() => {
     const onPopState = () => {
       const next = window.location.pathname || '/projects';
       setPathname(next);
