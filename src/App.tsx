@@ -17,11 +17,60 @@ import { ComputeSettingsPage } from './pages/ComputeSettingsPage';
 import { AssetLibraryPage } from './pages/AssetLibraryPage';
 import { DirectorContextPage } from './pages/DirectorContextPage';
 import { ProjectSettingsPage } from './pages/ProjectSettingsPage';
-import { ProjectSessionProvider } from './context/ProjectSessionContext';
+import { ProjectSessionProvider, useProjectSession } from './context/ProjectSessionContext';
+import { ProjectHomePage } from './pages/ProjectHomePage';
+import { ProjectContextBar } from './components/ProjectContextBar';
+
+function routeProjectId(pathname: string): string {
+  const match = pathname.match(/^\\/projects\\/([^/]+)/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+function routeTab(pathname: string): NavTab {
+  if (/\\/shots\\//.test(pathname)) return 'shot-list';
+  if (/\\/assets\\//.test(pathname)) return 'assets';
+  if (/\\/ai-director/.test(pathname)) return 'director-context';
+  return 'director';
+}
 
 export function AppContent() {
-  const [activeTab, setActiveTab] = useState<NavTab>('director');
+  const [pathname, setPathname] = useState(() => window.location.pathname || '/projects');
+  const [activeTab, setActiveTab] = useState<NavTab>(() => routeTab(window.location.pathname || '/projects'));
+  const mainProjectSession = useProjectSession();
+  const { project, episode, projectId, episodeId, status, refreshSession } = mainProjectSession;
+  const projectFromRoute = routeProjectId(pathname);
+  const isProjectHome = pathname === '/projects' || pathname === '/projects/';
+  const isWorkspace = Boolean(projectFromRoute);
+
+  const navigate = (nextPath: string, nextTab?: NavTab) => {
+    window.history.pushState({}, '', nextPath);
+    setPathname(nextPath);
+    if (nextTab) setActiveTab(nextTab);
+  };
   const mainRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const next = window.location.pathname || '/projects';
+      setPathname(next);
+      setActiveTab(routeTab(next));
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  useEffect(() => {
+    if (isWorkspace && projectFromRoute && projectFromRoute !== projectId && status !== 'loading') {
+      void refreshSession(projectFromRoute).catch(() => undefined);
+    }
+  }, [isWorkspace, projectFromRoute, projectId, refreshSession, status]);
+
+  useEffect(() => {
+    const legacy = pathname.match(/^\\/(shots|assets|episodes)\\/([^/]+)/);
+    if (!legacy || !projectId) return;
+    const target = legacy[1] === 'shots' ? 'shots' : legacy[1] === 'assets' ? 'assets' : 'episodes';
+    navigate(`/projects/${encodeURIComponent(projectId)}/${target}/${encodeURIComponent(legacy[2])}`, routeTab(pathname));
+  }, [pathname, projectId]);
 
   useEffect(() => {
     if (mainRef.current) {
@@ -34,9 +83,33 @@ export function AppContent() {
       <Navbar />
 
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
+        {isWorkspace && <Sidebar activeTab={activeTab} onTabChange={(tab) => {
+          setActiveTab(tab);
+          const suffix: Record<string, string> = {
+            director: '',
+            'shot-list': '/shots',
+            keyframes: '/keyframes',
+            'keyframe-assets': '/keyframes/assets',
+            'video-blueprint': '/video-blueprint',
+            assets: '/assets',
+            'director-context': '/ai-director',
+            'project-settings': '/settings',
+            monitor: '/monitor',
+          };
+          navigate(`/projects/${encodeURIComponent(projectFromRoute)}${suffix[tab] || ''}`);
+        }} />}
 
         <main ref={mainRef} className="flex-1 overflow-y-auto bg-zinc-950/50 pb-20 md:pb-0">
+          {isProjectHome && <ProjectHomePage onOpenProject={(id) => navigate(`/projects/${encodeURIComponent(id)}`)} />}
+          {isWorkspace && <ProjectContextBar
+            projectName={String(project?.projectTitle || project?.title || projectFromRoute)}
+            episodeName={String(episode?.title || episodeId || '')}
+            activeTab={activeTab}
+            onBack={() => navigate('/projects')}
+            onAiDirector={() => navigate(`/projects/${encodeURIComponent(projectFromRoute)}/ai-director`, 'director-context')}
+          />}
+          {isWorkspace && status === 'error' && <div className="mx-auto max-w-7xl px-5 pt-4 text-sm text-rose-300 sm:px-8">项目上下文加载失败，当前页面未切换到其他项目。</div>}
+          {isWorkspace && <>
           <div className={activeTab === 'director' ? 'block' : 'hidden'}>
             {activeTab === 'director' && <GeminiStoryboardDirectorPage />}
           </div>
@@ -96,6 +169,7 @@ export function AppContent() {
           <div className={activeTab === 'settings' ? 'block' : 'hidden'}>
             <ComputeSettingsPage />
           </div>
+        </>}
         </main>
       </div>
     </div>
