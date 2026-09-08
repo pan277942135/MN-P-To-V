@@ -10,7 +10,6 @@ import {
   type ProjectBindingRestoreResponse,
 } from '../services/director/projectBindingClient';
 import {
-  latestProjectBinding,
   rememberProjectBinding,
 } from '../services/director/projectBindingHistory';
 import { syncLocalShotPipeline } from '../services/director/shotProductionWorkflow';
@@ -126,7 +125,6 @@ export const ProjectSessionProvider: React.FC<React.PropsWithChildren> = ({ chil
   const stateRef = useRef(state);
   const recordRef = useRef(record);
   const bindingCodeRef = useRef('');
-  const autoRestoreAttemptedRef = useRef(false);
 
   useEffect(() => {
     stateRef.current = state;
@@ -246,51 +244,10 @@ export const ProjectSessionProvider: React.FC<React.PropsWithChildren> = ({ chil
     [refreshSession],
   );
 
-  const cloudProjectId = clean(record?.snapshot.projectId);
-  const cloudEpisodeId = clean(record?.snapshot.episodeId);
-
-  useEffect(() => {
-    if (!cloudProjectId) return;
-    const recent = latestProjectBinding();
-    // DirectorCloud bootstraps the most recently updated cloud project when a
-    // browser has no local snapshot. If binding history points at another
-    // project, let the explicit recent-binding restore win that race.
-    if (recent && recent.projectId !== cloudProjectId && !stateRef.current.projectId) return;
-    const current = stateRef.current;
-    if (
-      current.status === 'ready'
-      && current.projectId === cloudProjectId
-      && (!cloudEpisodeId || current.episodeId === cloudEpisodeId)
-    ) return;
-    void refreshSession(cloudProjectId, cloudEpisodeId).catch(() => undefined);
-  }, [cloudEpisodeId, cloudProjectId, refreshSession]);
-
-  useEffect(() => {
-    if (autoRestoreAttemptedRef.current) return;
-    autoRestoreAttemptedRef.current = true;
-    const recent = latestProjectBinding();
-    if (!recent) return;
-    const currentProjectId = clean(recordRef.current?.snapshot.projectId);
-    // A local project or a cloud-bootstrap project already matching the most
-    // recent binding needs no extra restore request. If a browser has binding
-    // history but no matching local project, the shortcut opens that project.
-    if (currentProjectId === recent.projectId) {
-      bindingCodeRef.current = recent.bindingCode;
-      if (stateRef.current.bindingCode !== recent.bindingCode) {
-        const next = { ...stateRef.current, bindingCode: recent.bindingCode };
-        stateRef.current = next;
-        setState(next);
-      }
-      return;
-    }
-    void restoreWithBinding(recent.bindingCode).catch((cause) => {
-      console.warn('[Project Session] recent binding auto-open skipped:', cause instanceof Error ? cause.message : String(cause));
-      if (currentProjectId) {
-        void refreshSession(currentProjectId, clean(recordRef.current?.snapshot.episodeId), { silent: true }).catch(() => undefined);
-      }
-    });
-  }, [refreshSession, restoreWithBinding]);
-
+  // Project-first navigation contract:
+  // Project List may render without any Project Session API request.
+  // Session restore is triggered only by an explicit project selection,
+  // a binding restore action, or an already-entered project workspace route.
   useEffect(() => {
     if (!state.projectId) return;
     const timer = window.setInterval(() => {
