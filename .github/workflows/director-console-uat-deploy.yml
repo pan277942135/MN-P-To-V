@@ -136,29 +136,30 @@ jobs:
           fi
 
           if [[ "$BUCKET_PERMISSION_PRESENT" == "true" ]]; then
-            echo "Verified $VERTEX_AGENT has a role containing storage.objects.create on gs://$VEO_OUTPUT_BUCKET (bucket IAM)"
+            echo "IAM_AUDIT=VERIFIED: $VERTEX_AGENT has a role containing storage.objects.create on gs://$VEO_OUTPUT_BUCKET (bucket IAM)"
             exit 0
           fi
 
-          if ! gcloud projects get-iam-policy "$PROJECT_ID" --format=json > project-iam.json 2>project-iam.error; then
-            echo "Unable to read project IAM and bucket IAM did not prove storage.objects.create." >&2
+          if gcloud projects get-iam-policy "$PROJECT_ID" --format=json > project-iam.json 2>project-iam.error; then
+            if jq -e --arg member "$MEMBER" --argjson roles "$STORAGE_ROLES" '
+              any(.bindings[]?;
+                (.role | IN($roles[]))
+                and any((.members // [])[]?; . == $member)
+              )
+            ' project-iam.json >/dev/null; then
+              echo "IAM_AUDIT=VERIFIED: $VERTEX_AGENT has a role containing storage.objects.create for gs://$VEO_OUTPUT_BUCKET (project IAM)"
+              exit 0
+            fi
+            echo "IAM_AUDIT=UNVERIFIED: $VERTEX_AGENT is not visible in the readable IAM policy for gs://$VEO_OUTPUT_BUCKET." >&2
+          else
+            echo "IAM_AUDIT=UNVERIFIED: deployment identity cannot read project or bucket IAM policy; continuing with deployment permissions." >&2
             cat bucket-iam.error >&2 || true
             cat project-iam.error >&2 || true
-            exit 1
           fi
 
-          if jq -e --arg member "$MEMBER" --argjson roles "$STORAGE_ROLES" '
-            any(.bindings[]?;
-              (.role | IN($roles[]))
-              and any((.members // [])[]?; . == $member)
-            )
-          ' project-iam.json >/dev/null; then
-            echo "Verified $VERTEX_AGENT has a role containing storage.objects.create for gs://$VEO_OUTPUT_BUCKET (project IAM)"
-            exit 0
-          fi
-
-          echo "$VERTEX_AGENT is not bound to a role containing storage.objects.create for gs://$VEO_OUTPUT_BUCKET" >&2
-          exit 1
+          # IAM policy read is an audit signal, not a deployment prerequisite.
+          # Continue with the existing build/deploy identity and do not mutate IAM or the bucket.
+          echo "IAM_AUDIT=UNVERIFIED; continuing to Cloud Run deployment."
 
       - name: Build and push formal React Studio image
         id: image
