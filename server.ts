@@ -1730,7 +1730,12 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         id: record.id || record.taskId, taskId: record.taskId, sourceImageId: record.sourceImageId,
         prompt: record.rawUserPrompt || record.compiledPrompt || '', durationSeconds: record.durationSeconds,
         status: record.status, videoUrl: record.artifactPersisted ? '/api/videos/stream/' + record.taskId : null,
-        thumbnailUrl: record.sceneImageUrl || null, selectedBest: record.selectedBest === true,
+        thumbnailUrl: record.sceneImageUrl || null,
+        error: record.error || null,
+        failureReason: record.failureReason || null,
+        failureStage: record.structuredError?.failureStage || record.failureStage || null,
+        structuredError: record.structuredError || null,
+        selectedBest: record.selectedBest === true,
         selectedAt: record.selectedAt || null, createdAt: record.createdAt, updatedAt: record.updatedAt,
       }));
       return res.json({ videos, storageAuthority: 'firestore' });
