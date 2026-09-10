@@ -11,6 +11,7 @@ import { ShotVideoBlueprintPage } from './pages/ShotVideoBlueprintPage';
 import { DirectorConsolePage } from './pages/DirectorConsolePage';
 import { StudioPage } from './pages/StudioPage';
 import { ImageVideoWorkspacePage } from './pages/ImageVideoWorkspacePage';
+import { ImageVideoAssetsPage } from './pages/ImageVideoAssetsPage';
 import { CharacterLibraryPage } from './pages/CharacterLibraryPage';
 import { TaskHistoryPage } from './pages/TaskHistoryPage';
 import { HumanReviewQueuePage } from './pages/HumanReviewQueuePage';
@@ -194,7 +195,8 @@ export function AppContent({ onRouteChange }: { onRouteChange?: (path: string) =
 
 function ProjectFirstRouter() {
   const [pathname, setPathname] = useState(() => window.location.pathname || '/projects');
-  const isSimpleWorkspaceHome = pathname === '/' || pathname === '/image-to-video' || pathname === '/image-to-video/';
+  const isSimpleWorkspaceHome = pathname === '/image-to-video' || pathname === '/image-to-video/';
+  const isSimpleWorkspaceAssets = pathname === '/assets' || /^\/assets\/[^/]+$/.test(pathname);
   const isProjectList = pathname === '/projects' || pathname === '/projects/';
   const navigate = (nextPath: string) => {
     window.history.pushState({}, '', nextPath);
@@ -213,6 +215,10 @@ function ProjectFirstRouter() {
 
   if (isSimpleWorkspaceHome) {
     return <ImageVideoWorkspacePage />;
+  }
+
+  if (isSimpleWorkspaceAssets) {
+    return <ImageVideoAssetsPage />;
   }
 
   if (isProjectList) {
