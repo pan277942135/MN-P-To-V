@@ -34,6 +34,10 @@ type WorkspaceVideo = {
   createdAt: number;
 };
 
+function errorDetail(video: WorkspaceVideo) {
+  return video.error && typeof video.error === 'object' ? video.error : null;
+}
+
 const headers = () => {
   const id = window.localStorage.getItem('selectedConnectionId') || '';
   return id ? { 'x-connection-id': id } : {};
@@ -46,13 +50,13 @@ const json = async (response: Response) => {
 
 
 function failureCategory(video: WorkspaceVideo): string {
-  const reason = video.failureReason || (typeof video.error === 'object' ? video.error?.failureReason : null) || '';
+  const reason = video.failureReason || errorDetail(video)?.failureReason || '';
   if (reason === 'output_rai_filtered' || reason === 'input_safety_blocked') return '提示词或输入图片触发 Google 安全策略（RAI）';
   if (reason === 'provider_admission_busy') return '云端任务准入冲突';
   if (reason === 'artifact_fetch_failed' || reason === 'artifact_persist_failed') return '视频产物读取或保存失败';
   if (reason === 'compute_session_unavailable') return '算力连接或权限失败';
   if (reason === 'submission_outcome_unknown') return 'Veo 提交结果未知';
-  const detail = typeof video.error === 'object' ? video.error : null;
+  const detail = errorDetail(video);
   if (detail?.stage === 'submit') return 'Veo 提交阶段失败';
   if (detail?.stage === 'polling') return 'Veo 云端执行或轮询失败';
   return '视频生成失败';
@@ -287,20 +291,20 @@ export function ImageVideoWorkspacePage() {
               <div className="flex items-start justify-between gap-3"><div><p className="text-xs uppercase tracking-wider text-indigo-300">V{videos.length - index}</p><p className="mt-1 text-sm text-zinc-300">{video.durationSeconds}秒 · {video.status}</p></div><span className="text-xs text-zinc-400">{video.selectedBest ? '最佳版本' : '未选择'}</span></div>
               {video.status === 'failed' ? <div className="mt-3 rounded-lg border border-rose-400/30 bg-rose-500/10 p-4 text-sm">
                 <p className="font-medium text-rose-200">失败原因：{failureCategory(video)}</p>
-                <p className="mt-2 text-rose-100">{typeof video.error === 'object' ? (video.error.messageChinese || '云端返回了失败结果，但未提供用户说明。') : (video.error || '云端返回了失败结果，但未提供详细错误。')}</p>
+                <p className="mt-2 text-rose-100">{errorDetail(video)?.messageChinese || (typeof video.error === 'string' ? video.error : '云端返回了失败结果，但未提供详细错误。')}</p>
                 <p className="mt-2 text-amber-200">下一步：{failureGuidance(video)}</p>
-                {typeof video.error === 'object' && (video.error.technicalMessageRedacted || video.error.googleStatus || video.error.googleReason) && <details className="mt-3 rounded border border-white/10 p-2 text-xs text-zinc-300">
+                {errorDetail(video) && (errorDetail(video)?.technicalMessageRedacted || errorDetail(video)?.googleStatus || errorDetail(video)?.googleReason) && <details className="mt-3 rounded border border-white/10 p-2 text-xs text-zinc-300">
                   <summary className="cursor-pointer text-zinc-400">查看技术详情</summary>
-                  {video.error.technicalMessageRedacted && <p className="mt-2 break-words">错误：{video.error.technicalMessageRedacted}</p>}
-                  {video.error.code && <p className="mt-1">错误码：{video.error.code}</p>}
-                  {video.error.stage && <p className="mt-1">失败阶段：{video.error.stage}</p>}
-                  {video.error.httpStatus != null && <p className="mt-1">HTTP：{video.error.httpStatus}</p>}
-                  {video.error.googleStatus && <p className="mt-1">Google 状态：{video.error.googleStatus}</p>}
-                  {video.error.googleReason && <p className="mt-1">Google 原因：{video.error.googleReason}</p>}
-                  {video.error.errorId && <p className="mt-1">错误 ID：{video.error.errorId}</p>}
-                  {video.error.traceId && <p className="mt-1">Trace ID：{video.error.traceId}</p>}
-                  {video.error.requestId && <p className="mt-1">请求 ID：{video.error.requestId}</p>}
-                  {video.error.revision && <p className="mt-1">Revision：{video.error.revision}</p>}
+                  {errorDetail(video)?.technicalMessageRedacted && <p className="mt-2 break-words">错误：{errorDetail(video)?.technicalMessageRedacted}</p>}
+                  {errorDetail(video)?.code && <p className="mt-1">错误码：{errorDetail(video)?.code}</p>}
+                  {errorDetail(video)?.stage && <p className="mt-1">失败阶段：{errorDetail(video)?.stage}</p>}
+                  {errorDetail(video)?.httpStatus != null && <p className="mt-1">HTTP：{errorDetail(video)?.httpStatus}</p>}
+                  {errorDetail(video)?.googleStatus && <p className="mt-1">Google 状态：{errorDetail(video)?.googleStatus}</p>}
+                  {errorDetail(video)?.googleReason && <p className="mt-1">Google 原因：{errorDetail(video)?.googleReason}</p>}
+                  {errorDetail(video)?.errorId && <p className="mt-1">错误 ID：{errorDetail(video)?.errorId}</p>}
+                  {errorDetail(video)?.traceId && <p className="mt-1">Trace ID：{errorDetail(video)?.traceId}</p>}
+                  {errorDetail(video)?.requestId && <p className="mt-1">请求 ID：{errorDetail(video)?.requestId}</p>}
+                  {errorDetail(video)?.revision && <p className="mt-1">Revision：{errorDetail(video)?.revision}</p>}
                 </details>}
               </div> : video.videoUrl ? <video className="mt-3 aspect-video w-full rounded-lg bg-black object-cover" controls src={video.videoUrl} poster={video.thumbnailUrl || undefined} /> : <div className="mt-3 flex aspect-video items-center justify-center rounded-lg bg-black/30 text-sm text-zinc-500">任务处理中…</div>}
               <p className="mt-3 line-clamp-3 text-sm text-zinc-300">{video.prompt || '未填写 Prompt'}</p>
