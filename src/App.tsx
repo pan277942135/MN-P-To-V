@@ -196,7 +196,7 @@ export function AppContent({ onRouteChange }: { onRouteChange?: (path: string) =
 function ProjectFirstRouter() {
   const [pathname, setPathname] = useState(() => window.location.pathname || '/projects');
   const isSimpleWorkspaceHome = pathname === '/image-to-video' || pathname === '/image-to-video/';
-  const isSimpleWorkspaceAssets = pathname === '/assets' || /^\/assets\/[^/]+$/.test(pathname);
+  const isSimpleWorkspaceAssets = /^\/assets(?:\/[^/]+)?\/?$/.test(pathname);
   const isProjectList = pathname === '/projects' || pathname === '/projects/';
   const navigate = (nextPath: string) => {
     window.history.pushState({}, '', nextPath);
