@@ -118,20 +118,47 @@ jobs:
           set -euo pipefail
           PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
           VERTEX_AGENT="service-\${PROJECT_NUMBER}@gcp-sa-aiplatform.iam.gserviceaccount.com"
-          gcloud projects get-iam-policy "$PROJECT_ID" --format=json > project-iam.json
-          gcloud storage buckets get-iam-policy "gs://$VEO_OUTPUT_BUCKET" --format=json > bucket-iam.json
-          jq -e --arg member "serviceAccount:$VERTEX_AGENT" '
+          MEMBER="serviceAccount:$VERTEX_AGENT"
+          STORAGE_ROLES='["roles/storage.objectCreator","roles/storage.objectUser","roles/storage.objectAdmin","roles/storage.admin","roles/storage.legacyBucketWriter"]'
+          BUCKET_POLICY_READABLE=false
+          BUCKET_PERMISSION_PRESENT=false
+
+          if gcloud storage buckets get-iam-policy "gs://$VEO_OUTPUT_BUCKET" --format=json > bucket-iam.json 2>bucket-iam.error; then
+            BUCKET_POLICY_READABLE=true
+            if jq -e --arg member "$MEMBER" --argjson roles "$STORAGE_ROLES" '
+              any(.bindings[]?;
+                (.role | IN($roles[]))
+                and any((.members // [])[]?; . == $member)
+              )
+            ' bucket-iam.json >/dev/null; then
+              BUCKET_PERMISSION_PRESENT=true
+            fi
+          fi
+
+          if [[ "$BUCKET_PERMISSION_PRESENT" == "true" ]]; then
+            echo "Verified $VERTEX_AGENT has a role containing storage.objects.create on gs://$VEO_OUTPUT_BUCKET (bucket IAM)"
+            exit 0
+          fi
+
+          if ! gcloud projects get-iam-policy "$PROJECT_ID" --format=json > project-iam.json 2>project-iam.error; then
+            echo "Unable to read project IAM and bucket IAM did not prove storage.objects.create." >&2
+            cat bucket-iam.error >&2 || true
+            cat project-iam.error >&2 || true
+            exit 1
+          fi
+
+          if jq -e --arg member "$MEMBER" --argjson roles "$STORAGE_ROLES" '
             any(.bindings[]?;
-              (.role | IN("roles/storage.objectCreator","roles/storage.objectUser","roles/storage.objectAdmin","roles/storage.admin","roles/storage.legacyBucketWriter"))
+              (.role | IN($roles[]))
               and any((.members // [])[]?; . == $member)
             )
-          ' bucket-iam.json >/dev/null || jq -e --arg member "serviceAccount:$VERTEX_AGENT" '
-            any(.bindings[]?;
-              (.role | IN("roles/storage.objectCreator","roles/storage.objectUser","roles/storage.objectAdmin","roles/storage.admin","roles/storage.legacyBucketWriter"))
-              and any((.members // [])[]?; . == $member)
-            )
-          ' project-iam.json >/dev/null
-          echo "Verified $VERTEX_AGENT has a role containing storage.objects.create for gs://$VEO_OUTPUT_BUCKET"
+          ' project-iam.json >/dev/null; then
+            echo "Verified $VERTEX_AGENT has a role containing storage.objects.create for gs://$VEO_OUTPUT_BUCKET (project IAM)"
+            exit 0
+          fi
+
+          echo "$VERTEX_AGENT is not bound to a role containing storage.objects.create for gs://$VEO_OUTPUT_BUCKET" >&2
+          exit 1
 
       - name: Build and push formal React Studio image
         id: image
