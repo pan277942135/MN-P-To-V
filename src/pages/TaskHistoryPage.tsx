@@ -1598,25 +1598,25 @@ export const TaskHistoryPage: React.FC<TaskHistoryPageProps> = ({ onNavigateToSt
                       </div>
                       <div className="text-zinc-300">
                         <span className="text-zinc-500">执行状态: </span>
-                        <span className={payload.outputs.status === 'failed' ? 'text-rose-400 font-bold' : payload.outputs.status === 'completed' ? 'text-emerald-400 font-bold' : 'text-amber-300'}>
-                          {payload.outputs.status}
+                        <span className={payload?.outputs?.status === 'failed' ? 'text-rose-400 font-bold' : payload?.outputs?.status === 'completed' ? 'text-emerald-400 font-bold' : 'text-amber-300'}>
+                          {payload?.outputs?.status}
                         </span>
                       </div>
-                      <div className="text-zinc-300"><span className="text-zinc-500">HTTP Status: </span>{payload.outputs.httpStatus ?? 'N/A'}</div>
-                      <div className="text-zinc-300"><span className="text-zinc-500">错误代码: </span>{payload.outputs.errorCode}</div>
+                      <div className="text-zinc-300"><span className="text-zinc-500">HTTP Status: </span>{payload?.outputs?.httpStatus ?? 'N/A'}</div>
+                      <div className="text-zinc-300"><span className="text-zinc-500">错误代码: </span>{payload?.outputs?.errorCode}</div>
                       <div className="text-zinc-300"><span className="text-zinc-500">执行用时: </span>{payload.executionTimeSeconds} 秒</div>
-                      {payload.outputs.operationName && (
-                        <div className="text-zinc-300 truncate" title={payload.outputs.operationName}>
-                          <span className="text-zinc-500">Operation: </span>{payload.outputs.operationName}
+                      {payload?.outputs?.operationName && (
+                        <div className="text-zinc-300 truncate" title={payload?.outputs?.operationName}>
+                          <span className="text-zinc-500">Operation: </span>{payload?.outputs?.operationName}
                         </div>
                       )}
                     </div>
                   </div>
 
-                  {payload.outputs.messageChinese && (
+                  {payload?.outputs?.messageChinese && (
                     <div className="p-2.5 bg-rose-950/40 border border-rose-800/60 rounded-lg text-rose-200 text-[11px] font-sans break-words">
                       <span className="font-bold text-rose-300">调优报错提示: </span>
-                      {humanizeErrorMessage(payload.outputs.messageChinese)}
+                      {humanizeErrorMessage(payload?.outputs?.messageChinese)}
                     </div>
                   )}
                 </div>
