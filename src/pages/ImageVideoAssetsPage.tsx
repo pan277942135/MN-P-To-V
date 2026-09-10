@@ -6,6 +6,7 @@ type ImageAsset = {
   sizeBytes: number;
   createdAt: number;
   imageUrl: string;
+  thumbnailUrl?: string;
   isDeleted?: boolean;
 };
 
@@ -31,6 +32,63 @@ const json = async (response: Response) => {
   return body;
 };
 
+type ImageFetchJob = {
+  run: () => Promise<Response>;
+  resolve: (response: Response) => void;
+  reject: (error: unknown) => void;
+};
+
+const IMAGE_FETCH_CONCURRENCY = 3;
+let activeImageFetches = 0;
+const imageFetchQueue: ImageFetchJob[] = [];
+
+function drainImageFetchQueue() {
+  while (activeImageFetches < IMAGE_FETCH_CONCURRENCY && imageFetchQueue.length > 0) {
+    const job = imageFetchQueue.shift();
+    if (!job) return;
+    activeImageFetches += 1;
+    void job.run()
+      .then(job.resolve, job.reject)
+      .finally(() => {
+        activeImageFetches -= 1;
+        drainImageFetchQueue();
+      });
+  }
+}
+
+function waitForImageRetry(delayMs: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
+}
+
+async function fetchImageWithRetry(src: string, signal: AbortSignal) {
+  let lastError: Error = new Error('image_fetch_failed');
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await fetch(src, {
+      headers: headers(),
+      cache: 'force-cache',
+      signal,
+    });
+    if (response.ok) return response;
+    lastError = new Error('image_fetch_failed_' + response.status);
+    const retryable = response.status === 429 || response.status >= 500;
+    if (!retryable || attempt === 2) throw lastError;
+    const retryAfter = Number(response.headers.get('retry-after') || 0);
+    await waitForImageRetry(Math.max(500 * (attempt + 1), retryAfter * 1000));
+  }
+  throw lastError;
+}
+
+function enqueueImageFetch(src: string, signal: AbortSignal) {
+  return new Promise<Response>((resolve, reject) => {
+    imageFetchQueue.push({
+      run: () => fetchImageWithRetry(src, signal),
+      resolve,
+      reject,
+    });
+    drainImageFetchQueue();
+  });
+}
+
 function AuthenticatedImage({ src, alt, className }: { src: string; alt: string; className?: string }) {
   const [objectUrl, setObjectUrl] = useState('');
   const [failed, setFailed] = useState(false);
@@ -40,7 +98,8 @@ function AuthenticatedImage({ src, alt, className }: { src: string; alt: string;
     let revokeUrl = '';
     setObjectUrl('');
     setFailed(false);
-    void fetch(src, { headers: headers() })
+    const controller = new AbortController();
+    void enqueueImageFetch(src, controller.signal)
       .then((response) => {
         if (!response.ok) throw new Error('image_fetch_failed');
         return response.blob();
@@ -54,6 +113,7 @@ function AuthenticatedImage({ src, alt, className }: { src: string; alt: string;
       });
     return () => {
       active = false;
+      controller.abort();
       if (revokeUrl) URL.revokeObjectURL(revokeUrl);
     };
   }, [src]);
@@ -79,6 +139,7 @@ export function ImageVideoAssetsPage() {
   const [loading, setLoading] = useState(false);
   const [loadingVideos, setLoadingVideos] = useState(false);
   const [error, setError] = useState('');
+  const [showOriginal, setShowOriginal] = useState(false);
 
   const loadImages = async (cursor?: string, targetPage = page) => {
     setLoading(true);
@@ -162,7 +223,14 @@ export function ImageVideoAssetsPage() {
     }
   };
 
-  const selectedImage = images.find((image) => image.id === selectedImageId);
+  const selectedImage = images.find((image) => image.id === selectedImageId) || (selectedImageId ? {
+    id: selectedImageId,
+    mimeType: 'image/jpeg',
+    sizeBytes: 0,
+    createdAt: 0,
+    imageUrl: '/api/images/' + encodeURIComponent(selectedImageId),
+    thumbnailUrl: '/api/images/' + encodeURIComponent(selectedImageId) + '/thumbnail',
+  } : undefined);
 
   return <div className="min-h-full bg-zinc-950 px-5 py-8 text-zinc-100 sm:px-8">
     <div className="mx-auto max-w-7xl">
@@ -188,7 +256,7 @@ export function ImageVideoAssetsPage() {
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {images.map((image) => <article key={image.id} className="overflow-hidden rounded-xl border border-white/10 bg-white/[0.035]">
             <button type="button" onClick={() => openImage(image.id)} className="block w-full text-left">
-              <AuthenticatedImage src={image.imageUrl} alt={image.id} className="aspect-video w-full object-cover" />
+              <AuthenticatedImage src={image.thumbnailUrl || image.imageUrl} alt={image.id} className="aspect-video w-full object-cover" />
               <div className="p-3">
                 <p className="truncate text-sm">{image.id}</p>
                 <p className="mt-1 text-xs text-zinc-500">{Math.round(image.sizeBytes / 1024)} KB</p>
@@ -218,7 +286,16 @@ export function ImageVideoAssetsPage() {
         <div className="mb-6 rounded-2xl border border-white/10 bg-white/[0.035] p-5">
           <p className="text-xs uppercase tracking-[0.2em] text-indigo-300">Image Asset</p>
           <h2 className="mt-2 text-xl font-medium">{selectedImage?.id || selectedImageId}</h2>
-          {selectedImage && <AuthenticatedImage src={selectedImage.imageUrl} alt={selectedImage.id} className="mt-4 max-h-72 w-full rounded-xl object-contain" />}
+          {selectedImage && <>
+            <AuthenticatedImage
+              src={showOriginal ? selectedImage.imageUrl : (selectedImage.thumbnailUrl || selectedImage.imageUrl)}
+              alt={selectedImage.id}
+              className="mt-4 max-h-72 w-full rounded-xl object-contain"
+            />
+            <button type="button" onClick={() => setShowOriginal((value) => !value)} className="mt-3 rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-300">
+              {showOriginal ? '查看缩略图' : '查看原图'}
+            </button>
+          </>}
         </div>
         <h2 className="mb-4 text-xl font-medium">Related Videos</h2>
         {loadingVideos && <p className="text-sm text-zinc-500">视频版本加载中…</p>}
