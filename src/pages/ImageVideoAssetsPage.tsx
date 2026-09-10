@@ -7,6 +7,7 @@ type ImageAsset = {
   createdAt: number;
   imageUrl: string;
   thumbnailUrl?: string;
+  videoCount?: number;
   isDeleted?: boolean;
 };
 
@@ -314,7 +315,7 @@ export function ImageVideoAssetsPage() {
               <AuthenticatedImage src={image.thumbnailUrl || image.imageUrl} alt={image.id} className="aspect-video w-full object-cover" />
               <div className="p-3">
                 <p className="truncate text-sm">{image.id}</p>
-                <p className="mt-1 text-xs text-zinc-500">{Math.round(image.sizeBytes / 1024)} KB</p>
+                <p className="mt-1 text-xs text-zinc-500">{Math.round(image.sizeBytes / 1024)} KB · 视频 {image.videoCount || 0} 个</p>
               </div>
             </button>
             <div className="border-t border-white/10 p-3">
