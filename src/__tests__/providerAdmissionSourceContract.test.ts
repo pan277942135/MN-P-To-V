@@ -7,17 +7,18 @@ const repoSource = fs.readFileSync(path.join(root, 'src/server/repositories/fire
 const serverSource = fs.readFileSync(path.join(root, 'server.ts'), 'utf8');
 
 describe('durable personal-mode provider admission source contract', () => {
-  it('reserves the task document and per-project provider slot in one Firestore transaction', () => {
+  it('records a per-task admission marker without a project-wide blocking slot', () => {
     expect(repoSource).toContain("providerAdmissionCollectionName = 'video_provider_admission'");
     expect(repoSource).toContain('buildProviderAdmissionScopeKey(record.projectId)');
-    expect(repoSource).toContain('transaction.get(admissionRef)');
-    expect(repoSource).toContain('isProviderAdmissionBlockingTask(incumbentTask)');
-    expect(repoSource).toContain('new ProviderAdmissionBusyError');
+    expect(repoSource).toContain('doc(\`\${scopeKey}_\${taskId}\`)');
+    expect(repoSource).not.toContain('transaction.get(admissionRef)');
+    expect(repoSource).not.toContain('new ProviderAdmissionBusyError');
     expect(repoSource).toContain('transaction.set(docRef, payload)');
     expect(repoSource).toContain('transaction.set(admissionRef');
+    expect(repoSource).toContain("mode: 'per_task_concurrent'");
   });
 
-  it('rejects a second different task before Veo submission when the durable slot is occupied', () => {
+  it('keeps legacy provider-admission failure reporting and does not hide task-level safeguards', () => {
     expect(serverSource).toContain("fsErr?.code === 'PROVIDER_ADMISSION_BUSY'");
     expect(serverSource).toContain("failureReason: 'provider_admission_busy'");
     expect(serverSource).toContain('predictLongRunningCalls: 0');
