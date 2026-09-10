@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import multer from 'multer';
+import sharp from 'sharp';
 import { createServer as createViteServer } from 'vite';
 import { CredentialService } from './src/services/google/credentialService';
 import { VertexClient } from './src/services/google/vertexClient';
@@ -40,6 +41,16 @@ import { gcsArtifactStore, resolveVeoOutputBucket, resolveVeoStorageUri, getVeoB
 // Server Video Task Store & Ephemeral In-Memory Cache
 export const ephemeralImageStore = new Map<string, { buffer: Buffer; mimeType: string }>();
 export const ephemeralVideoStore = new Map<string, Buffer>();
+
+type ImageThumbnailCacheEntry = {
+  buffer: Buffer;
+  expiresAt: number;
+};
+
+const IMAGE_THUMBNAIL_CACHE_TTL_MS = 5 * 60 * 1000;
+const imageThumbnailCache = new Map<string, ImageThumbnailCacheEntry>();
+const imageThumbnailInflight = new Map<string, Promise<Buffer>>();
+
 
 function isIdentitySafeEnabled(): boolean {
   // Production defaults to off; test mode keeps the strict regression contract unless
@@ -1589,7 +1600,7 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       return res.status(201).json({
         id: imageId, objectPath: artifact.outputObjectPath, bucket: artifact.outputBucket,
         mimeType: file.mimetype || 'image/jpeg', sizeBytes: file.size || file.buffer.length,
-        createdAt: now, updatedAt: now, imageUrl: '/api/images/' + imageId,
+        createdAt: now, updatedAt: now, imageUrl: '/api/images/' + imageId, thumbnailUrl: '/api/images/' + imageId + '/thumbnail',
       });
     } catch (err: any) {
       console.error('[Image Asset Upload Error]:', err);
@@ -1613,7 +1624,7 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const hasMore = snapshot.docs.length > pageSize;
       const pageDocs = snapshot.docs.slice(0, pageSize);
       const images = pageDocs
-        .map((doc) => ({ ...(doc.data() as any), imageUrl: '/api/images/' + doc.id }))
+        .map((doc) => ({ ...(doc.data() as any), imageUrl: '/api/images/' + doc.id, thumbnailUrl: '/api/images/' + doc.id + '/thumbnail' }))
         .filter((image: any) => image.isDeleted !== true);
       const lastRawDoc = snapshot.docs[pageSize - 1];
       const nextCursor = hasMore && lastRawDoc ? String(lastRawDoc.get('createdAt') || '') : null;
@@ -1651,6 +1662,62 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
     } catch (err: any) {
       console.error('[Image Asset Logical Delete Error]:', err);
       return res.status(500).json({ success: false, error: '图片删除失败', storageAuthority: 'firestore' });
+    }
+  });
+
+  // Serve a bounded WebP thumbnail for image lists. The original is only loaded on demand.
+  app.get('/api/images/:imageId/thumbnail', async (req, res) => {
+    try {
+      const imageId = String(req.params.imageId || '').trim();
+      const db = getFirestoreInstance();
+      if (!db) return res.status(503).send('存储服务不可用');
+
+      const doc = await db.collection('image_assets').doc(imageId).get();
+      if (!doc.exists) return res.status(404).send('Image not found');
+      const asset = doc.data() as any;
+      if (asset.isDeleted === true) return res.status(404).send('Image not found');
+
+      const cached = imageThumbnailCache.get(imageId);
+      if (cached && cached.expiresAt > Date.now()) {
+        res.setHeader('Content-Type', 'image/webp');
+        res.setHeader('Cache-Control', 'private, max-age=300');
+        return res.send(cached.buffer);
+      }
+
+      const connectionId = String(req.headers['x-connection-id'] || '');
+      const session = connectionId ? CredentialService.getSession(connectionId) : undefined;
+      let pending = imageThumbnailInflight.get(imageId);
+      if (!pending) {
+        pending = gcsArtifactStore
+          .fetchArtifactBuffer(
+            String(asset.bucket || getVeoBucketName()),
+            String(asset.objectPath || ''),
+            session ? { session } : undefined,
+          )
+          .then((buffer) => sharp(buffer)
+            .rotate()
+            .resize({ width: 480, height: 480, fit: 'inside', withoutEnlargement: true })
+            .webp({ quality: 72 })
+            .toBuffer());
+        imageThumbnailInflight.set(imageId, pending);
+      }
+
+      try {
+        const thumbnail = await pending;
+        imageThumbnailCache.set(imageId, {
+          buffer: thumbnail,
+          expiresAt: Date.now() + IMAGE_THUMBNAIL_CACHE_TTL_MS,
+        });
+        res.setHeader('Content-Type', 'image/webp');
+        res.setHeader('Cache-Control', 'private, max-age=300');
+        res.setHeader('Content-Length', thumbnail.length);
+        return res.send(thumbnail);
+      } finally {
+        if (imageThumbnailInflight.get(imageId) === pending) imageThumbnailInflight.delete(imageId);
+      }
+    } catch (err) {
+      console.error('[Image Thumbnail Error]:', err);
+      return res.status(404).send('Image thumbnail not found');
     }
   });
 
