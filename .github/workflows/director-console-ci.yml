@@ -50,6 +50,8 @@ on:
       - 'src/server/services/geminiKeyframeQaService.ts'
       - 'src/db/database.ts'
       - 'src/pages/DirectorConsolePage.tsx'
+      - 'src/pages/ImageVideoWorkspacePage.tsx'
+      - 'src/pages/ImageVideoAssetsPage.tsx'
       - 'episode-server.ts'
       - 'src/server/services/episodeProductionRunner.ts'
       - 'src/server/services/keyframeInputResolver.ts'
@@ -78,6 +80,7 @@ on:
       - 'src/__tests__/videoBlueprint.test.ts'
       - 'src/__tests__/videoBlueprintPage.test.tsx'
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
+      - 'src/__tests__/simpleImageVideoFailureUxContract.test.ts'
       - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'src/__tests__/manualStoryboardDirectorPage.test.tsx'
       - 'src/__tests__/autoStoryboardGenerator.test.ts'
@@ -136,6 +139,8 @@ on:
       - 'src/server/services/geminiKeyframeQaService.ts'
       - 'src/db/database.ts'
       - 'src/pages/DirectorConsolePage.tsx'
+      - 'src/pages/ImageVideoWorkspacePage.tsx'
+      - 'src/pages/ImageVideoAssetsPage.tsx'
       - 'episode-server.ts'
       - 'src/server/services/episodeProductionRunner.ts'
       - 'src/server/services/keyframeInputResolver.ts'
@@ -164,6 +169,7 @@ on:
       - 'src/__tests__/videoBlueprint.test.ts'
       - 'src/__tests__/videoBlueprintPage.test.tsx'
       - 'src/__tests__/directorConsoleSourceContract.test.ts'
+      - 'src/__tests__/simpleImageVideoFailureUxContract.test.ts'
       - 'src/__tests__/scriptDirectorPage.test.tsx'
       - 'src/__tests__/manualStoryboardDirectorPage.test.tsx'
       - 'src/__tests__/autoStoryboardGenerator.test.ts'
@@ -231,6 +237,7 @@ jobs:
           src/__tests__/episodeProductionRunner.test.ts
           src/__tests__/p07EpisodeDurableInput.test.ts
           src/__tests__/directorConsoleSourceContract.test.ts
+          src/__tests__/simpleImageVideoFailureUxContract.test.ts
 
       - name: Build formal React + Episode server artifact
         run: bun run build
