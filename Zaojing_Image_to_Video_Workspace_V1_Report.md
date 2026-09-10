@@ -137,7 +137,7 @@ UAT 部署 workflow 新增只读检查：
 ## 6. 部署版本
 
 - 实现分支：`codex/image-video-workspace-v1`
-- 最新实现 commit：`aa47a5d99a5e52431f791f50ca9dc1918382f204`
+- 最新实现 commit：`04358fdf1c5e399ee1116e3a01732d80fae36246`
 - PR：[#123](https://github.com/pan277942135/MN-P-To-V/pull/123)
 - `main` 尚未合并。
 - Cloud Run UAT 尚未部署。
@@ -150,7 +150,7 @@ UAT 部署 workflow 新增只读检查：
   - TypeScript `bun run lint`
   - Director / Episode regression tests
   - 生产构建 `bun run build`
-  - [Workflow run](https://github.com/pan277942135/MN-P-To-V/actions/runs/34433230496)
+  - [Workflow run](https://github.com/pan277942135/MN-P-To-V/actions/runs/34433418018)
 
 未执行：
 
