@@ -24,4 +24,9 @@ describe('simple image-to-video failure and duplicate-submit UX contract', () =>
     expect(assets).toContain('任务处理中…');
     expect(assets).toContain("video.status === 'failed'");
   });
+
+  it('returns and displays the number of videos related to each image', () => {
+    expect(server).toContain('videoCount: videoCountByImageId.get(doc.id) || 0');
+    expect(assets).toContain('视频 {image.videoCount || 0} 个');
+  });
 });
