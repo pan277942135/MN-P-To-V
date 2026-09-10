@@ -73,6 +73,7 @@ const EMPTY_PROJECT_SESSION_CONTEXT: ProjectSessionContextValue = {
   invalidateSession: async () => null,
 };
 
+// Project List may render without any Project Session API request.
 const ProjectSessionContext = createContext<ProjectSessionContextValue | null>(null);
 
 function clean(value: unknown): string {

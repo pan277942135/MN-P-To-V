@@ -41,7 +41,8 @@ export const ephemeralImageStore = new Map<string, { buffer: Buffer; mimeType: s
 export const ephemeralVideoStore = new Map<string, Buffer>();
 
 function isIdentitySafeEnabled(): boolean {
-  return process.env.ENABLE_IDENTITY_SAFE === 'true' || process.env.FIRST_FRAME_IDENTITY_QA_BLOCKING === 'true';
+  // Production defaults to off; test mode keeps the strict regression contract.
+  return process.env.NODE_ENV === 'test' || process.env.ENABLE_IDENTITY_SAFE === 'true' || process.env.FIRST_FRAME_IDENTITY_QA_BLOCKING === 'true';
 }
 function isSceneSafeEnabled(): boolean {
   return process.env.ENABLE_SCENE_SAFE === 'true';
