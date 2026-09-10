@@ -1597,22 +1597,37 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
     }
   });
 
-  app.get('/api/images', async (_req, res) => {
+  app.get('/api/images', async (req, res) => {
     try {
       const db = getFirestoreInstance();
-      if (!db) return res.status(503).json({ images: [], storageAuthority: 'unavailable' });
-      const snapshot = await db.collection('image_assets').limit(100).get();
-      const images = snapshot.docs
+      if (!db) return res.status(503).json({ images: [], page: { limit: 24, nextCursor: null, hasMore: false }, storageAuthority: 'unavailable' });
+
+      const requestedLimit = Number(req.query.limit || 24);
+      const pageSize = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 1), 48) : 24;
+      const rawCursor = String(req.query.cursor || '').trim();
+      const cursor = rawCursor && Number.isFinite(Number(rawCursor)) ? Number(rawCursor) : null;
+
+      let query = db.collection('image_assets').orderBy('createdAt', 'desc').limit(pageSize + 1);
+      if (cursor != null) query = query.startAfter(cursor);
+      const snapshot = await query.get();
+      const hasMore = snapshot.docs.length > pageSize;
+      const pageDocs = snapshot.docs.slice(0, pageSize);
+      const images = pageDocs
         .map((doc) => ({ ...(doc.data() as any), imageUrl: '/api/images/' + doc.id }))
-        .filter((image: any) => image.isDeleted !== true)
-        .sort((a: any, b: any) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
-      return res.json({ images, storageAuthority: 'firestore' });
+        .filter((image: any) => image.isDeleted !== true);
+      const lastRawDoc = snapshot.docs[pageSize - 1];
+      const nextCursor = hasMore && lastRawDoc ? String(lastRawDoc.get('createdAt') || '') : null;
+
+      return res.json({
+        images,
+        page: { limit: pageSize, nextCursor: nextCursor || null, hasMore: Boolean(nextCursor) },
+        storageAuthority: 'firestore',
+      });
     } catch (err) {
       console.error('[Image Asset List Error]:', err);
-      return res.status(500).json({ images: [], error: '图片列表读取失败' });
+      return res.status(500).json({ images: [], page: { limit: 24, nextCursor: null, hasMore: false }, error: '图片列表读取失败' });
     }
   });
-
 
   // Logical image deletion: hide metadata only; keep the original GCS object intact.
   app.delete('/api/images/:imageId', async (req, res) => {
