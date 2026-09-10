@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
-type ImageAsset = { id: string; mimeType: string; sizeBytes: number; createdAt: number; imageUrl: string };
+type ImageAsset = { id: string; mimeType: string; sizeBytes: number; createdAt: number; imageUrl: string; isDeleted?: boolean };
 type WorkspaceVideo = {
   id: string;
   taskId: string;
@@ -11,6 +11,7 @@ type WorkspaceVideo = {
   videoUrl?: string | null;
   thumbnailUrl?: string | null;
   selectedBest?: boolean;
+  isDeleted?: boolean;
   createdAt: number;
 };
 
@@ -29,6 +30,7 @@ export function ImageVideoWorkspacePage() {
   const [images, setImages] = useState<ImageAsset[]>([]);
   const [videos, setVideos] = useState<WorkspaceVideo[]>([]);
   const [selectedImageId, setSelectedImageId] = useState('');
+  const [sourceMode, setSourceMode] = useState<'existing' | 'upload'>('existing');
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState('');
   const [prompt, setPrompt] = useState('');
@@ -41,8 +43,11 @@ export function ImageVideoWorkspacePage() {
 
   const loadImages = async () => {
     const body = await json(await fetch('/api/images', { headers: headers() }));
-    setImages(body.images || []);
-    if (!selectedImageId && body.images?.[0]?.id) setSelectedImageId(body.images[0].id);
+    const nextImages = (body.images || []).filter((image: ImageAsset) => image.isDeleted !== true);
+    setImages(nextImages);
+    if (selectedImageId && !nextImages.some((image: ImageAsset) => image.id === selectedImageId)) {
+      setSelectedImageId('');
+    }
   };
   const loadVideos = async () => {
     const url = selectedImageId ? '/api/images/' + encodeURIComponent(selectedImageId) + '/videos' : '/api/videos/list?limit=100';
@@ -74,6 +79,21 @@ export function ImageVideoWorkspacePage() {
     setPreview(next ? URL.createObjectURL(next) : '');
     setMessage('');
     setError('');
+    if (next) {
+      // A pending local file must never fall back to the previously selected image.
+      setSourceMode('upload');
+      setSelectedImageId('');
+    }
+  };
+
+  const chooseExistingImage = (imageId: string) => {
+    if (preview) URL.revokeObjectURL(preview);
+    setFile(null);
+    setPreview('');
+    setSourceMode('existing');
+    setSelectedImageId(imageId);
+    setMessage('已明确选择已有图片。');
+    setError('');
   };
 
   const uploadImage = async () => {
@@ -85,12 +105,15 @@ export function ImageVideoWorkspacePage() {
       setImages((current) => [body, ...current]);
       setSelectedImageId(body.id);
       setFile(null);
-      setMessage('图片已保存。');
+      setSourceMode('upload');
+      setMessage('图片已保存，并已作为本次生成图片。');
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
   };
 
   const generate = async () => {
-    if (!selectedImageId) return setError('请先上传并选择图片。');
+    if (file) return setError('本地图片尚未保存，请先点击“保存图片”，或切换到“选择已有图片”。');
+    if (!selectedImageId) return setError('请先在第一步明确选择一张已保存图片。');
+    if (!images.some((image) => image.id === selectedImageId)) return setError('当前图片不可用，请重新选择已保存图片。');
     if (!prompt.trim()) return setError('请输入 Prompt。');
     setBusy(true); setError(''); setMessage('');
     try {
@@ -105,6 +128,34 @@ export function ImageVideoWorkspacePage() {
       const body = await json(await fetch('/api/videos/start', { method: 'POST', headers: headers(), body: form }));
       setTab('videos'); setMessage('视频任务已提交：' + (body.taskId || ''));
       await loadVideos();
+    } catch (e: any) { setError(e.message); } finally { setBusy(false); }
+  };
+
+  const deleteImage = async (imageId: string) => {
+    if (!window.confirm('确认删除这张图片吗？只会从工作台隐藏，不会删除云端原文件。')) return;
+    setBusy(true); setError('');
+    try {
+      await json(await fetch('/api/images/' + encodeURIComponent(imageId), {
+        method: 'DELETE', headers: headers(),
+      }));
+      if (selectedImageId === imageId) {
+        setSelectedImageId('');
+        setSourceMode('existing');
+      }
+      await loadImages();
+      setMessage('图片已删除（仅逻辑删除）。');
+    } catch (e: any) { setError(e.message); } finally { setBusy(false); }
+  };
+
+  const deleteVideo = async (taskId: string) => {
+    if (!window.confirm('确认删除这个视频版本吗？只会从工作台隐藏，不会删除云端视频文件。')) return;
+    setBusy(true); setError('');
+    try {
+      await json(await fetch('/api/videos/' + encodeURIComponent(taskId), {
+        method: 'DELETE', headers: headers(),
+      }));
+      await loadVideos();
+      setMessage('视频已删除（仅逻辑删除）。');
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
   };
 
@@ -137,17 +188,24 @@ export function ImageVideoWorkspacePage() {
 
       <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
         <section className="rounded-2xl border border-white/10 bg-white/[0.035] p-5">
-          <h2 className="text-lg font-medium">生成视频</h2>
-          <label className="mt-5 block text-sm text-zinc-300">上传图片</label>
-          <input className="mt-2 block w-full rounded-lg border border-white/10 bg-zinc-900 p-2 text-sm" type="file" accept="image/*" onChange={(e) => chooseFile(e.target.files?.[0] || null)} />
-          {preview && <img src={preview} alt="预览" className="mt-3 max-h-48 w-full rounded-lg object-cover" />}
-          <button type="button" disabled={!file || busy} onClick={() => void uploadImage()} className="mt-3 w-full rounded-lg bg-indigo-500 px-4 py-2 text-sm disabled:opacity-40">保存图片</button>
+          <h2 className="text-lg font-medium">第一步：选择视频起始图片</h2>
+          <p className="mt-2 text-xs leading-5 text-zinc-500">先明确选择来源。未保存的本地图片不会参与生成，也不会自动沿用上一张图片。</p>
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <button type="button" onClick={() => { setSourceMode('existing'); setFile(null); if (preview) URL.revokeObjectURL(preview); setPreview(''); setError(''); }} className={sourceMode === 'existing' ? 'rounded-lg bg-indigo-500 px-3 py-2 text-sm' : 'rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm'}>选择已有照片</button>
+            <button type="button" onClick={() => { setSourceMode('upload'); setSelectedImageId(''); setError(''); }} className={sourceMode === 'upload' ? 'rounded-lg bg-indigo-500 px-3 py-2 text-sm' : 'rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm'}>本地上传照片</button>
+          </div>
 
-          <label className="mt-6 block text-sm text-zinc-300">选择图片</label>
-          <select className="mt-2 w-full rounded-lg border border-white/10 bg-zinc-900 p-2 text-sm" value={selectedImageId} onChange={(e) => setSelectedImageId(e.target.value)}>
-            <option value="">请选择图片</option>
+          {sourceMode === 'existing' && <select className="mt-3 w-full rounded-lg border border-white/10 bg-zinc-900 p-2 text-sm" value={selectedImageId} onChange={(e) => chooseExistingImage(e.target.value)}>
+            <option value="">请选择已保存照片</option>
             {images.map((image) => <option key={image.id} value={image.id}>{image.id}</option>)}
-          </select>
+          </select>}
+
+          {sourceMode === 'upload' && <>
+            <input className="mt-3 block w-full rounded-lg border border-white/10 bg-zinc-900 p-2 text-sm" type="file" accept="image/*" onChange={(e) => chooseFile(e.target.files?.[0] || null)} />
+            {preview && <img src={preview} alt="待保存预览" className="mt-3 max-h-48 w-full rounded-lg object-cover" />}
+            <button type="button" disabled={!file || busy} onClick={() => void uploadImage()} className="mt-3 w-full rounded-lg bg-indigo-500 px-4 py-2 text-sm disabled:opacity-40">保存并选择这张照片</button>
+            {file && <p className="mt-2 text-xs text-amber-300">这张照片尚未保存，暂时不能生成视频。</p>}
+          </>}
 
           <label className="mt-6 block text-sm text-zinc-300">Prompt</label>
           <textarea className="mt-2 min-h-28 w-full rounded-lg border border-white/10 bg-zinc-900 p-3 text-sm" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="镜头缓慢推进，人物自然眨眼，头发被微风轻轻吹动。" />
@@ -168,18 +226,21 @@ export function ImageVideoWorkspacePage() {
             <button type="button" onClick={() => setTab('videos')} className={tab === 'videos' ? 'border-b-2 border-indigo-400 px-4 py-3 text-sm text-indigo-200' : 'px-4 py-3 text-sm text-zinc-500'}>Videos</button>
           </div>
           {tab === 'images' && <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {images.map((image) => <button type="button" key={image.id} onClick={() => setSelectedImageId(image.id)} className={selectedImageId === image.id ? 'overflow-hidden rounded-xl border-2 border-indigo-400 text-left' : 'overflow-hidden rounded-xl border border-white/10 text-left'}>
-              <img src={image.imageUrl} alt={image.id} className="aspect-video w-full object-cover" />
-              <div className="p-3"><p className="truncate text-sm">{image.id}</p><p className="mt-1 text-xs text-zinc-500">{Math.round(image.sizeBytes / 1024)} KB</p></div>
-            </button>)}
+            {images.map((image) => <article key={image.id} className={selectedImageId === image.id ? 'overflow-hidden rounded-xl border-2 border-indigo-400' : 'overflow-hidden rounded-xl border border-white/10'}>
+              <button type="button" onClick={() => chooseExistingImage(image.id)} className="block w-full text-left">
+                <img src={image.imageUrl} alt={image.id} className="aspect-video w-full object-cover" />
+                <div className="p-3"><p className="truncate text-sm">{image.id}</p><p className="mt-1 text-xs text-zinc-500">{Math.round(image.sizeBytes / 1024)} KB</p></div>
+              </button>
+              <div className="border-t border-white/10 p-3"><button type="button" disabled={busy} onClick={() => void deleteImage(image.id)} className="rounded-lg border border-rose-400/40 px-3 py-2 text-xs text-rose-200 disabled:opacity-40">删除图片</button></div>
+            </article>)}
             {!images.length && <p className="text-sm text-zinc-500">还没有图片。</p>}
-          </div>}
+          </div>
           {tab === 'videos' && <div className="grid gap-4 lg:grid-cols-2">
             {videos.map((video, index) => <article key={video.taskId} className={video.selectedBest ? 'rounded-xl border border-emerald-400/70 bg-emerald-400/5 p-4' : 'rounded-xl border border-white/10 bg-white/[0.035] p-4'}>
               <div className="flex items-start justify-between gap-3"><div><p className="text-xs uppercase tracking-wider text-indigo-300">V{videos.length - index}</p><p className="mt-1 text-sm text-zinc-300">{video.durationSeconds}秒 · {video.status}</p></div><span className="text-xs text-zinc-400">{video.selectedBest ? '最佳版本' : '未选择'}</span></div>
               {video.videoUrl ? <video className="mt-3 aspect-video w-full rounded-lg bg-black object-cover" controls src={video.videoUrl} poster={video.thumbnailUrl || undefined} /> : <div className="mt-3 flex aspect-video items-center justify-center rounded-lg bg-black/30 text-sm text-zinc-500">任务处理中…</div>}
               <p className="mt-3 line-clamp-3 text-sm text-zinc-300">{video.prompt || '未填写 Prompt'}</p>
-              <div className="mt-4 flex items-center justify-between gap-3"><span className="truncate text-xs text-zinc-500">source image: {video.sourceImageId || selectedImageId || '—'}</span><button type="button" disabled={busy || video.status !== 'completed'} onClick={() => void selectBest(video.taskId)} className="rounded-lg border border-indigo-400/40 px-3 py-2 text-xs text-indigo-200 disabled:opacity-40">人工选择此版本</button></div>
+              <div className="mt-4 flex items-center justify-between gap-3"><span className="truncate text-xs text-zinc-500">source image: {video.sourceImageId || selectedImageId || '—'}</span><div className="flex shrink-0 gap-2"><button type="button" disabled={busy || video.status !== 'completed'} onClick={() => void selectBest(video.taskId)} className="rounded-lg border border-indigo-400/40 px-3 py-2 text-xs text-indigo-200 disabled:opacity-40">人工选择此版本</button><button type="button" disabled={busy} onClick={() => void deleteVideo(video.taskId)} className="rounded-lg border border-rose-400/40 px-3 py-2 text-xs text-rose-200 disabled:opacity-40">删除</button></div></div>
             </article>)}
             {!videos.length && <p className="text-sm text-zinc-500">还没有视频版本。</p>}
           </div>}
