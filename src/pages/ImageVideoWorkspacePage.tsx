@@ -234,7 +234,7 @@ export function ImageVideoWorkspacePage() {
               <div className="border-t border-white/10 p-3"><button type="button" disabled={busy} onClick={() => void deleteImage(image.id)} className="rounded-lg border border-rose-400/40 px-3 py-2 text-xs text-rose-200 disabled:opacity-40">删除图片</button></div>
             </article>)}
             {!images.length && <p className="text-sm text-zinc-500">还没有图片。</p>}
-          </div>
+          </div>}
           {tab === 'videos' && <div className="grid gap-4 lg:grid-cols-2">
             {videos.map((video, index) => <article key={video.taskId} className={video.selectedBest ? 'rounded-xl border border-emerald-400/70 bg-emerald-400/5 p-4' : 'rounded-xl border border-white/10 bg-white/[0.035] p-4'}>
               <div className="flex items-start justify-between gap-3"><div><p className="text-xs uppercase tracking-wider text-indigo-300">V{videos.length - index}</p><p className="mt-1 text-sm text-zinc-300">{video.durationSeconds}秒 · {video.status}</p></div><span className="text-xs text-zinc-400">{video.selectedBest ? '最佳版本' : '未选择'}</span></div>
