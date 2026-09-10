@@ -4413,7 +4413,7 @@ export async function startServer() {
         );
         const tasks = await firestoreTaskRepository.listTasks(100);
         for (const task of tasks) {
-          const recoverableOperationName = task.operationName || task.externalOperationName;
+          const recoverableOperationName = task.operationName || (task as ServerVideoTaskRecord & { externalOperationName?: string }).externalOperationName;
           if (recoverableOperationName && ['submitted', 'polling', 'polling_timeout'].includes(task.status)) {
             enqueueVideoTaskPolling(
               task.operationName
