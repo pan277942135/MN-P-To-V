@@ -565,7 +565,7 @@ async function executeVideoTaskPollingAttempt(params: {
     } catch (downloadErr: any) {
       const message = downloadErr?.message || String(downloadErr);
       const errObj = createStructuredError({
-        source: 'artifact_fetch',
+        source: 'output_download',
         failureStage: 'polling',
         httpStatus: 500,
         rawError: downloadErr,
