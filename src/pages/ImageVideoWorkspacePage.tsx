@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 type ImageAsset = {
   id: string;
@@ -16,7 +16,14 @@ const headers = () => {
 
 const json = async (response: Response) => {
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body?.error || '请求失败');
+  if (!response.ok) {
+    const structured = body?.structuredError || {};
+    const error = body?.error;
+    const message = structured.messageChinese || structured.userMessage ||
+      (typeof error === 'string' ? error : error?.messageChinese || error?.userMessage) ||
+      body?.failureReason || '请求失败';
+    throw new Error(String(message));
+  }
   return body;
 };
 
@@ -31,6 +38,7 @@ export function ImageVideoWorkspacePage() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const submissionLockRef = useRef(false);
 
   const selectedImage = useMemo(() => images.find((image) => image.id === selectedImageId), [images, selectedImageId]);
 
@@ -67,9 +75,12 @@ export function ImageVideoWorkspacePage() {
 
   const uploadImage = async () => {
     if (!file) return;
+    submissionLockRef.current = true;
     setBusy(true); setError(''); setMessage('');
     try {
+      const requestTaskId = `vtask_client_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const form = new FormData();
+      form.append('taskId', requestTaskId);
       form.append('image', file);
       const body = await json(await fetch('/api/images', { method: 'POST', headers: headers(), body: form }));
       setImages((current) => [body, ...current].slice(0, 24));
@@ -85,6 +96,7 @@ export function ImageVideoWorkspacePage() {
   };
 
   const generate = async () => {
+    if (submissionLockRef.current) return;
     if (file) return setError('本地图片尚未保存，请先点击“保存图片”，或切换到“选择已有图片”。');
     if (!selectedImageId) return setError('请先在第一步明确选择一张已保存图片。');
     if (!images.some((image) => image.id === selectedImageId)) return setError('当前图片不可用，请重新选择已保存图片。');
@@ -105,6 +117,7 @@ export function ImageVideoWorkspacePage() {
     } catch (e: any) {
       setError(e?.message || '视频任务提交失败');
     } finally {
+      submissionLockRef.current = false;
       setBusy(false);
     }
   };
