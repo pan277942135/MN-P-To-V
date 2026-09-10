@@ -314,6 +314,9 @@ export interface ServerVideoTaskRecord {
   sceneSafeDisabled?: boolean;
   selectedBest?: boolean;
   selectedAt?: number;
+  isDeleted?: boolean;
+  deletedAt?: number;
+  deletedBy?: string;
   operationName?: string;
   providerOperationId?: string;
   status: TaskStatus;
@@ -433,6 +436,9 @@ export interface ImageAssetRecord {
   sizeBytes: number;
   createdAt: number;
   updatedAt: number;
+  isDeleted?: boolean;
+  deletedAt?: number;
+  deletedBy?: string;
 }
 
 export interface VideoAsset {
