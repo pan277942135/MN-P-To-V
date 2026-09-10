@@ -12,6 +12,20 @@ type WorkspaceVideo = {
   thumbnailUrl?: string | null;
   selectedBest?: boolean;
   isDeleted?: boolean;
+  failureReason?: string | null;
+  retryMode?: string | null;
+  error?: {
+    code?: string;
+    stage?: string;
+    failureReason?: string | null;
+    retryMode?: string | null;
+    messageChinese?: string;
+    technicalMessageRedacted?: string;
+    httpStatus?: number | null;
+    googleStatus?: string | null;
+    googleReason?: string | null;
+    recommendedAction?: string;
+  } | string | null;
   createdAt: number;
 };
 
@@ -24,6 +38,31 @@ const json = async (response: Response) => {
   if (!response.ok) throw new Error(body?.error || '请求失败');
   return body;
 };
+
+
+function failureCategory(video: WorkspaceVideo): string {
+  const reason = video.failureReason || (typeof video.error === 'object' ? video.error?.failureReason : null) || '';
+  if (reason === 'output_rai_filtered' || reason === 'input_safety_blocked') return '提示词或输入图片触发 Google 安全策略（RAI）';
+  if (reason === 'provider_admission_busy') return '云端任务准入冲突';
+  if (reason === 'artifact_fetch_failed' || reason === 'artifact_persist_failed') return '视频产物读取或保存失败';
+  if (reason === 'compute_session_unavailable') return '算力连接或权限失败';
+  if (reason === 'submission_outcome_unknown') return 'Veo 提交结果未知';
+  const detail = typeof video.error === 'object' ? video.error : null;
+  if (detail?.stage === 'submit') return 'Veo 提交阶段失败';
+  if (detail?.stage === 'polling') return 'Veo 云端执行或轮询失败';
+  return '视频生成失败';
+}
+
+function failureGuidance(video: WorkspaceVideo): string {
+  const reason = video.failureReason || (typeof video.error === 'object' ? video.error?.failureReason : null) || '';
+  if (reason === 'output_rai_filtered' || reason === 'input_safety_blocked') return '请检查提示词和输入图片，删除敏感、危险或容易触发安全策略的描述，改用中性、具体的动作描述后重试。';
+  if (reason === 'provider_admission_busy') return '请刷新任务列表后重试；当前版本已支持独立任务并发，若仍出现此提示请查看任务详情。';
+  if (reason === 'artifact_fetch_failed' || reason === 'artifact_persist_failed') return '视频可能已在云端生成，但保存或读取失败；请先查看技术详情，确认 GCS/存储错误后再重试。';
+  if (reason === 'compute_session_unavailable') return '请重新连接算力服务，确认 Vertex AI 权限后再重试。';
+  if (reason === 'submission_outcome_unknown') return '不要立即重复提交，先核实该任务的 Veo Operation 状态，避免重复扣费。';
+  const detail = typeof video.error === 'object' ? video.error : null;
+  return detail?.recommendedAction || '请展开技术详情，根据错误阶段和错误码处理后再重试。';
+}
 
 export function ImageVideoWorkspacePage() {
   const [tab, setTab] = useState<'images' | 'videos'>('images');
@@ -62,6 +101,9 @@ export function ImageVideoWorkspacePage() {
       videoUrl: v.videoUrl || v.resultVideoUrl || null,
       thumbnailUrl: v.thumbnailUrl || v.sceneImageUrl || null,
       selectedBest: v.selectedBest === true,
+      failureReason: v.failureReason || null,
+      retryMode: v.retryMode || null,
+      error: v.error || null,
       createdAt: v.createdAt || Date.now(),
     })));
   };
@@ -238,7 +280,20 @@ export function ImageVideoWorkspacePage() {
           {tab === 'videos' && <div className="grid gap-4 lg:grid-cols-2">
             {videos.map((video, index) => <article key={video.taskId} className={video.selectedBest ? 'rounded-xl border border-emerald-400/70 bg-emerald-400/5 p-4' : 'rounded-xl border border-white/10 bg-white/[0.035] p-4'}>
               <div className="flex items-start justify-between gap-3"><div><p className="text-xs uppercase tracking-wider text-indigo-300">V{videos.length - index}</p><p className="mt-1 text-sm text-zinc-300">{video.durationSeconds}秒 · {video.status}</p></div><span className="text-xs text-zinc-400">{video.selectedBest ? '最佳版本' : '未选择'}</span></div>
-              {video.videoUrl ? <video className="mt-3 aspect-video w-full rounded-lg bg-black object-cover" controls src={video.videoUrl} poster={video.thumbnailUrl || undefined} /> : <div className="mt-3 flex aspect-video items-center justify-center rounded-lg bg-black/30 text-sm text-zinc-500">任务处理中…</div>}
+              {video.status === 'failed' ? <div className="mt-3 rounded-lg border border-rose-400/30 bg-rose-500/10 p-4 text-sm">
+                <p className="font-medium text-rose-200">失败原因：{failureCategory(video)}</p>
+                <p className="mt-2 text-rose-100">{typeof video.error === 'object' ? (video.error.messageChinese || '云端返回了失败结果，但未提供用户说明。') : (video.error || '云端返回了失败结果，但未提供详细错误。')}</p>
+                <p className="mt-2 text-amber-200">下一步：{failureGuidance(video)}</p>
+                {typeof video.error === 'object' && (video.error.technicalMessageRedacted || video.error.googleStatus || video.error.googleReason) && <details className="mt-3 rounded border border-white/10 p-2 text-xs text-zinc-300">
+                  <summary className="cursor-pointer text-zinc-400">查看技术详情</summary>
+                  {video.error.technicalMessageRedacted && <p className="mt-2 break-words">错误：{video.error.technicalMessageRedacted}</p>}
+                  {video.error.code && <p className="mt-1">错误码：{video.error.code}</p>}
+                  {video.error.stage && <p className="mt-1">失败阶段：{video.error.stage}</p>}
+                  {video.error.httpStatus != null && <p className="mt-1">HTTP：{video.error.httpStatus}</p>}
+                  {video.error.googleStatus && <p className="mt-1">Google 状态：{video.error.googleStatus}</p>}
+                  {video.error.googleReason && <p className="mt-1">Google 原因：{video.error.googleReason}</p>}
+                </details>}
+              </div> : video.videoUrl ? <video className="mt-3 aspect-video w-full rounded-lg bg-black object-cover" controls src={video.videoUrl} poster={video.thumbnailUrl || undefined} /> : <div className="mt-3 flex aspect-video items-center justify-center rounded-lg bg-black/30 text-sm text-zinc-500">任务处理中…</div>}
               <p className="mt-3 line-clamp-3 text-sm text-zinc-300">{video.prompt || '未填写 Prompt'}</p>
               <div className="mt-4 flex items-center justify-between gap-3"><span className="truncate text-xs text-zinc-500">source image: {video.sourceImageId || selectedImageId || '—'}</span><div className="flex shrink-0 gap-2"><button type="button" disabled={busy || video.status !== 'completed'} onClick={() => void selectBest(video.taskId)} className="rounded-lg border border-indigo-400/40 px-3 py-2 text-xs text-indigo-200 disabled:opacity-40">人工选择此版本</button><button type="button" disabled={busy} onClick={() => void deleteVideo(video.taskId)} className="rounded-lg border border-rose-400/40 px-3 py-2 text-xs text-rose-200 disabled:opacity-40">删除</button></div></div>
             </article>)}
