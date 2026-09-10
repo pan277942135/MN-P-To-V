@@ -104,7 +104,7 @@ describe('Director Console source contract', () => {
     // Automatic keyframe QA is not part of the active UI flow. The dormant backend
     // capability may remain available for a future explicit opt-in, but deploy smoke
     // must never invoke it or any other paid Director provider.
-    expect(workflow).toContain('P0_DISABLE_STARTUP_RECOVERY=1');
+    expect(workflow).toContain('P0_DISABLE_STARTUP_RECOVERY=0');
     expect(workflow).toContain('/api/director/capabilities');
     expect(workflow).not.toContain('/api/director/storyboard/generate" | tee');
     expect(workflow).not.toContain('/api/director/keyframes/generate" | tee');

@@ -1,6 +1,6 @@
 import type { ServerVideoTaskRecord } from '../../types';
 import { getFirestoreInstance, isFirestoreAvailable, markFirestoreUnavailable } from '../db/firestore';
-import { buildProviderAdmissionScopeKey, isProviderAdmissionBlockingTask, ProviderAdmissionBusyError } from '../services/providerAdmissionPolicy';
+import { buildProviderAdmissionScopeKey } from '../services/providerAdmissionPolicy';
 
 export function sanitizeForFirestore<T extends Record<string, any>>(obj: T): Record<string, any> {
   const cleanObj: Record<string, any> = {};
@@ -185,7 +185,9 @@ export class FirestoreTaskRepository {
     return this.withRetry('createTask', true, async () => {
       const docRef = db.collection(this.collectionName).doc(taskId);
       const scopeKey = buildProviderAdmissionScopeKey(record.projectId);
-      const admissionRef = db.collection(this.providerAdmissionCollectionName).doc(scopeKey);
+      // Admission metadata is now per task, not one project-wide slot. This preserves
+      // durable task evidence while allowing independent Veo tasks to submit concurrently.
+      const admissionRef = db.collection(this.providerAdmissionCollectionName).doc(`${scopeKey}_${taskId}`);
       const now = Date.now();
       const payload = sanitizeForFirestore({
         ...record,
@@ -206,43 +208,16 @@ export class FirestoreTaskRepository {
           throw createAlreadyExistsError(taskId);
         }
 
-        const incomingNeedsProviderAdmission = isProviderAdmissionBlockingTask(record);
-        if (incomingNeedsProviderAdmission) {
-          const admissionSnap = await transaction.get(admissionRef);
-          const admissionData = admissionSnap.exists ? (admissionSnap.data() as any) : null;
-          const incumbentTaskId = String(admissionData?.taskId || '');
-
-          if (incumbentTaskId && incumbentTaskId !== taskId) {
-            const incumbentRef = db.collection(this.collectionName).doc(incumbentTaskId);
-            const incumbentSnap = await transaction.get(incumbentRef);
-            if (incumbentSnap.exists) {
-              const incumbentTask = {
-                ...(incumbentSnap.data() as ServerVideoTaskRecord),
-                taskId: (incumbentSnap.data() as ServerVideoTaskRecord).taskId || incumbentTaskId,
-                evidenceSource: 'firestore' as const,
-              } as ServerVideoTaskRecord;
-              if (isProviderAdmissionBlockingTask(incumbentTask)) {
-                throw new ProviderAdmissionBusyError({
-                  blockingTaskId: incumbentTask.taskId || incumbentTaskId,
-                  blockingStatus: incumbentTask.status,
-                  scopeKey,
-                });
-              }
-            }
-          }
-        }
-
         transaction.set(docRef, payload);
-        if (incomingNeedsProviderAdmission) {
-          transaction.set(admissionRef, sanitizeForFirestore({
-            scopeKey,
-            taskId,
-            projectId: record.projectId || '',
-            acquiredAt: now,
-            updatedAt: now,
-            authority: 'firestore',
-          }));
-        }
+        transaction.set(admissionRef, sanitizeForFirestore({
+          scopeKey,
+          taskId,
+          projectId: record.projectId || '',
+          acquiredAt: now,
+          updatedAt: now,
+          authority: 'firestore',
+          mode: 'per_task_concurrent',
+        }));
       });
     });
   }

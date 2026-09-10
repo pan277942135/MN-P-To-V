@@ -63,24 +63,17 @@ describe('FirestoreTaskRepository durable provider admission', () => {
     instanceB = new FirestoreTaskRepository();
   });
 
-  it('allows only one different blocking task per project across repository instances', async () => {
+  it('allows different blocking tasks to run concurrently in the same project', async () => {
     await instanceA.createTask(makeTask('task_a', 'project-a', 'polling'));
 
-    await expect(instanceB.createTask(makeTask('task_b', 'project-a', 'submitting'))).rejects.toMatchObject({
-      code: 'PROVIDER_ADMISSION_BUSY',
-      blockingTaskId: 'task_a',
-      blockingStatus: 'polling',
-    });
-
-    expect(await instanceB.getTask('task_b')).toBeNull();
+    await expect(instanceB.createTask(makeTask('task_b', 'project-a', 'submitting'))).resolves.toBeUndefined();
+    expect((await instanceB.getTask('task_b'))?.status).toBe('submitting');
   });
 
-  it('keeps submission_outcome_unknown fail-closed', async () => {
+  it('allows another task while preserving submission_outcome_unknown on its own task', async () => {
     await instanceA.createTask(makeTask('task_unknown', 'project-a', 'submission_outcome_unknown'));
-    await expect(instanceB.createTask(makeTask('task_next', 'project-a', 'submitting'))).rejects.toMatchObject({
-      code: 'PROVIDER_ADMISSION_BUSY',
-      blockingTaskId: 'task_unknown',
-    });
+    await expect(instanceB.createTask(makeTask('task_next', 'project-a', 'submitting'))).resolves.toBeUndefined();
+    expect((await instanceA.getTask('task_unknown'))?.status).toBe('submission_outcome_unknown');
   });
 
   it('reclaims a stale slot when the incumbent is terminal', async () => {

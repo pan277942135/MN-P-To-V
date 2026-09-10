@@ -1584,6 +1584,7 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       await db.collection('image_assets').doc(imageId).set({
         id: imageId, objectPath: artifact.outputObjectPath, bucket: artifact.outputBucket,
         mimeType: file.mimetype || 'image/jpeg', sizeBytes: file.size || file.buffer.length, createdAt: now, updatedAt: now,
+        isDeleted: false,
       });
       return res.status(201).json({
         id: imageId, objectPath: artifact.outputObjectPath, bucket: artifact.outputBucket,
@@ -1601,7 +1602,9 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const db = getFirestoreInstance();
       if (!db) return res.status(503).json({ images: [], storageAuthority: 'unavailable' });
       const snapshot = await db.collection('image_assets').limit(100).get();
-      const images = snapshot.docs.map((doc) => ({ ...(doc.data() as any), imageUrl: '/api/images/' + doc.id }))
+      const images = snapshot.docs
+        .map((doc) => ({ ...(doc.data() as any), imageUrl: '/api/images/' + doc.id }))
+        .filter((image: any) => image.isDeleted !== true)
         .sort((a: any, b: any) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
       return res.json({ images, storageAuthority: 'firestore' });
     } catch (err) {
@@ -1610,12 +1613,38 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
     }
   });
 
+
+  // Logical image deletion: hide metadata only; keep the original GCS object intact.
+  app.delete('/api/images/:imageId', async (req, res) => {
+    try {
+      const imageId = String(req.params.imageId || '').trim();
+      const db = getFirestoreInstance();
+      if (!imageId) return res.status(400).json({ success: false, error: 'imageId 为必填项' });
+      if (!db) return res.status(503).json({ success: false, error: '存储服务不可用', storageAuthority: 'unavailable' });
+
+      const ref = db.collection('image_assets').doc(imageId);
+      const snap = await ref.get();
+      if (!snap.exists) return res.status(404).json({ success: false, error: '图片不存在', imageId });
+      const asset = snap.data() as any;
+      if (asset.isDeleted === true) {
+        return res.json({ success: true, deleted: false, logicalDelete: true, imageId, storageAuthority: 'firestore' });
+      }
+
+      const now = Date.now();
+      await ref.update({ isDeleted: true, deletedAt: now, updatedAt: now });
+      return res.json({ success: true, deleted: true, logicalDelete: true, imageId, storageAuthority: 'firestore' });
+    } catch (err: any) {
+      console.error('[Image Asset Logical Delete Error]:', err);
+      return res.status(500).json({ success: false, error: '图片删除失败', storageAuthority: 'firestore' });
+    }
+  });
+
   app.get('/api/images/:imageId/videos', async (req, res) => {
     try {
       const imageId = String(req.params.imageId || '').trim();
       if (!imageId || !firestoreTaskRepository.isAvailable()) return res.status(503).json({ videos: [], storageAuthority: 'unavailable' });
       const records = await firestoreTaskRepository.listTasks(100);
-      const videos = records.filter((record) => record.sourceImageId === imageId).map((record) => ({
+      const videos = records.filter((record) => record.sourceImageId === imageId && record.isDeleted !== true).map((record) => ({
         id: record.id || record.taskId, taskId: record.taskId, sourceImageId: record.sourceImageId,
         prompt: record.rawUserPrompt || record.compiledPrompt || '', durationSeconds: record.durationSeconds,
         status: record.status, videoUrl: record.artifactPersisted ? '/api/videos/stream/' + record.taskId : null,
@@ -1637,6 +1666,7 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const doc = await db.collection('image_assets').doc(imageId).get();
       if (!doc.exists) return res.status(404).send('Image not found');
       const asset = doc.data() as any;
+      if (asset.isDeleted === true) return res.status(404).send('Image not found');
       const connectionId = String(req.headers['x-connection-id'] || '');
       const session = connectionId ? CredentialService.getSession(connectionId) : undefined;
       const buffer = await gcsArtifactStore.fetchArtifactBuffer(String(asset.bucket || getVeoBucketName()), String(asset.objectPath || ''), session ? { session } : undefined);
@@ -1746,6 +1776,9 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const sceneFile = files['sceneImage']?.[0];
       const imageFile = files['image']?.[0];
       const imageId = String(req.body.imageId || '').trim() || undefined;
+      if (imageId && imageFile) {
+        return res.status(400).json({ error: '请只选择一种图片来源：已有照片或本地上传照片，不能同时提交。' });
+      }
       const simpleWorkspace = req.body.workspaceMode === 'simple_image_to_video' || Boolean(imageId) || Boolean(imageFile);
       const masterFiles = [
         ...(files['masterImages'] || []),
@@ -1759,6 +1792,7 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         const imageDoc = db ? await db.collection('image_assets').doc(imageId).get() : null;
         if (!imageDoc?.exists) return res.status(404).json({ error: 'source image not found', imageId });
         const imageAsset = imageDoc.data() as any;
+        if (imageAsset.isDeleted === true) return res.status(410).json({ error: 'source image has been deleted', imageId });
         const imageConnectionId = String(req.headers['x-connection-id'] || '');
         const imageSession = imageConnectionId ? CredentialService.getSession(imageConnectionId) : undefined;
         sourceImageBuffer = await gcsArtifactStore.fetchArtifactBuffer(String(imageAsset.bucket || getVeoBucketName()), String(imageAsset.objectPath || ''), imageSession ? { session: imageSession } : undefined);
@@ -2551,7 +2585,7 @@ ${cleanPrompt}`
 
       const tasks = tasksFromStore
         .filter((rec) => {
-          if (!rec) return false;
+          if (!rec || rec.isDeleted === true) return false;
           if (connectionId && rec.connectionId) {
             return rec.connectionId === connectionId;
           }
@@ -2681,6 +2715,11 @@ ${cleanPrompt}`
               recommendedAction: effectiveRetryMode === 'REWRITE_INPUT_THEN_REGENERATE'
                 ? '请修改提示词或更换图片后重试'
                 : '请在下方点击【重试】',
+              errorId: rec.structuredError?.errorId || null,
+              traceId: rec.structuredError?.traceId || null,
+              requestId: rec.structuredError?.requestId || null,
+              revision: rec.structuredError?.revision || process.env.K_REVISION || null,
+              taskId: rec.taskId || rec.id,
             } : null,
             createdAt: rec.createdAt,
             updatedAt: rec.updatedAt,
@@ -2713,7 +2752,7 @@ ${cleanPrompt}`
       const taskId = String(req.params.taskId || '').trim();
       if (!taskId || !firestoreTaskRepository.isAvailable()) return res.status(503).json({ error: 'Firestore unavailable', storageAuthority: 'unavailable' });
       const selected = await firestoreTaskRepository.getTask(taskId);
-      if (!selected) return res.status(404).json({ error: 'task_not_found' });
+      if (!selected || selected.isDeleted === true) return res.status(404).json({ error: 'task_not_found' });
       if (!selected.sourceImageId) return res.status(400).json({ error: '该视频没有关联 sourceImageId' });
       const records = await firestoreTaskRepository.listTasks(100);
       const selectedAt = Date.now();
@@ -2773,13 +2812,21 @@ ${cleanPrompt}`
         });
       }
 
-      const deleted = await firestoreTaskRepository.deleteTask(taskId);
-      if (deleted) {
-        serverVideoTaskStore.delete(taskId);
-        ephemeralVideoStore.delete(taskId);
-        ephemeralImageStore.delete(taskId);
-      }
-      return res.json({ success: true, deleted, deletedTaskId: taskId, storageAuthority: 'firestore' });
+      const deletedAt = Date.now();
+      await firestoreTaskRepository.updateTask(taskId, {
+        isDeleted: true,
+        deletedAt,
+        updatedAt: deletedAt,
+      });
+      const updated = await firestoreTaskRepository.getTask(taskId);
+      if (updated) serverVideoTaskStore.set(taskId, updated);
+      return res.json({
+        success: true,
+        deleted: true,
+        logicalDelete: true,
+        deletedTaskId: taskId,
+        storageAuthority: 'firestore',
+      });
     } catch (err) {
       console.error('Failed to delete video task:', err);
       return res.status(500).json({ error: '删除视频任务失败', storageAuthority: 'firestore' });
@@ -2813,12 +2860,13 @@ ${cleanPrompt}`
           continue;
         }
 
-        if (await firestoreTaskRepository.deleteTask(rec.taskId || rec.id)) {
-          serverVideoTaskStore.delete(rec.taskId || rec.id);
-          ephemeralVideoStore.delete(rec.taskId || rec.id);
-          ephemeralImageStore.delete(rec.taskId || rec.id);
-          deletedCount++;
-        }
+        const deletedAt = Date.now();
+        await firestoreTaskRepository.updateTask(rec.taskId || rec.id, {
+          isDeleted: true,
+          deletedAt,
+          updatedAt: deletedAt,
+        });
+        deletedCount++;
       }
 
       return res.json({ success: true, deletedCount, protectedCount, storageAuthority: 'firestore' });
@@ -4284,7 +4332,7 @@ ${cleanPrompt}`
 
       // Firestore must validate the task before an ephemeral cache hit can be served.
       const rec = await firestoreTaskRepository.getTask(taskId);
-      if (!rec) {
+      if (!rec || rec.isDeleted === true) {
         return res.status(404).json({ error: 'task_not_found', storageAuthority: 'firestore' });
       }
       if (!rec.outputBucket || !rec.outputObjectPath || rec.artifactPersisted !== true) {
