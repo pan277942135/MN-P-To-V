@@ -1623,8 +1623,27 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const snapshot = await query.get();
       const hasMore = snapshot.docs.length > pageSize;
       const pageDocs = snapshot.docs.slice(0, pageSize);
+      const imageIds = pageDocs.map((doc) => doc.id);
+      const videoCountByImageId = new Map<string, number>();
+      for (let offset = 0; offset < imageIds.length; offset += 30) {
+        const chunk = imageIds.slice(offset, offset + 30);
+        if (!chunk.length) continue;
+        const videoSnapshot = await db.collection('video_tasks').where('sourceImageId', 'in', chunk).get();
+        videoSnapshot.forEach((videoDoc) => {
+          const video = videoDoc.data() as any;
+          if (video.isDeleted !== true && video.sourceImageId) {
+            const imageId = String(video.sourceImageId);
+            videoCountByImageId.set(imageId, (videoCountByImageId.get(imageId) || 0) + 1);
+          }
+        });
+      }
       const images = pageDocs
-        .map((doc) => ({ ...(doc.data() as any), imageUrl: '/api/images/' + doc.id, thumbnailUrl: '/api/images/' + doc.id + '/thumbnail' }))
+        .map((doc) => ({
+          ...(doc.data() as any),
+          imageUrl: '/api/images/' + doc.id,
+          thumbnailUrl: '/api/images/' + doc.id + '/thumbnail',
+          videoCount: videoCountByImageId.get(doc.id) || 0,
+        }))
         .filter((image: any) => image.isDeleted !== true);
       const lastRawDoc = snapshot.docs[pageSize - 1];
       const nextCursor = hasMore && lastRawDoc ? String(lastRawDoc.get('createdAt') || '') : null;
