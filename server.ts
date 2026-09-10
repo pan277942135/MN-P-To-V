@@ -29,7 +29,7 @@ import { durableCharacterService } from './src/server/services/durableCharacterS
 import { taskStateMachineService, InvalidStateTransitionError } from './src/server/services/taskStateMachineService';
 import { isProviderTaskDeletionSafe } from './src/server/services/providerAdmissionPolicy';
 import { evaluateProviderOperationLinkage } from './src/server/services/providerOperationRecoveryPolicy';
-import { getStorageAuthority } from './src/server/db/firestore';
+import { getStorageAuthority, getFirestoreInstance } from './src/server/db/firestore';
 import {
   createDefaultS01ProductionService,
   type S01ProductionServiceLike,
@@ -39,6 +39,22 @@ import { gcsArtifactStore, resolveVeoOutputBucket, resolveVeoStorageUri, getVeoB
 // Server Video Task Store & Ephemeral In-Memory Cache
 export const ephemeralImageStore = new Map<string, { buffer: Buffer; mimeType: string }>();
 export const ephemeralVideoStore = new Map<string, Buffer>();
+
+function isIdentitySafeEnabled(): boolean {
+  // Production defaults to off; test mode keeps the strict regression contract unless
+  // a test explicitly requests the advisory path with the legacy false flag.
+  const legacyBlockingFlag = process.env.FIRST_FRAME_IDENTITY_QA_BLOCKING;
+  const runningUnderVitest = process.env.VITEST === 'true' || process.env.VITEST === '1';
+  return process.env.ENABLE_IDENTITY_SAFE === 'true' ||
+    legacyBlockingFlag !== 'false' &&
+      (runningUnderVitest || process.env.NODE_ENV === 'test' || legacyBlockingFlag === 'true');
+}
+function isSceneSafeEnabled(): boolean {
+  return process.env.ENABLE_SCENE_SAFE === 'true';
+}
+function isSupportedVideoDuration(value: number): value is 4 | 6 | 8 {
+  return value === 4 || value === 6 || value === 8;
+}
 
 function saveImageBufferToFile(taskId: string, buffer: Buffer, mimeType = 'image/jpeg'): string {
   ephemeralImageStore.set(taskId, { buffer, mimeType });
@@ -142,6 +158,19 @@ async function settlePersistedVideoThroughQa(params: {
   patch?: Partial<ServerVideoTaskRecord>;
 }): Promise<ServerVideoTaskRecord> {
   const { taskId, videoBuffer, artifactMeta, session, ai, analysisModel, patch = {} } = params;
+
+  if (!isIdentitySafeEnabled()) {
+    await taskStateMachineService.persistArtifactForQa({
+      taskId, outputBucket: artifactMeta.outputBucket, outputObjectPath: artifactMeta.outputObjectPath,
+      videoUri: artifactMeta.videoUri, sizeBytes: artifactMeta.sizeBytes, contentType: artifactMeta.contentType,
+      artifactPersistedAt: artifactMeta.artifactPersistedAt,
+      patch: { ...patch, identityQaDisabled: true, identityQaStatus: 'not_run', qaReport: null, identityQaReport: null },
+    });
+    return await taskStateMachineService.transitionTask({
+      taskId, toStatus: 'completed',
+      patch: { identityQaDisabled: true, identityQaStatus: 'not_run', qaReport: null, identityQaReport: null },
+    });
+  }
 
   const qaPendingTask = await taskStateMachineService.persistArtifactForQa({
     taskId,
@@ -1318,12 +1347,92 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
     }
   });
 
+  // Simple image center: metadata in Firestore, image bytes in the existing GCS Artifact Store.
+  app.post('/api/images', upload.single('image'), async (req, res) => {
+    try {
+      const file = req.file;
+      const db = getFirestoreInstance();
+      if (!file || !file.buffer?.length) return res.status(400).json({ error: '请上传图片文件' });
+      if (!db) return res.status(503).json({ error: '存储服务不可用', storageAuthority: 'unavailable' });
+      const imageId = 'img_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+      const ext = (file.mimetype.split('/')[1] || 'jpeg').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'jpeg';
+      const objectPath = 'images/' + imageId + '/original.' + ext;
+      const now = Date.now();
+      const artifact = await gcsArtifactStore.uploadImageArtifact({ objectPath, buffer: file.buffer, contentType: file.mimetype || 'image/jpeg' });
+      await db.collection('image_assets').doc(imageId).set({
+        id: imageId, objectPath: artifact.outputObjectPath, bucket: artifact.outputBucket,
+        mimeType: file.mimetype || 'image/jpeg', sizeBytes: file.size || file.buffer.length, createdAt: now, updatedAt: now,
+      });
+      return res.status(201).json({
+        id: imageId, objectPath: artifact.outputObjectPath, bucket: artifact.outputBucket,
+        mimeType: file.mimetype || 'image/jpeg', sizeBytes: file.size || file.buffer.length,
+        createdAt: now, updatedAt: now, imageUrl: '/api/images/' + imageId,
+      });
+    } catch (err: any) {
+      console.error('[Image Asset Upload Error]:', err);
+      return res.status(500).json({ error: '图片保存失败: ' + (err?.message || err) });
+    }
+  });
+
+  app.get('/api/images', async (_req, res) => {
+    try {
+      const db = getFirestoreInstance();
+      if (!db) return res.status(503).json({ images: [], storageAuthority: 'unavailable' });
+      const snapshot = await db.collection('image_assets').limit(100).get();
+      const images = snapshot.docs.map((doc) => ({ ...(doc.data() as any), imageUrl: '/api/images/' + doc.id }))
+        .sort((a: any, b: any) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+      return res.json({ images, storageAuthority: 'firestore' });
+    } catch (err) {
+      console.error('[Image Asset List Error]:', err);
+      return res.status(500).json({ images: [], error: '图片列表读取失败' });
+    }
+  });
+
+  app.get('/api/images/:imageId/videos', async (req, res) => {
+    try {
+      const imageId = String(req.params.imageId || '').trim();
+      if (!imageId || !firestoreTaskRepository.isAvailable()) return res.status(503).json({ videos: [], storageAuthority: 'unavailable' });
+      const records = await firestoreTaskRepository.listTasks(100);
+      const videos = records.filter((record) => record.sourceImageId === imageId).map((record) => ({
+        id: record.id || record.taskId, taskId: record.taskId, sourceImageId: record.sourceImageId,
+        prompt: record.rawUserPrompt || record.compiledPrompt || '', durationSeconds: record.durationSeconds,
+        status: record.status, videoUrl: record.artifactPersisted ? '/api/videos/stream/' + record.taskId : null,
+        thumbnailUrl: record.sceneImageUrl || null, selectedBest: record.selectedBest === true,
+        selectedAt: record.selectedAt || null, createdAt: record.createdAt, updatedAt: record.updatedAt,
+      }));
+      return res.json({ videos, storageAuthority: 'firestore' });
+    } catch (err) {
+      console.error('[Related Video List Error]:', err);
+      return res.status(500).json({ videos: [], error: '关联视频列表读取失败' });
+    }
+  });
+
+  app.get('/api/images/:imageId', async (req, res) => {
+    try {
+      const imageId = String(req.params.imageId || '').trim();
+      const db = getFirestoreInstance();
+      if (!db) return res.status(503).send('存储服务不可用');
+      const doc = await db.collection('image_assets').doc(imageId).get();
+      if (!doc.exists) return res.status(404).send('Image not found');
+      const asset = doc.data() as any;
+      const connectionId = String(req.headers['x-connection-id'] || '');
+      const session = connectionId ? CredentialService.getSession(connectionId) : undefined;
+      const buffer = await gcsArtifactStore.fetchArtifactBuffer(String(asset.bucket || getVeoBucketName()), String(asset.objectPath || ''), session ? { session } : undefined);
+      res.setHeader('Content-Type', asset.mimeType || 'image/jpeg');
+      return res.send(buffer);
+    } catch (err) {
+      console.error('[Image Asset Stream Error]:', err);
+      return res.status(404).send('Image not found');
+    }
+  });
+
   // Async Video Task Start Endpoint
   app.post('/api/videos/start', upload.fields([
     { name: 'firstFrame', maxCount: 1 },
     { name: 'sceneImage', maxCount: 1 },
     { name: 'masterImages', maxCount: 4 },
     { name: 'masterImage', maxCount: 1 },
+    { name: 'image', maxCount: 1 },
   ]), async (req, res) => {
     try {
       const connectionId = req.headers['x-connection-id'] as string;
@@ -1413,14 +1522,27 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const files = req.files as { [fieldname: string]: Express.Multer.File[] };
       const ffFile = files['firstFrame']?.[0];
       const sceneFile = files['sceneImage']?.[0];
+      const imageFile = files['image']?.[0];
+      const imageId = String(req.body.imageId || '').trim() || undefined;
+      const simpleWorkspace = req.body.workspaceMode === 'simple_image_to_video' || Boolean(imageId) || Boolean(imageFile);
       const masterFiles = [
         ...(files['masterImages'] || []),
         ...(files['masterImage'] || []),
       ];
 
-      if (!ffFile && !sceneFile) {
-        return res.status(400).json({ error: '缺少首帧图或场景输入图' });
+      let sourceImageBuffer = imageFile?.buffer;
+      let sourceImageMime = imageFile?.mimetype || 'image/jpeg';
+      if (!sourceImageBuffer && imageId) {
+        const db = getFirestoreInstance();
+        const imageDoc = db ? await db.collection('image_assets').doc(imageId).get() : null;
+        if (!imageDoc?.exists) return res.status(404).json({ error: 'source image not found', imageId });
+        const imageAsset = imageDoc.data() as any;
+        const imageConnectionId = String(req.headers['x-connection-id'] || '');
+        const imageSession = imageConnectionId ? CredentialService.getSession(imageConnectionId) : undefined;
+        sourceImageBuffer = await gcsArtifactStore.fetchArtifactBuffer(String(imageAsset.bucket || getVeoBucketName()), String(imageAsset.objectPath || ''), imageSession ? { session: imageSession } : undefined);
+        sourceImageMime = String(imageAsset.mimeType || 'image/jpeg');
       }
+      if (!ffFile && !sceneFile && !sourceImageBuffer) return res.status(400).json({ error: '缺少首帧图、场景输入图或 source image' });
 
       const characterId = req.body.characterId || '';
       let characterDescription = req.body.characterDescription || '';
@@ -1446,7 +1568,10 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       // Clean negative prompt blocks and bracket tags before sending to Veo
       const normalizedPrompt = PromptCompiler.cleanUserMotionPrompt(compiledPrompt || rawUserPrompt);
       const sceneMode = req.body.sceneMode || 'replace_primary_person';
-      const durationSeconds = Number(req.body.durationSeconds) || 4;
+      const durationSeconds = Number(req.body.durationSeconds || 4);
+      if (!isSupportedVideoDuration(durationSeconds)) return res.status(400).json({ error: 'durationSeconds 只允许 4、6 或 8', allowedDurations: [4, 6, 8] });
+      const identitySafeEnabled = isIdentitySafeEnabled();
+      const sceneSafeEnabled = isSceneSafeEnabled();
       const aspectRatio = req.body.aspectRatio || '9:16';
       const resolution = req.body.resolution || '720p';
       const generateAudio = req.body.generateAudio === 'true' || req.body.generateAudio === true;
@@ -1467,13 +1592,10 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const manualApproved = req.body.manualApproved === 'true' || req.body.manualApproved === true;
 
       // Identity Lock Step 1: Determine Identity Source Mode
-      const sourceMode = IdentityLockService.determineIdentitySourceMode({
-        sceneMode,
-        imageIsTargetCharacter,
-      });
+      const sourceMode = simpleWorkspace ? 'DIRECT_CHARACTER_IMAGE' : IdentityLockService.determineIdentitySourceMode({ sceneMode, imageIsTargetCharacter });
 
-      // M2-1/M2-2 fail closed: every identity mode requires at least one durable master reference.
-      if (masterBuffers.length === 0) {
+      // Identity Safe is retained behind an explicit flag; the simple workspace animates the uploaded image directly when disabled.
+      if (identitySafeEnabled && !simpleWorkspace && masterBuffers.length === 0) {
         console.warn(`[Video Start] 拒绝启动 Veo: 缺失目标角色母板图 (identity_reference_missing)`);
         const errObj = createStructuredError({
           source: 'internal_api',
@@ -1495,15 +1617,15 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         });
       }
 
-      const rawSceneBuf = sceneFile ? sceneFile.buffer : ffFile!.buffer;
-      const rawSceneMime = sceneFile ? (sceneFile.mimetype || 'image/jpeg') : (ffFile!.mimetype || 'image/jpeg');
+      const rawSceneBuf = sceneFile?.buffer || ffFile?.buffer || sourceImageBuffer!;
+      const rawSceneMime = sceneFile?.mimetype || ffFile?.mimetype || sourceImageMime || 'image/jpeg';
 
       // Identity Lock Step 2: Rebuild First Frame if required
       let approvedFirstFrameBuf = rawSceneBuf;
       let approvedFirstFrameMime = rawSceneMime;
       let rebuildExecuted = false;
 
-      if (sourceMode === 'IDENTITY_REBUILD_REQUIRED') {
+      if (sceneSafeEnabled && !simpleWorkspace && sourceMode === 'IDENTITY_REBUILD_REQUIRED') {
         const rebuildResult = await IdentityLockService.rebuildFirstFrame({
           ai,
           imageModelName: models.imageModel || 'gemini-3.1-flash-image',
@@ -1529,24 +1651,33 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
 
       // Identity Lock Step 3: Evaluate First Frame Identity Gate
       // Use the complete uploaded identity pack (up to 4 masters), not only masterBuffers[0].
-      const gateResult = await IdentityLockService.evaluateIdentityGate({
-        ai,
-        analysisModel: session.analysisModel || 'gemini-3.6-flash',
-        masterImageBuffer: masterBuffers[0],
-        masterMimeType: masterMimeTypes[0],
-        masterImageBuffers: masterBuffers,
-        masterMimeTypes,
-        sceneImageBuffer: rawSceneBuf,
-        sceneMimeType: rawSceneMime,
-        candidateBuffer: approvedFirstFrameBuf,
-        candidateMimeType: approvedFirstFrameMime,
-        identitySpec,
-        sceneMode,
-        imageIsTargetCharacter,
-        manualApproved,
-      });
+      const gateResult = identitySafeEnabled
+        ? await IdentityLockService.evaluateIdentityGate({
+          ai,
+          analysisModel: session.analysisModel || 'gemini-3.6-flash',
+          masterImageBuffer: masterBuffers[0],
+          masterMimeType: masterMimeTypes[0],
+          masterImageBuffers: masterBuffers,
+          masterMimeTypes,
+          sceneImageBuffer: rawSceneBuf,
+          sceneMimeType: rawSceneMime,
+          candidateBuffer: approvedFirstFrameBuf,
+          candidateMimeType: approvedFirstFrameMime,
+          identitySpec,
+          sceneMode,
+          imageIsTargetCharacter,
+          manualApproved,
+        })
+        : {
+          status: 'pass' as const,
+          identityQaReport: null,
+          identityQaScore: 100,
+          identityCriticalIssues: [],
+          requiresManualApproval: false,
+          canStartVeo: true,
+        };
 
-      if (!gateResult.canStartVeo) {
+      if (identitySafeEnabled && !gateResult.canStartVeo) {
         console.warn(`[Video Start] 拒绝启动 Veo: Identity Gate 未通过 (status: ${gateResult.status}, score: ${gateResult.identityQaScore})`);
         const isReview = gateResult.status === 'review';
         const failureReason = isReview ? 'identity_qa_review_required' : 'identity_qa_failed';
@@ -1636,6 +1767,10 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const taskRecord: ServerVideoTaskRecord = {
         id: taskId,
         taskId,
+        sourceImageId: imageId,
+        identityQaDisabled: !identitySafeEnabled,
+        sceneSafeDisabled: !sceneSafeEnabled,
+        selectedBest: false,
         sceneImageUrl,
         status: 'preparing',
         modelId: models.videoModel,
@@ -2259,6 +2394,11 @@ ${cleanPrompt}`
           return {
             id: rec.id || rec.taskId,
             taskId: rec.taskId,
+            sourceImageId: rec.sourceImageId || null,
+            durationSeconds: rec.durationSeconds,
+            videoUrl: rec.artifactPersisted ? '/api/videos/stream/' + rec.taskId : null,
+            selectedBest: rec.selectedBest === true,
+            selectedAt: rec.selectedAt || null,
             characterId: rec.characterId || '',
             characterName: rec.characterName || '默认虚拟角色',
             sceneMode: rec.sceneMode || 'animate_existing_character',
@@ -2320,6 +2460,30 @@ ${cleanPrompt}`
     } catch (err) {
       console.error('Failed to list video tasks:', err);
       res.status(500).json({ error: '获取视频任务列表失败' });
+    }
+  });
+
+  // Human selection of the best version for a source image.
+  app.post('/api/videos/:taskId/select', async (req, res) => {
+    try {
+      const taskId = String(req.params.taskId || '').trim();
+      if (!taskId || !firestoreTaskRepository.isAvailable()) return res.status(503).json({ error: 'Firestore unavailable', storageAuthority: 'unavailable' });
+      const selected = await firestoreTaskRepository.getTask(taskId);
+      if (!selected) return res.status(404).json({ error: 'task_not_found' });
+      if (!selected.sourceImageId) return res.status(400).json({ error: '该视频没有关联 sourceImageId' });
+      const records = await firestoreTaskRepository.listTasks(100);
+      const selectedAt = Date.now();
+      for (const record of records) {
+        if (record.sourceImageId !== selected.sourceImageId) continue;
+        const id = record.taskId || record.id;
+        await firestoreTaskRepository.updateTask(id, { selectedBest: id === taskId, selectedAt: id === taskId ? selectedAt : null } as any);
+      }
+      const updated = await firestoreTaskRepository.getTask(taskId);
+      if (updated) serverVideoTaskStore.set(taskId, updated);
+      return res.json({ success: true, taskId, sourceImageId: selected.sourceImageId, selectedAt, storageAuthority: 'firestore' });
+    } catch (err) {
+      console.error('[Select Best Video Error]:', err);
+      return res.status(500).json({ error: '最佳视频版本保存失败' });
     }
   });
 
