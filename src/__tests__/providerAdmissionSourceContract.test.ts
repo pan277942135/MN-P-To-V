@@ -10,7 +10,7 @@ describe('durable personal-mode provider admission source contract', () => {
   it('records a per-task admission marker without a project-wide blocking slot', () => {
     expect(repoSource).toContain("providerAdmissionCollectionName = 'video_provider_admission'");
     expect(repoSource).toContain('buildProviderAdmissionScopeKey(record.projectId)');
-    expect(repoSource).toContain('doc(\`\${scopeKey}_\${taskId}\`)');
+    expect(repoSource).toContain("doc(`\${scopeKey}_\${taskId}`)");
     expect(repoSource).not.toContain('transaction.get(admissionRef)');
     expect(repoSource).not.toContain('new ProviderAdmissionBusyError');
     expect(repoSource).toContain('transaction.set(docRef, payload)');
