@@ -10,6 +10,16 @@ type ImageAsset = {
   isDeleted?: boolean;
 };
 
+type StructuredVideoError = {
+  code?: string;
+  messageChinese?: string;
+  userMessage?: string;
+  technicalMessageRedacted?: string;
+  recommendedAction?: string;
+  failureStage?: string;
+  stage?: string;
+};
+
 type WorkspaceVideo = {
   id: string;
   taskId: string;
@@ -17,6 +27,10 @@ type WorkspaceVideo = {
   durationSeconds: 4 | 6 | 8;
   status: string;
   videoUrl?: string | null;
+  error?: unknown;
+  failureReason?: string | null;
+  failureStage?: string | null;
+  structuredError?: StructuredVideoError | null;
   selectedBest?: boolean;
   createdAt: number;
 };
@@ -28,8 +42,45 @@ const headers = () => {
 
 const json = async (response: Response) => {
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body?.error || '请求失败');
+  if (!response.ok) {
+    const structured = body?.structuredError || {};
+    const error = body?.error;
+    const message = structured.messageChinese || structured.userMessage ||
+      (typeof error === 'string' ? error : error?.messageChinese || error?.userMessage) ||
+      body?.failureReason || '请求失败';
+    throw new Error(String(message));
+  }
   return body;
+};
+
+function describeVideoFailure(video: WorkspaceVideo) {
+  const structured = video.structuredError || (video.error && typeof video.error === 'object' ? video.error as StructuredVideoError : {});
+  const rawError = typeof video.error === 'string' ? video.error : '';
+  const message = structured.messageChinese || structured.userMessage || rawError ||
+    video.failureReason || '视频生成失败，但服务端未返回详细原因。';
+  const code = structured.code || video.failureReason || '';
+  const stage = structured.failureStage || structured.stage || video.failureStage || '';
+  let nextAction = structured.recommendedAction || '';
+  if (!nextAction && /rai|safety|input_safety/i.test(String(code))) {
+    nextAction = '请调整图片或 Prompt，减少敏感、危险或不适合生成的内容后重试。';
+  } else if (!nextAction && /quota|rate|429/i.test(String(code) + message)) {
+    nextAction = '请求频率或配额受限，请稍后再试，避免连续点击生成。';
+  } else if (!nextAction && /artifact|storage|gcs/i.test(String(code) + message)) {
+    nextAction = '视频生成结果可能已返回但保存失败，请刷新页面；仍失败时检查 GCS 存储链路。';
+  } else if (!nextAction && /identity/i.test(String(code) + message)) {
+    nextAction = '请更换首帧图片或调整人物一致性相关输入后重试。';
+  } else {
+    nextAction = '请检查图片、Prompt 和算力连接；仍失败时根据错误代码查询 Cloud Logging。';
+  }
+  return {
+    failed: video.status === 'failed' || video.status.includes('failed') ||
+      video.status === 'submission_outcome_unknown' || Boolean(video.error) || Boolean(video.failureReason),
+    message: String(message),
+    code: String(code || ''),
+    stage: String(stage || ''),
+    nextAction,
+    technical: structured.technicalMessageRedacted || '',
+  };
 };
 
 type ImageFetchJob = {
@@ -171,6 +222,10 @@ export function ImageVideoAssetsPage() {
         status: video.status || 'unknown',
         videoUrl: video.videoUrl || null,
         selectedBest: video.selectedBest === true,
+        error: video.error || null,
+        failureReason: video.failureReason || null,
+        failureStage: video.failureStage || null,
+        structuredError: video.structuredError || null,
         createdAt: video.createdAt || Date.now(),
       })));
     } catch (e: any) {
@@ -300,15 +355,25 @@ export function ImageVideoAssetsPage() {
         <h2 className="mb-4 text-xl font-medium">Related Videos</h2>
         {loadingVideos && <p className="text-sm text-zinc-500">视频版本加载中…</p>}
         <div className="grid gap-4 lg:grid-cols-2">
-          {videos.map((video, index) => <article key={video.taskId} className={video.selectedBest ? 'rounded-xl border border-emerald-400/70 bg-emerald-400/5 p-4' : 'rounded-xl border border-white/10 bg-white/[0.035] p-4'}>
-            <div className="flex items-start justify-between gap-3">
-              <div><p className="text-xs uppercase tracking-wider text-indigo-300">V{videos.length - index}</p><p className="mt-1 text-sm text-zinc-300">{video.durationSeconds}秒 · {video.status}</p></div>
-              <span className="text-xs text-zinc-400">{video.selectedBest ? '最佳版本' : '未选择'}</span>
-            </div>
-            {video.videoUrl ? <video className="mt-3 aspect-video w-full rounded-lg bg-black object-cover" controls src={video.videoUrl} /> : <div className="mt-3 flex aspect-video items-center justify-center rounded-lg bg-black/30 text-sm text-zinc-500">任务处理中…</div>}
-            <p className="mt-3 line-clamp-3 text-sm text-zinc-300">{video.prompt || '未填写 Prompt'}</p>
-            <button type="button" onClick={() => void deleteVideo(video.taskId)} className="mt-4 rounded-lg border border-rose-400/40 px-3 py-2 text-xs text-rose-200">删除视频</button>
-          </article>)}
+          {videos.map((video, index) => {
+            const failure = describeVideoFailure(video);
+            return <article key={video.taskId} className={video.selectedBest ? 'rounded-xl border border-emerald-400/70 bg-emerald-400/5 p-4' : failure.failed ? 'rounded-xl border border-rose-400/50 bg-rose-400/5 p-4' : 'rounded-xl border border-white/10 bg-white/[0.035] p-4'}>
+              <div className="flex items-start justify-between gap-3">
+                <div><p className="text-xs uppercase tracking-wider text-indigo-300">V{videos.length - index}</p><p className="mt-1 text-sm text-zinc-300">{video.durationSeconds}秒 · {video.status}</p></div>
+                <span className="text-xs text-zinc-400">{video.selectedBest ? '最佳版本' : '未选择'}</span>
+              </div>
+              {failure.failed ? <div className="mt-3 rounded-lg border border-rose-400/30 bg-rose-950/30 p-4 text-sm">
+                <p className="font-medium text-rose-200">生成失败</p>
+                <p className="mt-2 text-rose-100">失败原因：{failure.message}</p>
+                {failure.code && <p className="mt-1 text-xs text-rose-300">错误代码：{failure.code}</p>}
+                {failure.stage && <p className="mt-1 text-xs text-rose-300">失败阶段：{failure.stage}</p>}
+                <p className="mt-3 text-amber-200">下一步：{failure.nextAction}</p>
+                {failure.technical && <p className="mt-2 break-words text-xs text-zinc-400">技术信息：{failure.technical}</p>}
+              </div> : video.videoUrl ? <video className="mt-3 aspect-video w-full rounded-lg bg-black object-cover" controls src={video.videoUrl} /> : <div className="mt-3 flex aspect-video items-center justify-center rounded-lg bg-black/30 text-sm text-zinc-500">任务处理中…</div>}
+              <p className="mt-3 line-clamp-3 text-sm text-zinc-300">{video.prompt || '未填写 Prompt'}</p>
+              <button type="button" onClick={() => void deleteVideo(video.taskId)} className="mt-4 rounded-lg border border-rose-400/40 px-3 py-2 text-xs text-rose-200">删除视频</button>
+            </article>;
+          })}
         </div>
         {!loadingVideos && !videos.length && <p className="text-sm text-zinc-500">这张图片还没有视频版本。</p>}
       </section>}
