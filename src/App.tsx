@@ -10,6 +10,7 @@ import { ManualKeyframePage } from './pages/ManualKeyframePage';
 import { ShotVideoBlueprintPage } from './pages/ShotVideoBlueprintPage';
 import { DirectorConsolePage } from './pages/DirectorConsolePage';
 import { StudioPage } from './pages/StudioPage';
+import { ImageVideoWorkspacePage } from './pages/ImageVideoWorkspacePage';
 import { CharacterLibraryPage } from './pages/CharacterLibraryPage';
 import { TaskHistoryPage } from './pages/TaskHistoryPage';
 import { HumanReviewQueuePage } from './pages/HumanReviewQueuePage';
@@ -45,6 +46,7 @@ export function AppContent({ onRouteChange }: { onRouteChange?: (path: string) =
   // Project First Navigation: /projects renders before any Session Restore call.
   const isProjectHome = pathname === '/projects' || pathname === '/projects/';
   const isWorkspace = Boolean(projectFromRoute);
+  const isSimpleImageVideoWorkspace = pathname === '/assets';
 
   const navigate = (nextPath: string, nextTab?: NavTab) => {
     window.history.pushState({}, '', nextPath);
@@ -114,6 +116,7 @@ export function AppContent({ onRouteChange }: { onRouteChange?: (path: string) =
 
         <main ref={mainRef} className="flex-1 overflow-y-auto bg-zinc-950/50 pb-20 md:pb-0">
           {isProjectHome && <ProjectHomePage onOpenProject={(id) => navigate(`/projects/${encodeURIComponent(id)}`)} />}
+          {isSimpleImageVideoWorkspace && <ImageVideoWorkspacePage />}
           {isWorkspace && <ProjectContextBar
             projectName={String(project?.projectTitle || project?.title || projectFromRoute)}
             episodeName={String(episode?.title || episodeId || '')}

@@ -309,11 +309,6 @@ export interface CharacterIdentityProfile {
 export interface ServerVideoTaskRecord {
   id: string;
   taskId: string;
-  sourceImageId?: string;
-  identityQaDisabled?: boolean;
-  sceneSafeDisabled?: boolean;
-  selectedBest?: boolean;
-  selectedAt?: number;
   operationName?: string;
   providerOperationId?: string;
   status: TaskStatus;
@@ -423,25 +418,6 @@ export interface ServerVideoTaskRecord {
   raiMediaFilteredReasons?: string[] | null;
   raiStatus?: 'unknown' | 'passed' | 'filtered' | 'flagged' | 'not_filtered';
   evidenceSource?: 'firestore' | 'server_memory' | 'indexeddb' | 'test_fixture' | 'mock_data' | 'non_production';
-}
-
-export interface ImageAssetRecord {
-  id: string;
-  objectPath: string;
-  bucket: string;
-  mimeType: string;
-  sizeBytes: number;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface VideoAsset {
-  id: string;
-  sourceImageId: string;
-  prompt: string;
-  durationSeconds: 4 | 6 | 8;
-  status: string;
-  videoUrl: string;
 }
 
 export interface FirstFrameCandidate {

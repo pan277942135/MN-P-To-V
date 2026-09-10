@@ -317,16 +317,13 @@ export class IdentityLockService {
       requiresManualApproval = true;
     }
 
-    // Identity Safe is opt-in; keep the existing QA code path intact.
-    const blockingEnabled =
-      process.env.ENABLE_IDENTITY_SAFE === 'true' ||
-      process.env.FIRST_FRAME_IDENTITY_QA_BLOCKING === 'true';
+    const blockingEnabled = process.env.FIRST_FRAME_IDENTITY_QA_BLOCKING !== 'false';
     const strictGateAllowsVeo = status === 'pass' || (status === 'review' && Boolean(input.manualApproved));
     const canStartVeo = blockingEnabled ? strictGateAllowsVeo : true;
 
     if (!blockingEnabled && status !== 'pass') {
       console.warn(
-        `[Identity QA Advisory] pre-provider identity QA=${status} score=${report.identityScore}; Veo submission allowed because ENABLE_IDENTITY_SAFE=false.`
+        `[Identity QA Advisory] pre-provider identity QA=${status} score=${report.identityScore}; Veo submission allowed because FIRST_FRAME_IDENTITY_QA_BLOCKING=false.`
       );
     }
 

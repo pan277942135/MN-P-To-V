@@ -160,10 +160,9 @@ export class TaskStateMachineService {
           updatedRecord.humanReviewRecord?.decision === 'accepted' &&
           updatedRecord.humanReviewRecord?.sourceQaStatus === 'review' &&
           Boolean(updatedRecord.humanReviewRecord?.reviewedAt);
-        const identityQaBypassValid = updatedRecord.identityQaDisabled === true;
-        if (!artifactValid || (!qaValid && !identityQaBypassValid && !humanReviewValid)) {
+        if (!artifactValid || (!qaValid && !humanReviewValid)) {
           throw new Error(
-            `[VIDEO_QA_COMPLETION_INVARIANT] Task ${taskId} cannot become completed without persisted artifact authority and either PASS video identity QA, an explicit QA-disabled flag, or a durable accepted human review of QA REVIEW.`
+            `[VIDEO_QA_COMPLETION_INVARIANT] Task ${taskId} cannot become completed without persisted artifact authority and either PASS video identity QA or a durable accepted human review of QA REVIEW.`
           );
         }
       }
