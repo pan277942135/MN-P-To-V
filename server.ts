@@ -44,8 +44,10 @@ function isIdentitySafeEnabled(): boolean {
   // Production defaults to off; test mode keeps the strict regression contract unless
   // a test explicitly requests the advisory path with the legacy false flag.
   const legacyBlockingFlag = process.env.FIRST_FRAME_IDENTITY_QA_BLOCKING;
+  const runningUnderVitest = process.env.VITEST === 'true' || process.env.VITEST === '1';
   return process.env.ENABLE_IDENTITY_SAFE === 'true' ||
-    legacyBlockingFlag !== 'false' && (process.env.NODE_ENV === 'test' || legacyBlockingFlag === 'true');
+    legacyBlockingFlag !== 'false' &&
+      (runningUnderVitest || process.env.NODE_ENV === 'test' || legacyBlockingFlag === 'true');
 }
 function isSceneSafeEnabled(): boolean {
   return process.env.ENABLE_SCENE_SAFE === 'true';
