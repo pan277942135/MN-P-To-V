@@ -25,6 +25,11 @@ type WorkspaceVideo = {
     googleStatus?: string | null;
     googleReason?: string | null;
     recommendedAction?: string;
+    errorId?: string | null;
+    traceId?: string | null;
+    requestId?: string | null;
+    revision?: string | null;
+    taskId?: string | null;
   } | string | null;
   createdAt: number;
 };
@@ -292,6 +297,10 @@ export function ImageVideoWorkspacePage() {
                   {video.error.httpStatus != null && <p className="mt-1">HTTP：{video.error.httpStatus}</p>}
                   {video.error.googleStatus && <p className="mt-1">Google 状态：{video.error.googleStatus}</p>}
                   {video.error.googleReason && <p className="mt-1">Google 原因：{video.error.googleReason}</p>}
+                  {video.error.errorId && <p className="mt-1">错误 ID：{video.error.errorId}</p>}
+                  {video.error.traceId && <p className="mt-1">Trace ID：{video.error.traceId}</p>}
+                  {video.error.requestId && <p className="mt-1">请求 ID：{video.error.requestId}</p>}
+                  {video.error.revision && <p className="mt-1">Revision：{video.error.revision}</p>}
                 </details>}
               </div> : video.videoUrl ? <video className="mt-3 aspect-video w-full rounded-lg bg-black object-cover" controls src={video.videoUrl} poster={video.thumbnailUrl || undefined} /> : <div className="mt-3 flex aspect-video items-center justify-center rounded-lg bg-black/30 text-sm text-zinc-500">任务处理中…</div>}
               <p className="mt-3 line-clamp-3 text-sm text-zinc-300">{video.prompt || '未填写 Prompt'}</p>
