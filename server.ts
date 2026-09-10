@@ -27,6 +27,7 @@ import type { IdentitySpec, ServerVideoTaskRecord, TaskStatus, AuditTaskStatus, 
 import { firestoreTaskRepository } from './src/server/repositories/firestoreTaskRepository';
 import { durableCharacterService } from './src/server/services/durableCharacterService';
 import { taskStateMachineService, InvalidStateTransitionError } from './src/server/services/taskStateMachineService';
+import { VideoTaskPollingJob, type VideoTaskPollingResult } from './src/server/services/videoTaskPollingJob';
 import { isProviderTaskDeletionSafe } from './src/server/services/providerAdmissionPolicy';
 import { evaluateProviderOperationLinkage } from './src/server/services/providerOperationRecoveryPolicy';
 import { getStorageAuthority, getFirestoreInstance } from './src/server/db/firestore';
@@ -137,6 +138,8 @@ async function safeUpdateTaskRecord(taskId: string, updates: Partial<ServerVideo
 }
 
 export const serverVideoTaskStore = new Map<string, ServerVideoTaskRecord>();
+
+const videoTaskPollingJob = new VideoTaskPollingJob();
 
 
 async function settlePersistedVideoThroughQa(params: {
@@ -375,12 +378,14 @@ async function settlePersistedVideoThroughQa(params: {
       });
 
       if (retryStart.operationName) {
-        return await taskStateMachineService.markAutomaticRetrySubmitted({
+        const submittedRetry = await taskStateMachineService.markAutomaticRetrySubmitted({
           taskId,
           idempotencyKey: retryDecision.idempotencyKey,
           operationName: retryStart.operationName,
           diagnostics: retryStart.diagnostics,
         });
+        enqueueVideoTaskPolling(submittedRetry);
+        return submittedRetry;
       }
 
       if (retryStart.videoBuffer) {
@@ -445,6 +450,225 @@ async function settlePersistedVideoThroughQa(params: {
       },
     },
   });
+}
+
+
+async function executeVideoTaskPollingAttempt(params: {
+  taskId: string;
+  operationName: string;
+  pollAttempt: number;
+}): Promise<VideoTaskPollingResult> {
+  const { taskId, operationName, pollAttempt } = params;
+  const record = await firestoreTaskRepository.getTask(taskId);
+
+  if (!record) return { state: 'SUCCESS' };
+  if (['completed', 'failed', 'cancelled', 'canceled', 'qa_pending', 'artifact_persisted'].includes(record.status)) {
+    return { state: 'SUCCESS' };
+  }
+  if (record.operationName && record.operationName !== operationName) {
+    return { state: 'FAILED', error: 'operationName changed while the polling job was active' };
+  }
+
+  const connectionId = record.connectionId;
+  const session = CredentialService.getSession(connectionId) || CredentialService.getSession();
+  if (!session) {
+    const message = '算力连接已失效，后台无法继续轮询 Veo Operation。';
+    const errObj = createStructuredError({
+      source: 'authentication',
+      failureStage: 'polling',
+      httpStatus: 401,
+      customUserMessage: message,
+      endpointPathRedacted: 'background://veo-polling',
+    });
+    await safeUpdateTaskRecord(taskId, {
+      status: 'failed',
+      pollAttempt,
+      lastPolledAt: Date.now(),
+      failureReason: 'compute_session_unavailable' as any,
+      error: message,
+      structuredError: errObj,
+    });
+    return { state: 'FAILED', error: message };
+  }
+
+  const ai = await GeminiClientFactory.getClientForSession(session);
+  let pollRes: Awaited<ReturnType<typeof VideoGenerator.pollVeoOperation>>;
+  try {
+    pollRes = await VideoGenerator.pollVeoOperation(ai, session, operationName);
+  } catch (pollErr: any) {
+    const message = pollErr?.message || String(pollErr);
+    const errObj = createStructuredError({
+      source: 'vertex_polling',
+      failureStage: 'polling',
+      httpStatus: pollErr?.httpStatus || 500,
+      rawError: pollErr,
+      customUserMessage: message,
+      endpointPathRedacted: 'background://veo-polling',
+    });
+    await safeUpdateTaskRecord(taskId, {
+      status: 'failed',
+      pollHttpStatus: pollErr?.upstreamHttpStatus || pollErr?.httpStatus || 500,
+      pollAttempt,
+      lastPolledAt: Date.now(),
+      failureReason: 'upstream_failed' as any,
+      error: message,
+      structuredError: errObj,
+    });
+    return { state: 'FAILED', error: message };
+  }
+
+  const pollPatch: Partial<ServerVideoTaskRecord> = {
+    pollHttpStatus: 200,
+    pollAttempt,
+    lastPolledAt: Date.now(),
+    ...(pollRes.videoUri ? { videoUri: pollRes.videoUri } : {}),
+  };
+
+  if (!pollRes.done) {
+    await safeUpdateTaskRecord(taskId, { status: 'polling', ...pollPatch });
+    return { state: 'RUNNING' };
+  }
+
+  if (pollRes.error) {
+    const message = pollRes.error;
+    const failureReason = pollRes.failureReason || (pollRes.isSafetyBlock ? 'output_rai_filtered' : 'upstream_failed');
+    const retryMode = pollRes.retryMode || (pollRes.isSafetyBlock ? 'REWRITE_INPUT_THEN_REGENERATE' : 'SAFE_TO_REGENERATE');
+    const errObj = createStructuredError({
+      source: 'vertex_polling',
+      failureStage: 'polling',
+      httpStatus: 500,
+      rawError: message,
+      customUserMessage: message,
+      endpointPathRedacted: 'background://veo-polling',
+    });
+    await safeUpdateTaskRecord(taskId, {
+      status: 'failed',
+      ...pollPatch,
+      failureReason: failureReason as any,
+      retryMode: retryMode as any,
+      error: message,
+      structuredError: errObj,
+    });
+    return { state: 'FAILED', error: message };
+  }
+
+  let videoBuffer = pollRes.videoBuffer;
+  if ((!videoBuffer || videoBuffer.length === 0) && (pollRes.videoUri || record.videoUri)) {
+    try {
+      const accessToken = session.type === 'vertex_ai' ? await VertexClient.getAccessToken(session) : undefined;
+      const apiKey = session.apiKey || process.env.GEMINI_API_KEY;
+      videoBuffer = await VideoGenerator.fetchGcsVideoBuffer(
+        pollRes.videoUri || record.videoUri!,
+        accessToken,
+        apiKey
+      );
+    } catch (downloadErr: any) {
+      const message = downloadErr?.message || String(downloadErr);
+      const errObj = createStructuredError({
+        source: 'output_download',
+        failureStage: 'polling',
+        httpStatus: 500,
+        rawError: downloadErr,
+        customUserMessage: 'Veo 已完成，但后台下载视频产物失败。',
+        endpointPathRedacted: 'background://veo-polling',
+      });
+      await safeUpdateTaskRecord(taskId, {
+        status: 'failed',
+        ...pollPatch,
+        failureReason: 'artifact_fetch_failed' as any,
+        retryMode: 'RETRY_DOWNLOAD',
+        error: message,
+        structuredError: errObj,
+      });
+      return { state: 'FAILED', error: message };
+    }
+  }
+
+  if (!videoBuffer || videoBuffer.length === 0) {
+    const message = 'Veo 已完成，但未取得真实视频 artifact。';
+    const errObj = createStructuredError({
+      source: 'vertex_polling',
+      failureStage: 'polling',
+      httpStatus: 500,
+      customUserMessage: message,
+      endpointPathRedacted: 'background://veo-polling',
+    });
+    await safeUpdateTaskRecord(taskId, {
+      status: 'failed',
+      ...pollPatch,
+      failureReason: 'upstream_empty_response' as any,
+      retryMode: 'SAFE_TO_REGENERATE',
+      error: message,
+      structuredError: errObj,
+    });
+    return { state: 'FAILED', error: message };
+  }
+
+  await safeUpdateTaskRecord(taskId, {
+    status: 'generation_succeeded',
+    ...pollPatch,
+    sizeBytes: videoBuffer.length,
+  });
+  await safeUpdateTaskRecord(taskId, { status: 'artifact_persisting' });
+
+  try {
+    const artifactTaskKey = DurableVideoRetryService.getAttemptTaskKey(taskId, record.providerAttempt || 1);
+    const artifactMeta = await gcsArtifactStore.uploadVideoArtifact({
+      taskId: artifactTaskKey,
+      videoBuffer,
+      contentType: 'video/mp4',
+    });
+    ephemeralVideoStore.set(taskId, videoBuffer);
+
+    const settledTask = await settlePersistedVideoThroughQa({
+      taskId,
+      videoBuffer,
+      artifactMeta,
+      session,
+      ai,
+      analysisModel: session.analysisModel || 'gemini-3.6-flash',
+      patch: { ...pollPatch, diagnostics: record.diagnostics },
+    });
+    serverVideoTaskStore.set(taskId, settledTask);
+
+    if (settledTask.operationName && ['submitted', 'polling'].includes(settledTask.status)) {
+      enqueueVideoTaskPolling(settledTask);
+    }
+
+    return settledTask.status === 'failed'
+      ? { state: 'FAILED', error: settledTask.error || '视频 QA/持久化失败' }
+      : { state: 'SUCCESS' };
+  } catch (persistErr: any) {
+    const message = persistErr?.message || String(persistErr);
+    const errObj = createStructuredError({
+      source: 'artifact_persist',
+      failureStage: 'artifact_persist',
+      httpStatus: 500,
+      rawError: persistErr,
+      customUserMessage: `视频生成完成，但后台持久化失败: ${message}`,
+      endpointPathRedacted: 'background://veo-polling',
+    });
+    await safeUpdateTaskRecord(taskId, {
+      status: 'artifact_persist_failed',
+      ...pollPatch,
+      artifactPersisted: false,
+      error: message,
+      structuredError: errObj,
+    });
+    return { state: 'FAILED', error: message };
+  }
+}
+
+function enqueueVideoTaskPolling(task: Pick<ServerVideoTaskRecord, 'taskId' | 'operationName' | 'pollAttempt'>): boolean {
+  if (!task.operationName) return false;
+  return videoTaskPollingJob.enqueue(
+    {
+      taskId: task.taskId,
+      operationName: task.operationName,
+      initialPollAttempt: task.pollAttempt || 0,
+    },
+    executeVideoTaskPollingAttempt
+  );
 }
 
 export async function createApp(dependencies: { s01ProductionService?: S01ProductionServiceLike } = {}) {
@@ -2104,7 +2328,7 @@ ${cleanPrompt}`
               diagnostics: startResult.diagnostics,
               submitHttpStatus: 200,
             });
-            await safeUpdateTaskRecord(taskId, {
+            const pollingTask = await safeUpdateTaskRecord(taskId, {
               status: 'polling',
               operationName: startResult.operationName,
               diagnostics: startResult.diagnostics,
@@ -2112,7 +2336,12 @@ ${cleanPrompt}`
               stateVersion: submitted.stateVersion,
             });
             await taskStateMachineService.releaseLease(taskId, taskRecord.executionId);
-            console.log(`[Video Start Success] 任务 ${taskId} 成功获取 OperationName: ${startResult.operationName}`);
+            console.log('[VEO_SUBMITTED]', JSON.stringify({
+              taskId,
+              operationName: startResult.operationName,
+              status: pollingTask.status,
+            }));
+            enqueueVideoTaskPolling(pollingTask);
             return;
           }
 
@@ -4178,10 +4407,16 @@ export async function startServer() {
 
     void taskStateMachineService
       .recoverAbandonedTasks()
-      .then(({ recoveredCount, evaluatedCount }) => {
+      .then(async ({ recoveredCount, evaluatedCount }) => {
         console.log(
           `[Recovery Engine] Durable startup scan complete: evaluated=${evaluatedCount}, recovered=${recoveredCount}.`
         );
+        const tasks = await firestoreTaskRepository.listTasks(100);
+        for (const task of tasks) {
+          if (task.operationName && ['submitted', 'polling'].includes(task.status)) {
+            enqueueVideoTaskPolling(task);
+          }
+        }
       })
       .catch((err) => {
         // Recovery failure must not prevent the HTTP service from becoming healthy.
