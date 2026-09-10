@@ -781,7 +781,7 @@ export async function createApp(dependencies: { s01ProductionService?: S01Produc
   // Connection Status
   app.get('/api/connections/status', (req, res) => {
     const connectionId = req.headers['x-connection-id'] as string;
-    const session = connectionId ? CredentialService.getSession(connectionId) : undefined;
+    const session = (connectionId ? CredentialService.getSession(connectionId) : undefined) || CredentialService.getSession();
 
     res.json({
       hasServerSecret: CredentialService.hasServerEnvironmentSecret(),
