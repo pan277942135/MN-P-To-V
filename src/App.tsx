@@ -194,7 +194,8 @@ export function AppContent({ onRouteChange }: { onRouteChange?: (path: string) =
 
 function ProjectFirstRouter() {
   const [pathname, setPathname] = useState(() => window.location.pathname || '/projects');
-  const isProjectList = pathname === '/' || pathname === '/projects' || pathname === '/projects/';
+  const isSimpleWorkspaceHome = pathname === '/' || pathname === '/image-to-video' || pathname === '/image-to-video/';
+  const isProjectList = pathname === '/projects' || pathname === '/projects/';
   const navigate = (nextPath: string) => {
     window.history.pushState({}, '', nextPath);
     setPathname(nextPath);
@@ -209,6 +210,10 @@ function ProjectFirstRouter() {
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, [pathname]);
+
+  if (isSimpleWorkspaceHome) {
+    return <ImageVideoWorkspacePage />;
+  }
 
   if (isProjectList) {
     return <ProjectHomePage onOpenProject={(projectId) => navigate('/projects/' + encodeURIComponent(projectId))} />;

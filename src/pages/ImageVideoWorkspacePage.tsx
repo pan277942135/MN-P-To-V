@@ -124,10 +124,15 @@ export function ImageVideoWorkspacePage() {
       <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.24em] text-indigo-300">Zaojing Workspace V1</p>
-          <h1 className="mt-2 text-3xl font-semibold">图片转视频工作台</h1>
+          <h1 className="mt-2 text-3xl font-semibold">Zaojing Simple Image-to-Video Workspace</h1>
           <p className="mt-2 text-sm text-zinc-400">上传图片、输入 Prompt、选择 4 / 6 / 8 秒，保留多个视频版本。</p>
         </div>
-        <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 px-4 py-3 text-xs text-amber-200">Identity Safe / Scene Safe 默认关闭。</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" onClick={() => setTab('images')} className={tab === 'images' ? 'rounded-lg bg-indigo-500 px-3 py-2 text-xs' : 'rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-300'}>图片素材库</button>
+          <button type="button" onClick={() => setTab('videos')} className={tab === 'videos' ? 'rounded-lg bg-indigo-500 px-3 py-2 text-xs' : 'rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-300'}>视频素材库</button>
+          <a href="/projects" className="rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-300">Director Console</a>
+          <div className="rounded-lg border border-amber-400/20 bg-amber-400/5 px-3 py-2 text-xs text-amber-200">Identity Safe / Scene Safe 默认关闭。</div>
+        </div>
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
