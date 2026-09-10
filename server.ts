@@ -1733,7 +1733,7 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         thumbnailUrl: record.sceneImageUrl || null,
         error: record.error || null,
         failureReason: record.failureReason || null,
-        failureStage: record.structuredError?.failureStage || record.failureStage || null,
+        failureStage: (record.structuredError as any)?.failureStage || (record as any).failureStage || null,
         structuredError: record.structuredError || null,
         selectedBest: record.selectedBest === true,
         selectedAt: record.selectedAt || null, createdAt: record.createdAt, updatedAt: record.updatedAt,
