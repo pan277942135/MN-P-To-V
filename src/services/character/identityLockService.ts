@@ -320,10 +320,10 @@ export class IdentityLockService {
     // Identity Safe is opt-in; keep the existing QA code path intact.
     // Production defaults to off; test mode keeps the historical strict gate so the
     // existing identity QA regression suite continues to exercise the blocking path.
+    const legacyBlockingFlag = process.env.FIRST_FRAME_IDENTITY_QA_BLOCKING;
     const blockingEnabled =
-      process.env.NODE_ENV === 'test' ||
       process.env.ENABLE_IDENTITY_SAFE === 'true' ||
-      process.env.FIRST_FRAME_IDENTITY_QA_BLOCKING === 'true';
+      legacyBlockingFlag !== 'false' && (process.env.NODE_ENV === 'test' || legacyBlockingFlag === 'true');
     const strictGateAllowsVeo = status === 'pass' || (status === 'review' && Boolean(input.manualApproved));
     const canStartVeo = blockingEnabled ? strictGateAllowsVeo : true;
 
