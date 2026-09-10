@@ -2715,6 +2715,11 @@ ${cleanPrompt}`
               recommendedAction: effectiveRetryMode === 'REWRITE_INPUT_THEN_REGENERATE'
                 ? '请修改提示词或更换图片后重试'
                 : '请在下方点击【重试】',
+              errorId: rec.structuredError?.errorId || null,
+              traceId: rec.structuredError?.traceId || null,
+              requestId: rec.structuredError?.requestId || null,
+              revision: rec.structuredError?.revision || process.env.K_REVISION || null,
+              taskId: rec.taskId || rec.id,
             } : null,
             createdAt: rec.createdAt,
             updatedAt: rec.updatedAt,
