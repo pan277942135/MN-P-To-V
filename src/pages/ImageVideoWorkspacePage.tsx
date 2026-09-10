@@ -42,6 +42,39 @@ const headers = () => {
   const id = window.localStorage.getItem('selectedConnectionId') || '';
   return id ? { 'x-connection-id': id } : {};
 };
+
+function AuthenticatedImage({ src, alt, className }: { src: string; alt: string; className?: string }) {
+  const [objectUrl, setObjectUrl] = useState('');
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    let revokeUrl = '';
+    setObjectUrl('');
+    setFailed(false);
+    void fetch(src, { headers: headers() })
+      .then((response) => {
+        if (!response.ok) throw new Error('image_fetch_failed');
+        return response.blob();
+      })
+      .then((blob) => {
+        revokeUrl = URL.createObjectURL(blob);
+        if (active) setObjectUrl(revokeUrl);
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
+    return () => {
+      active = false;
+      if (revokeUrl) URL.revokeObjectURL(revokeUrl);
+    };
+  }, [src]);
+
+  if (!objectUrl) {
+    return <div className={className + ' flex items-center justify-center bg-zinc-900 text-xs text-zinc-500'}>{failed ? '图片暂时无法读取' : '图片加载中…'}</div>;
+  }
+  return <img src={objectUrl} alt={alt} className={className} />;
+}
 const json = async (response: Response) => {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body?.error || '请求失败');
@@ -279,7 +312,7 @@ export function ImageVideoWorkspacePage() {
           {tab === 'images' && <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {images.map((image) => <article key={image.id} className={selectedImageId === image.id ? 'overflow-hidden rounded-xl border-2 border-indigo-400' : 'overflow-hidden rounded-xl border border-white/10'}>
               <button type="button" onClick={() => chooseExistingImage(image.id)} className="block w-full text-left">
-                <img src={image.imageUrl} alt={image.id} className="aspect-video w-full object-cover" />
+                <AuthenticatedImage src={image.imageUrl} alt={image.id} className="aspect-video w-full object-cover" />
                 <div className="p-3"><p className="truncate text-sm">{image.id}</p><p className="mt-1 text-xs text-zinc-500">{Math.round(image.sizeBytes / 1024)} KB</p></div>
               </button>
               <div className="border-t border-white/10 p-3"><button type="button" disabled={busy} onClick={() => void deleteImage(image.id)} className="rounded-lg border border-rose-400/40 px-3 py-2 text-xs text-rose-200 disabled:opacity-40">删除图片</button></div>
