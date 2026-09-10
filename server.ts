@@ -2114,6 +2114,23 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
           }
         }
         const admissionBusy = fsErr?.code === 'PROVIDER_ADMISSION_BUSY';
+        if (admissionBusy && fsErr?.blockingTaskId) {
+          const blockedTask = await firestoreTaskRepository.getTask(String(fsErr.blockingTaskId)).catch(() => null);
+          const blockedOperationName =
+            blockedTask?.operationName ||
+            (blockedTask as ServerVideoTaskRecord & { externalOperationName?: string })?.externalOperationName;
+          if (
+            blockedTask &&
+            blockedOperationName &&
+            ['submitted', 'polling', 'polling_timeout'].includes(blockedTask.status)
+          ) {
+            enqueueVideoTaskPolling(
+              blockedTask.operationName
+                ? blockedTask
+                : { ...blockedTask, operationName: blockedOperationName }
+            );
+          }
+        }
         if (admissionBusy) {
           const artifactBucket = getVeoBucketName();
           const orphanQaPaths = [qaApprovedFirstFrameObjectPath, ...qaMasterImageObjectPaths];
