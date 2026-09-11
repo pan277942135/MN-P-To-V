@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 const server = fs.readFileSync('server.ts', 'utf8');
 const workspace = fs.readFileSync('src/pages/ImageVideoWorkspacePage.tsx', 'utf8');
+const studio = fs.readFileSync('src/pages/StudioPage.tsx', 'utf8');
 const assets = fs.readFileSync('src/pages/ImageVideoAssetsPage.tsx', 'utf8');
 
 describe('simple image-to-video failure and duplicate-submit UX contract', () => {
@@ -10,6 +11,14 @@ describe('simple image-to-video failure and duplicate-submit UX contract', () =>
     expect(workspace).toContain('submissionLockRef');
     expect(workspace).toContain("form.append('taskId', requestTaskId)");
     expect(workspace).toContain('submissionLockRef.current = false');
+  });
+
+  it('keeps the legacy studio submission locked until the pipeline is terminal', () => {
+    expect(studio).toContain('let pipelineStarted = false;');
+    expect(studio).toContain('pipelineStarted = true;');
+    expect(studio).toContain('void continueTaskVideoPipeline(');
+    expect(studio).toContain('if (!pipelineStarted)');
+    expect(studio).not.toContain('isSubmittingRef.current = false;\n      setIsExecuting(false);\n\n      if (onNavigateToHistory)');
   });
 
   it('returns detailed failure context with related videos', () => {
