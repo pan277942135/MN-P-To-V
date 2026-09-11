@@ -43,7 +43,7 @@ export function ImageVideoWorkspacePage() {
   const selectedImage = useMemo(() => images.find((image) => image.id === selectedImageId), [images, selectedImageId]);
 
   const loadRecentImages = async () => {
-    const body = await json(await fetch('/api/images?limit=24', { headers: headers() }));
+    const body = await json(await fetch('/api/images?limit=24&includeVideoCounts=false', { headers: headers() }));
     setImages((body.images || []).filter((image: ImageAsset) => image.isDeleted !== true));
   };
 
