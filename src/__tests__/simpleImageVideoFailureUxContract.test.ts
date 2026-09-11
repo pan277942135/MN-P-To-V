@@ -58,6 +58,16 @@ describe('simple image-to-video failure and duplicate-submit UX contract', () =>
     expect(assets).toContain("video.status === 'failed'");
   });
 
+  it('can retry a failed video or create a new version with editable prompt and duration', () => {
+    expect(assets).toContain('openGenerationModal(video)');
+    expect(assets).toContain('生成新视频版本');
+    expect(assets).toContain('重新生成');
+    expect(assets).toContain('发起新任务');
+    expect(assets).toContain('generationDraft');
+    expect(assets).toContain("form.append('imageId', selectedImageId)");
+    expect(assets).toContain("form.append('durationSeconds', String(generationDraft.durationSeconds))");
+  });
+
   it('returns and displays the number of videos related to each image', () => {
     expect(server).toContain('videoCount: videoCountByImageId.get(doc.id) || 0');
     expect(assets).toContain('视频 {image.videoCount || 0} 个');
