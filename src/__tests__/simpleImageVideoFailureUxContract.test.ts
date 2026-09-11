@@ -64,6 +64,8 @@ describe('simple image-to-video failure and duplicate-submit UX contract', () =>
     expect(assets).toContain('重新生成');
     expect(assets).toContain('发起新任务');
     expect(assets).toContain('generationDraft');
+    expect(assets).toContain('generationRequestTaskIdRef');
+    expect(assets).toContain("form.append('taskId', requestTaskId)");
     expect(assets).toContain("form.append('imageId', selectedImageId)");
     expect(assets).toContain("form.append('durationSeconds', String(generationDraft.durationSeconds))");
   });

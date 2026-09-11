@@ -253,6 +253,7 @@ export function ImageVideoAssetsPage() {
   const [submittingGeneration, setSubmittingGeneration] = useState(false);
   const [generationError, setGenerationError] = useState('');
   const generationSubmissionLockRef = useRef(false);
+  const generationRequestTaskIdRef = useRef('');
 
   const loadImages = async (cursor?: string, targetPage = page) => {
     setLoading(true);
@@ -341,6 +342,7 @@ export function ImageVideoAssetsPage() {
   };
 
   const openGenerationModal = (video?: WorkspaceVideo) => {
+    generationRequestTaskIdRef.current = `vtask_client_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     setGenerationError('');
     setGenerationDraft({
       prompt: video?.prompt || '',
@@ -353,6 +355,7 @@ export function ImageVideoAssetsPage() {
     if (submittingGeneration) return;
     setGenerationDraft(null);
     setGenerationError('');
+    generationRequestTaskIdRef.current = '';
   };
 
   const submitGeneration = async () => {
@@ -371,6 +374,9 @@ export function ImageVideoAssetsPage() {
     setGenerationError('');
     try {
       const form = new FormData();
+      const requestTaskId = generationRequestTaskIdRef.current || `vtask_client_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      generationRequestTaskIdRef.current = requestTaskId;
+      form.append('taskId', requestTaskId);
       form.append('imageId', selectedImageId);
       form.append('workspaceMode', 'simple_image_to_video');
       form.append('rawUserPrompt', generationDraft.prompt.trim());
@@ -385,6 +391,7 @@ export function ImageVideoAssetsPage() {
       }));
       setGenerationDraft(null);
       setGenerationError('');
+      generationRequestTaskIdRef.current = '';
       setError(body.taskId ? '新视频任务已提交：' + body.taskId : '新视频任务已提交。');
       await loadVideos(selectedImageId);
     } catch (e: any) {
