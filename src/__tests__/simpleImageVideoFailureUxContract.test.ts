@@ -24,6 +24,8 @@ describe('simple image-to-video failure and duplicate-submit UX contract', () =>
 
   it('uses the dedicated image artifact path and avoids eager count queries in the generator', () => {
     expect(server).toContain('fetchImageArtifactBuffer');
+    expect(server).toContain("sourceImageBuffer = await gcsArtifactStore.fetchImageArtifactBuffer");
+    expect(server).not.toContain("sourceImageBuffer = await gcsArtifactStore.fetchArtifactBuffer");
     expect(server).toContain('IMAGE_THUMBNAIL_CACHE_TTL_MS = 15 * 60 * 1000');
     expect(server).toContain("private, max-age=900, stale-while-revalidate=60");
     expect(workspace).toContain('includeVideoCounts=false');
