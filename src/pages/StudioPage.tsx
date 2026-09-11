@@ -516,6 +516,7 @@ export const StudioPage: React.FC<{
       return;
     }
     isSubmittingRef.current = true;
+    let pipelineStarted = false;
     setShowConfirmModal(false);
     const character = characters.find((c) => c.id === selectedCharacterId);
     if (!character || !sceneFile) {
@@ -596,25 +597,23 @@ export const StudioPage: React.FC<{
         task.progressPercent = 60;
         setCurrentTask({ ...task });
         await taskRepository.save(task);
+        isSubmittingRef.current = false;
         setIsExecuting(false);
         if (onNavigateToHistory) onNavigateToHistory();
         return;
       }
 
-      // 启动后台视频流水线，并自动重置表单与解锁工作台
-      continueTaskVideoPipeline(task, character, capturedSceneFile, capturedCompiledPrompt, capturedRawUserPrompt, directBlob, storedConnectionId);
+      // Keep the submission lock until the background pipeline reaches a terminal state.
+      pipelineStarted = true;
+      void continueTaskVideoPipeline(task, character, capturedSceneFile, capturedCompiledPrompt, capturedRawUserPrompt, directBlob, storedConnectionId);
       
       setUserPrompt('');
       localStorage.setItem('zaojing_option_userPrompt', '');
       setSceneFile(null);
       setScenePreviewUrl(null);
       setCustomCompiledPrompt(null);
-      isSubmittingRef.current = false;
-      setIsExecuting(false);
-
-      if (onNavigateToHistory) {
-        onNavigateToHistory();
-      }
+      // Do not unlock or navigate away here. The pipeline owns the lock while
+      // submission, polling, and artifact persistence are still in progress.
     } catch (err: unknown) {
       const struct = (err as any)?.structuredError;
       const source: ErrorSource = struct?.source || (err as any)?.source || 'unknown';
@@ -689,7 +688,9 @@ export const StudioPage: React.FC<{
       await taskRepository.save(task);
       setIsExecuting(false);
     } finally {
-      isSubmittingRef.current = false;
+      if (!pipelineStarted) {
+        isSubmittingRef.current = false;
+      }
     }
   };
 
@@ -762,7 +763,8 @@ export const StudioPage: React.FC<{
       setScenePreviewUrl(null);
       setCustomCompiledPrompt(null);
       isSubmittingRef.current = false;
-      setIsExecuting(false);
+      isSubmittingRef.current = false;
+              setIsExecuting(false);
 
       const taskId = startData.taskId;
       task.id = taskId; // Adopt server taskId if different
@@ -821,6 +823,7 @@ export const StudioPage: React.FC<{
               task.updatedAt = Date.now();
               setCurrentTask({ ...task });
               await taskRepository.save(task);
+              isSubmittingRef.current = false;
               setIsExecuting(false);
               return;
             }
@@ -857,6 +860,7 @@ export const StudioPage: React.FC<{
               task.updatedAt = Date.now();
               setCurrentTask({ ...task });
               await taskRepository.save(task);
+              isSubmittingRef.current = false;
               setIsExecuting(false);
               return;
             } else if (statusData.status === 'failed') {
@@ -917,7 +921,8 @@ export const StudioPage: React.FC<{
 
       setCurrentTask({ ...task });
       await taskRepository.save(task);
-      setIsExecuting(false);
+      isSubmittingRef.current = false;
+              setIsExecuting(false);
     } catch (pipelineErr: any) {
       console.error('Video pipeline error:', pipelineErr);
       const errMsg = pipelineErr.message || String(pipelineErr);
@@ -956,7 +961,8 @@ export const StudioPage: React.FC<{
       task.updatedAt = Date.now();
       setCurrentTask({ ...task });
       await taskRepository.save(task);
-      setIsExecuting(false);
+      isSubmittingRef.current = false;
+              setIsExecuting(false);
     }
   };
 
