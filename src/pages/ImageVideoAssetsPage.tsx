@@ -85,14 +85,17 @@ function describeVideoFailure(video: WorkspaceVideo) {
 };
 
 type ImageFetchJob = {
-  run: () => Promise<Response>;
-  resolve: (response: Response) => void;
+  run: () => Promise<string>;
+  resolve: (objectUrl: string) => void;
   reject: (error: unknown) => void;
 };
 
 const IMAGE_FETCH_CONCURRENCY = 3;
+const MAX_IMAGE_OBJECT_URL_CACHE = 48;
 let activeImageFetches = 0;
 const imageFetchQueue: ImageFetchJob[] = [];
+const imageObjectUrlCache = new Map<string, { objectUrl: string; lastUsedAt: number }>();
+const imageObjectUrlInflight = new Map<string, Promise<string>>();
 
 function drainImageFetchQueue() {
   while (activeImageFetches < IMAGE_FETCH_CONCURRENCY && imageFetchQueue.length > 0) {
@@ -112,33 +115,65 @@ function waitForImageRetry(delayMs: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
 }
 
-async function fetchImageWithRetry(src: string, signal: AbortSignal) {
+async function fetchImageWithRetry(src: string) {
   let lastError: Error = new Error('image_fetch_failed');
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const response = await fetch(src, {
       headers: headers(),
       cache: 'force-cache',
-      signal,
     });
     if (response.ok) return response;
     lastError = new Error('image_fetch_failed_' + response.status);
     const retryable = response.status === 429 || response.status >= 500;
     if (!retryable || attempt === 2) throw lastError;
     const retryAfter = Number(response.headers.get('retry-after') || 0);
-    await waitForImageRetry(Math.max(500 * (attempt + 1), retryAfter * 1000));
+    const exponentialDelay = 750 * (2 ** attempt);
+    const jitter = Math.floor(Math.random() * 250);
+    await waitForImageRetry(Math.min(15000, Math.max(exponentialDelay, retryAfter * 1000) + jitter));
   }
   throw lastError;
 }
 
-function enqueueImageFetch(src: string, signal: AbortSignal) {
-  return new Promise<Response>((resolve, reject) => {
+function evictImageObjectUrls() {
+  while (imageObjectUrlCache.size > MAX_IMAGE_OBJECT_URL_CACHE) {
+    const oldest = [...imageObjectUrlCache.entries()]
+      .sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt)[0];
+    if (!oldest) return;
+    URL.revokeObjectURL(oldest[1].objectUrl);
+    imageObjectUrlCache.delete(oldest[0]);
+  }
+}
+
+function loadImageObjectUrl(src: string) {
+  const cached = imageObjectUrlCache.get(src);
+  if (cached) {
+    cached.lastUsedAt = Date.now();
+    return Promise.resolve(cached.objectUrl);
+  }
+
+  const inflight = imageObjectUrlInflight.get(src);
+  if (inflight) return inflight;
+
+  const pending = new Promise<string>((resolve, reject) => {
     imageFetchQueue.push({
-      run: () => fetchImageWithRetry(src, signal),
+      run: async () => {
+        const response = await fetchImageWithRetry(src);
+        const objectUrl = URL.createObjectURL(await response.blob());
+        imageObjectUrlCache.set(src, { objectUrl, lastUsedAt: Date.now() });
+        evictImageObjectUrls();
+        return objectUrl;
+      },
       resolve,
       reject,
     });
     drainImageFetchQueue();
   });
+
+  imageObjectUrlInflight.set(src, pending);
+  void pending.finally(() => {
+    if (imageObjectUrlInflight.get(src) === pending) imageObjectUrlInflight.delete(src);
+  });
+  return pending;
 }
 
 function AuthenticatedImage({ src, alt, className }: { src: string; alt: string; className?: string }) {
@@ -147,26 +182,17 @@ function AuthenticatedImage({ src, alt, className }: { src: string; alt: string;
 
   useEffect(() => {
     let active = true;
-    let revokeUrl = '';
     setObjectUrl('');
     setFailed(false);
-    const controller = new AbortController();
-    void enqueueImageFetch(src, controller.signal)
-      .then((response) => {
-        if (!response.ok) throw new Error('image_fetch_failed');
-        return response.blob();
-      })
-      .then((blob) => {
-        revokeUrl = URL.createObjectURL(blob);
-        if (active) setObjectUrl(revokeUrl);
+    void loadImageObjectUrl(src)
+      .then((nextObjectUrl) => {
+        if (active) setObjectUrl(nextObjectUrl);
       })
       .catch(() => {
         if (active) setFailed(true);
       });
     return () => {
       active = false;
-      controller.abort();
-      if (revokeUrl) URL.revokeObjectURL(revokeUrl);
     };
   }, [src]);
 
@@ -197,7 +223,7 @@ export function ImageVideoAssetsPage() {
     setLoading(true);
     setError('');
     try {
-      const query = new URLSearchParams({ limit: '24' });
+      const query = new URLSearchParams({ limit: '12' });
       if (cursor) query.set('cursor', cursor);
       const body = await json(await fetch('/api/images?' + query.toString(), { headers: headers() }));
       setImages((body.images || []).filter((image: ImageAsset) => image.isDeleted !== true));
@@ -306,7 +332,7 @@ export function ImageVideoAssetsPage() {
 
       {!selectedImageId && <section>
         <div className="mb-4 flex items-center justify-between">
-          <p className="text-sm text-zinc-400">第 {page} 页 · 每页 24 张</p>
+          <p className="text-sm text-zinc-400">第 {page} 页 · 每页 12 张</p>
           {loading && <p className="text-xs text-zinc-500">加载中…</p>}
         </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
