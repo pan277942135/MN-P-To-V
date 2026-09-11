@@ -89,6 +89,34 @@ function sanitizeGcsError(msg: string): string {
   return cleaned;
 }
 
+const GCS_UPLOAD_MAX_ATTEMPTS = 5;
+const GCS_UPLOAD_INITIAL_DELAY_MS = 1500;
+
+function isTransientGcsUploadError(error: unknown): boolean {
+  const errObj = error as any;
+  const code = String(errObj?.code || errObj?.cause?.code || '').toUpperCase();
+  const message = String(errObj?.message || error || '').toLowerCase();
+
+  return [
+    'socket hang up',
+    'econnreset',
+    'econnaborted',
+    'etimedout',
+    'epipe',
+    'eai_again',
+    'fetch failed',
+    'network error',
+    'connection reset',
+    'connection aborted',
+    'timeout',
+    'aborted',
+  ].some((token) => code === token.toUpperCase() || message.includes(token));
+}
+
+function waitForGcsUploadRetry(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 function createTokenAuthClient(accessToken: string, projectId?: string) {
   const oauthClient = new OAuth2Client();
   oauthClient.setCredentials({
@@ -297,6 +325,57 @@ export class GcsArtifactStore {
     }
   }
 
+  private async saveVideoFileWithRetry(
+    file: any,
+    videoBuffer: Buffer,
+    contentType: string,
+    taskId: string,
+    objectPath: string
+  ): Promise<void> {
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= GCS_UPLOAD_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        await file.save(videoBuffer, {
+          metadata: { contentType },
+          resumable: false,
+        });
+        return;
+      } catch (err: unknown) {
+        lastError = err;
+
+        // A connection can close after GCS has committed the object. Verify the
+        // deterministic object path before retrying to avoid duplicate work.
+        try {
+          const [metadata] = await file.getMetadata();
+          if (Number(metadata.size || 0) === videoBuffer.length) {
+            console.warn(
+              `[GcsArtifactStore] Upload response was interrupted, but gs://${resolveVeoOutputBucket()}/${objectPath} is already complete for task ${taskId}.`
+            );
+            return;
+          }
+        } catch {
+          // The object is not yet verifiable; continue with the retry decision.
+        }
+
+        if (!isTransientGcsUploadError(err) || attempt === GCS_UPLOAD_MAX_ATTEMPTS) {
+          throw err;
+        }
+
+        const delayMs = Math.min(
+          12000,
+          GCS_UPLOAD_INITIAL_DELAY_MS * (2 ** (attempt - 1)) + Math.floor(Math.random() * 250)
+        );
+        console.warn(
+          `[GcsArtifactStore Retry] task=${taskId} upload attempt ${attempt}/${GCS_UPLOAD_MAX_ATTEMPTS} failed with a transient network error; retrying in ${delayMs}ms: ${sanitizeGcsError(String((err as any)?.message || err))}`
+        );
+        await waitForGcsUploadRetry(delayMs);
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError || 'GCS upload failed'));
+  }
+
   public async uploadVideoArtifact(params: {
     taskId: string;
     videoBuffer: Buffer;
@@ -336,12 +415,7 @@ export class GcsArtifactStore {
     try {
       const storage = getStorageClient();
       const file = storage.bucket(bucketName).file(objectPath);
-      await file.save(videoBuffer, {
-        metadata: {
-          contentType,
-        },
-        resumable: false,
-      });
+      await this.saveVideoFileWithRetry(file, videoBuffer, contentType, taskId, objectPath);
 
       const [exists] = await file.exists();
       if (!exists) {
@@ -380,6 +454,7 @@ export class GcsArtifactStore {
       throw err;
     }
   }
+
 
   public async checkArtifactExists(bucketName: string, objectPath: string): Promise<{ exists: boolean; sizeBytes?: number }> {
     const key = `${bucketName}/${objectPath}`;

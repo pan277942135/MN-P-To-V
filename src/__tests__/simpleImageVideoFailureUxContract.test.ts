@@ -5,6 +5,7 @@ const server = fs.readFileSync('server.ts', 'utf8');
 const workspace = fs.readFileSync('src/pages/ImageVideoWorkspacePage.tsx', 'utf8');
 const studio = fs.readFileSync('src/pages/StudioPage.tsx', 'utf8');
 const assets = fs.readFileSync('src/pages/ImageVideoAssetsPage.tsx', 'utf8');
+const gcsArtifactStore = fs.readFileSync('src/server/storage/gcsArtifactStore.ts', 'utf8');
 
 describe('simple image-to-video failure and duplicate-submit UX contract', () => {
   it('uses a client task id and synchronous submission lock', () => {
@@ -34,6 +35,14 @@ describe('simple image-to-video failure and duplicate-submit UX contract', () =>
     expect(assets).toContain('imageObjectUrlInflight');
     expect(assets).toContain('IntersectionObserver');
     expect(assets).toContain("rootMargin: '320px'");
+  });
+
+  it('retries transient GCS artifact upload failures without regenerating Veo output', () => {
+    expect(gcsArtifactStore).toContain('GCS_UPLOAD_MAX_ATTEMPTS = 5');
+    expect(gcsArtifactStore).toContain('saveVideoFileWithRetry');
+    expect(gcsArtifactStore).toContain('socket hang up');
+    expect(gcsArtifactStore).toContain('file.getMetadata()');
+    expect(gcsArtifactStore).toContain('resumable: false');
   });
 
   it('returns detailed failure context with related videos', () => {
