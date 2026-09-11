@@ -47,7 +47,7 @@ type ImageThumbnailCacheEntry = {
   expiresAt: number;
 };
 
-const IMAGE_THUMBNAIL_CACHE_TTL_MS = 5 * 60 * 1000;
+const IMAGE_THUMBNAIL_CACHE_TTL_MS = 15 * 60 * 1000;
 const imageThumbnailCache = new Map<string, ImageThumbnailCacheEntry>();
 const imageThumbnailInflight = new Map<string, Promise<Buffer>>();
 
@@ -1002,7 +1002,7 @@ export async function createApp(dependencies: { s01ProductionService?: S01Produc
       const artifact = await durableCharacterService.getReferenceBuffer(req.params.id, req.params.referenceId);
       if (!artifact) return res.status(404).json({ error: '角色母板不存在', storageAuthority: 'firestore' });
       res.setHeader('Content-Type', artifact.mimeType);
-      res.setHeader('Cache-Control', 'private, max-age=300');
+      res.setHeader('Cache-Control', 'private, max-age=900, stale-while-revalidate=60');
       return res.send(artifact.buffer);
     } catch (err: any) {
       return res.status(503).json({ error: err?.message || '读取角色母板失败', storageAuthority: 'gcs' });
@@ -1624,18 +1624,21 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const hasMore = snapshot.docs.length > pageSize;
       const pageDocs = snapshot.docs.slice(0, pageSize);
       const imageIds = pageDocs.map((doc) => doc.id);
+      const includeVideoCounts = String(req.query.includeVideoCounts || 'true').toLowerCase() !== 'false';
       const videoCountByImageId = new Map<string, number>();
-      for (let offset = 0; offset < imageIds.length; offset += 30) {
-        const chunk = imageIds.slice(offset, offset + 30);
-        if (!chunk.length) continue;
-        const videoSnapshot = await db.collection('video_tasks').where('sourceImageId', 'in', chunk).get();
-        videoSnapshot.forEach((videoDoc) => {
-          const video = videoDoc.data() as any;
-          if (video.isDeleted !== true && video.sourceImageId) {
-            const imageId = String(video.sourceImageId);
-            videoCountByImageId.set(imageId, (videoCountByImageId.get(imageId) || 0) + 1);
-          }
-        });
+      if (includeVideoCounts) {
+        for (let offset = 0; offset < imageIds.length; offset += 30) {
+          const chunk = imageIds.slice(offset, offset + 30);
+          if (!chunk.length) continue;
+          const videoSnapshot = await db.collection('video_tasks').where('sourceImageId', 'in', chunk).get();
+          videoSnapshot.forEach((videoDoc) => {
+            const video = videoDoc.data() as any;
+            if (video.isDeleted !== true && video.sourceImageId) {
+              const imageId = String(video.sourceImageId);
+              videoCountByImageId.set(imageId, (videoCountByImageId.get(imageId) || 0) + 1);
+            }
+          });
+        }
       }
       const images = pageDocs
         .map((doc) => ({
@@ -1699,7 +1702,7 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const cached = imageThumbnailCache.get(imageId);
       if (cached && cached.expiresAt > Date.now()) {
         res.setHeader('Content-Type', 'image/webp');
-        res.setHeader('Cache-Control', 'private, max-age=300');
+        res.setHeader('Cache-Control', 'private, max-age=900, stale-while-revalidate=60');
         return res.send(cached.buffer);
       }
 
@@ -1708,7 +1711,7 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       let pending = imageThumbnailInflight.get(imageId);
       if (!pending) {
         pending = gcsArtifactStore
-          .fetchArtifactBuffer(
+          .fetchImageArtifactBuffer(
             String(asset.bucket || getVeoBucketName()),
             String(asset.objectPath || ''),
             session ? { session } : undefined,
@@ -1728,7 +1731,7 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
           expiresAt: Date.now() + IMAGE_THUMBNAIL_CACHE_TTL_MS,
         });
         res.setHeader('Content-Type', 'image/webp');
-        res.setHeader('Cache-Control', 'private, max-age=300');
+        res.setHeader('Cache-Control', 'private, max-age=900, stale-while-revalidate=60');
         res.setHeader('Content-Length', thumbnail.length);
         return res.send(thumbnail);
       } finally {
@@ -1775,7 +1778,7 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       if (asset.isDeleted === true) return res.status(404).send('Image not found');
       const connectionId = String(req.headers['x-connection-id'] || '');
       const session = connectionId ? CredentialService.getSession(connectionId) : undefined;
-      const buffer = await gcsArtifactStore.fetchArtifactBuffer(String(asset.bucket || getVeoBucketName()), String(asset.objectPath || ''), session ? { session } : undefined);
+      const buffer = await gcsArtifactStore.fetchImageArtifactBuffer(String(asset.bucket || getVeoBucketName()), String(asset.objectPath || ''), session ? { session } : undefined);
       res.setHeader('Content-Type', asset.mimeType || 'image/jpeg');
       return res.send(buffer);
     } catch (err) {
