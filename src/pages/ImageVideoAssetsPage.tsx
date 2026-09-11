@@ -245,6 +245,14 @@ export function ImageVideoAssetsPage() {
   const [loadingVideos, setLoadingVideos] = useState(false);
   const [error, setError] = useState('');
   const [showOriginal, setShowOriginal] = useState(false);
+  const [generationDraft, setGenerationDraft] = useState<{
+    prompt: string;
+    durationSeconds: 4 | 6 | 8;
+    sourceTaskId?: string;
+  } | null>(null);
+  const [submittingGeneration, setSubmittingGeneration] = useState(false);
+  const [generationError, setGenerationError] = useState('');
+  const generationSubmissionLockRef = useRef(false);
 
   const loadImages = async (cursor?: string, targetPage = page) => {
     setLoading(true);
@@ -332,6 +340,61 @@ export function ImageVideoAssetsPage() {
     }
   };
 
+  const openGenerationModal = (video?: WorkspaceVideo) => {
+    setGenerationError('');
+    setGenerationDraft({
+      prompt: video?.prompt || '',
+      durationSeconds: video?.durationSeconds || 4,
+      sourceTaskId: video?.taskId,
+    });
+  };
+
+  const closeGenerationModal = () => {
+    if (submittingGeneration) return;
+    setGenerationDraft(null);
+    setGenerationError('');
+  };
+
+  const submitGeneration = async () => {
+    if (!generationDraft || generationSubmissionLockRef.current) return;
+    if (!selectedImageId) {
+      setGenerationError('当前图片不可用，请返回图片列表后重新进入。');
+      return;
+    }
+    if (!generationDraft.prompt.trim()) {
+      setGenerationError('请输入 Prompt。');
+      return;
+    }
+
+    generationSubmissionLockRef.current = true;
+    setSubmittingGeneration(true);
+    setGenerationError('');
+    try {
+      const form = new FormData();
+      form.append('imageId', selectedImageId);
+      form.append('workspaceMode', 'simple_image_to_video');
+      form.append('rawUserPrompt', generationDraft.prompt.trim());
+      form.append('compiledPrompt', generationDraft.prompt.trim());
+      form.append('durationSeconds', String(generationDraft.durationSeconds));
+      form.append('sceneMode', 'animate_existing_character');
+      form.append('imageIsTargetCharacter', 'true');
+      const body = await json(await fetch('/api/videos/start', {
+        method: 'POST',
+        headers: headers(),
+        body: form,
+      }));
+      setGenerationDraft(null);
+      setGenerationError('');
+      setError(body.taskId ? '新视频任务已提交：' + body.taskId : '新视频任务已提交。');
+      await loadVideos(selectedImageId);
+    } catch (e: any) {
+      setGenerationError(e?.message || '视频任务提交失败');
+    } finally {
+      generationSubmissionLockRef.current = false;
+      setSubmittingGeneration(false);
+    }
+  };
+
   const selectedImage = images.find((image) => image.id === selectedImageId) || (selectedImageId ? {
     id: selectedImageId,
     mimeType: 'image/jpeg',
@@ -406,7 +469,12 @@ export function ImageVideoAssetsPage() {
             </button>
           </>}
         </div>
-        <h2 className="mb-4 text-xl font-medium">Related Videos</h2>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-xl font-medium">Related Videos</h2>
+          <button type="button" onClick={() => openGenerationModal()} className="rounded-lg bg-indigo-500 px-3 py-2 text-xs font-medium text-white">
+            生成新视频版本
+          </button>
+        </div>
         {loadingVideos && <p className="text-sm text-zinc-500">视频版本加载中…</p>}
         <div className="grid gap-4 lg:grid-cols-2">
           {videos.map((video, index) => {
@@ -423,6 +491,9 @@ export function ImageVideoAssetsPage() {
                 {failure.stage && <p className="mt-1 text-xs text-rose-300">失败阶段：{failure.stage}</p>}
                 <p className="mt-3 text-amber-200">下一步：{failure.nextAction}</p>
                 {failure.technical && <p className="mt-2 break-words text-xs text-zinc-400">技术信息：{failure.technical}</p>}
+                <button type="button" onClick={() => openGenerationModal(video)} className="mt-4 rounded-lg bg-indigo-500 px-3 py-2 text-xs font-medium text-white">
+                  重新生成
+                </button>
               </div> : video.videoUrl ? <video className="mt-3 aspect-video w-full rounded-lg bg-black object-cover" controls src={video.videoUrl} /> : <div className="mt-3 flex aspect-video items-center justify-center rounded-lg bg-black/30 text-sm text-zinc-500">任务处理中…</div>}
               <p className="mt-3 line-clamp-3 text-sm text-zinc-300">{video.prompt || '未填写 Prompt'}</p>
               <button type="button" onClick={() => void deleteVideo(video.taskId)} className="mt-4 rounded-lg border border-rose-400/40 px-3 py-2 text-xs text-rose-200">删除视频</button>
@@ -431,6 +502,45 @@ export function ImageVideoAssetsPage() {
         </div>
         {!loadingVideos && !videos.length && <p className="text-sm text-zinc-500">这张图片还没有视频版本。</p>}
       </section>}
+
+      {generationDraft && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true" aria-label={generationDraft.sourceTaskId ? '重新生成视频' : '生成新视频版本'}>
+        <div className="w-full max-w-xl rounded-2xl border border-white/10 bg-zinc-900 p-5 shadow-2xl">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-medium">{generationDraft.sourceTaskId ? '重新生成视频' : '生成新视频版本'}</h2>
+              <p className="mt-2 text-xs leading-5 text-zinc-400">
+                {generationDraft.sourceTaskId
+                  ? '已填充失败任务的 Prompt 和时长。修改后会创建新版本，原失败记录会保留。'
+                  : '使用当前图片创建一个新视频版本。'}
+              </p>
+            </div>
+            <button type="button" disabled={submittingGeneration} onClick={closeGenerationModal} className="rounded-lg border border-white/10 px-3 py-2 text-sm text-zinc-300">关闭</button>
+          </div>
+
+          <label className="mt-5 block text-sm text-zinc-300">Prompt</label>
+          <textarea
+            value={generationDraft.prompt}
+            onChange={(event) => setGenerationDraft((current) => current ? { ...current, prompt: event.target.value } : current)}
+            className="mt-2 min-h-32 w-full rounded-lg border border-white/10 bg-zinc-950 p-3 text-sm"
+            placeholder="镜头缓慢推进，人物自然眨眼，头发被微风轻轻吹动。"
+          />
+
+          <label className="mt-5 block text-sm text-zinc-300">时长</label>
+          <div className="mt-2 grid grid-cols-3 gap-2">
+            {[4, 6, 8].map((seconds) => <button
+              type="button"
+              key={seconds}
+              onClick={() => setGenerationDraft((current) => current ? { ...current, durationSeconds: seconds as 4 | 6 | 8 } : current)}
+              className={generationDraft.durationSeconds === seconds ? 'rounded-lg bg-indigo-500 px-3 py-2 text-sm' : 'rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm'}
+            >{seconds}秒</button>)}
+          </div>
+
+          {generationError && <p className="mt-4 rounded-lg bg-rose-500/10 p-3 text-sm text-rose-300">{generationError}</p>}
+          <button type="button" disabled={submittingGeneration} onClick={() => void submitGeneration()} className="mt-5 w-full rounded-lg bg-emerald-500 px-4 py-3 text-sm font-semibold text-zinc-950 disabled:opacity-40">
+            {submittingGeneration ? '提交中…' : '发起新任务'}
+          </button>
+        </div>
+      </div>}
     </div>
   </div>;
 }
