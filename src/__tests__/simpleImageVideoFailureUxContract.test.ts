@@ -22,6 +22,14 @@ describe('simple image-to-video failure and duplicate-submit UX contract', () =>
     expect(studio).not.toContain('isSubmittingRef.current = false;\n      setIsExecuting(false);\n\n      if (onNavigateToHistory)');
   });
 
+  it('uses the dedicated image artifact path and avoids eager count queries in the generator', () => {
+    expect(server).toContain('fetchImageArtifactBuffer');
+    expect(workspace).toContain('includeVideoCounts=false');
+    expect(assets).toContain("const query = new URLSearchParams({ limit: '12' });");
+    expect(assets).toContain('imageObjectUrlCache');
+    expect(assets).toContain('imageObjectUrlInflight');
+  });
+
   it('returns detailed failure context with related videos', () => {
     expect(server).toContain('error: record.error || null');
     expect(server).toContain('failureReason: record.failureReason || null');
