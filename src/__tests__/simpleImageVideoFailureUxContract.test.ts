@@ -8,10 +8,10 @@ const assets = fs.readFileSync('src/pages/ImageVideoAssetsPage.tsx', 'utf8');
 const gcsArtifactStore = fs.readFileSync('src/server/storage/gcsArtifactStore.ts', 'utf8');
 
 describe('simple image-to-video failure and duplicate-submit UX contract', () => {
-  it('uses a client task id and synchronous submission lock', () => {
-    expect(workspace).toContain('submissionLockRef');
-    expect(workspace).toContain("form.append('taskId', requestTaskId)");
-    expect(workspace).toContain('submissionLockRef.current = false');
+  it('uses client-side content fingerprinting before batch upload', () => {
+    expect(workspace).toContain('fingerprint');
+    expect(workspace).toContain('window.crypto.subtle');
+    expect(workspace).toContain('multiple');
   });
 
   it('turns the simple workspace into an upload-only batch page with server-side deduplication', () => {
@@ -40,7 +40,6 @@ describe('simple image-to-video failure and duplicate-submit UX contract', () =>
     expect(server).not.toContain("sourceImageBuffer = await gcsArtifactStore.fetchArtifactBuffer");
     expect(server).toContain('IMAGE_THUMBNAIL_CACHE_TTL_MS = 15 * 60 * 1000');
     expect(server).toContain("private, max-age=900, stale-while-revalidate=60");
-    expect(workspace).toContain('includeVideoCounts=false');
     expect(assets).toContain("const query = new URLSearchParams({ limit: '12' });");
     expect(assets).toContain('imageObjectUrlCache');
     expect(assets).toContain('imageObjectUrlInflight');
