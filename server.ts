@@ -692,7 +692,7 @@ type ImageAssetUploadResult = {
   reason?: string;
 };
 
-type ImageBatchResult = ImageAssetUploadResult & {
+type ImageBatchResult = Omit<ImageAssetUploadResult, 'status'> & {
   index: number;
   status: 'uploaded' | 'skipped' | 'failed';
   error?: string;
