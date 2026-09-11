@@ -682,6 +682,81 @@ function enqueueVideoTaskPolling(task: Pick<ServerVideoTaskRecord, 'taskId' | 'o
   );
 }
 
+
+type ImageAssetUploadResult = {
+  status: 'uploaded' | 'skipped';
+  fileName: string;
+  imageId?: string;
+  imageUrl?: string;
+  thumbnailUrl?: string;
+  reason?: string;
+};
+
+type ImageBatchResult = Omit<ImageAssetUploadResult, 'status'> & {
+  index: number;
+  status: 'uploaded' | 'skipped' | 'failed';
+  error?: string;
+};
+
+function calculateImageContentHash(buffer: Buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+async function findActiveImageByContentHash(db: any, contentHash: string, fileSize: number, mimeType: string) {
+  const exactSnapshot = await db.collection('image_assets').where('contentHash', '==', contentHash).limit(20).get();
+  const exactMatch = exactSnapshot.docs.find((doc: any) => doc.data()?.isDeleted !== true);
+  if (exactMatch) return { id: exactMatch.id, data: exactMatch.data() };
+
+  const legacySnapshot = await db.collection('image_assets').where('sizeBytes', '==', fileSize).limit(20).get();
+  for (const doc of legacySnapshot.docs) {
+    const data = doc.data() as any;
+    if (data.isDeleted === true || data.contentHash || String(data.mimeType || '') !== mimeType) continue;
+    try {
+      const legacyBuffer = await gcsArtifactStore.fetchImageArtifactBuffer(
+        String(data.bucket || getVeoBucketName()),
+        String(data.objectPath || ''),
+      );
+      if (calculateImageContentHash(legacyBuffer) === contentHash) {
+        return { id: doc.id, data };
+      }
+    } catch {
+      // A legacy object that is temporarily unavailable is not treated as a duplicate.
+    }
+  }
+  return null;
+}
+
+async function persistImageAsset(db: any, file: Express.Multer.File, contentHash: string) {
+  const imageId = 'img_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+  const ext = (file.mimetype.split('/')[1] || 'jpeg').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'jpeg';
+  const objectPath = 'images/' + imageId + '/original.' + ext;
+  const now = Date.now();
+  const artifact = await gcsArtifactStore.uploadImageArtifact({
+    objectPath,
+    buffer: file.buffer,
+    contentType: file.mimetype || 'image/jpeg',
+  });
+  await db.collection('image_assets').doc(imageId).set({
+    id: imageId,
+    objectPath: artifact.outputObjectPath,
+    bucket: artifact.outputBucket,
+    mimeType: file.mimetype || 'image/jpeg',
+    originalFileName: file.originalname || 'image',
+    contentHash,
+    sizeBytes: file.size || file.buffer.length,
+    createdAt: now,
+    updatedAt: now,
+    isDeleted: false,
+  });
+  return {
+    status: 'uploaded' as const,
+    fileName: file.originalname || 'image',
+    imageId,
+    imageUrl: '/api/images/' + imageId,
+    thumbnailUrl: '/api/images/' + imageId + '/thumbnail',
+  };
+}
+
 export async function createApp(dependencies: { s01ProductionService?: S01ProductionServiceLike } = {}) {
   const app = express();
   const PORT = 3000;
@@ -1586,25 +1661,100 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
       const file = req.file;
       const db = getFirestoreInstance();
       if (!file || !file.buffer?.length) return res.status(400).json({ error: '请上传图片文件' });
+      if (!file.mimetype?.startsWith('image/')) return res.status(400).json({ error: '只支持图片文件' });
       if (!db) return res.status(503).json({ error: '存储服务不可用', storageAuthority: 'unavailable' });
-      const imageId = 'img_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-      const ext = (file.mimetype.split('/')[1] || 'jpeg').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'jpeg';
-      const objectPath = 'images/' + imageId + '/original.' + ext;
-      const now = Date.now();
-      const artifact = await gcsArtifactStore.uploadImageArtifact({ objectPath, buffer: file.buffer, contentType: file.mimetype || 'image/jpeg' });
-      await db.collection('image_assets').doc(imageId).set({
-        id: imageId, objectPath: artifact.outputObjectPath, bucket: artifact.outputBucket,
-        mimeType: file.mimetype || 'image/jpeg', sizeBytes: file.size || file.buffer.length, createdAt: now, updatedAt: now,
-        isDeleted: false,
-      });
+
+      const contentHash = calculateImageContentHash(file.buffer);
+      const existing = await findActiveImageByContentHash(db, contentHash, file.size || file.buffer.length, file.mimetype || 'image/jpeg');
+      if (existing) {
+        return res.status(200).json({
+          ...(existing.data as any),
+          id: existing.id,
+          duplicate: true,
+          imageUrl: '/api/images/' + existing.id,
+          thumbnailUrl: '/api/images/' + existing.id + '/thumbnail',
+        });
+      }
+
+      const saved = await persistImageAsset(db, file, contentHash);
       return res.status(201).json({
-        id: imageId, objectPath: artifact.outputObjectPath, bucket: artifact.outputBucket,
-        mimeType: file.mimetype || 'image/jpeg', sizeBytes: file.size || file.buffer.length,
-        createdAt: now, updatedAt: now, imageUrl: '/api/images/' + imageId, thumbnailUrl: '/api/images/' + imageId + '/thumbnail',
+        ...saved,
+        mimeType: file.mimetype || 'image/jpeg',
+        sizeBytes: file.size || file.buffer.length,
+        createdAt: Date.now(),
+        duplicate: false,
       });
     } catch (err: any) {
       console.error('[Image Asset Upload Error]:', err);
       return res.status(500).json({ error: '图片保存失败: ' + (err?.message || err) });
+    }
+  });
+
+  app.post('/api/images/batch', upload.array('images', 10), async (req, res) => {
+    try {
+      const files = (req.files as Express.Multer.File[]) || [];
+      const db = getFirestoreInstance();
+      if (!files.length) return res.status(400).json({ error: '请至少选择一张图片' });
+      if (!db) return res.status(503).json({ error: '存储服务不可用', storageAuthority: 'unavailable' });
+
+      const results: ImageBatchResult[] = [];
+      const seen = new Map<string, ImageAssetUploadResult>();
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        const fileName = file.originalname || 'image';
+        if (!file.mimetype?.startsWith('image/')) {
+          results.push({ index, status: 'failed', fileName, error: '只支持图片文件' });
+          continue;
+        }
+
+        const contentHash = calculateImageContentHash(file.buffer);
+        const inBatch = seen.get(contentHash);
+        if (inBatch) {
+          results.push({ index, status: 'skipped', fileName, imageId: inBatch.imageId, reason: '本批次重复图片，已自动过滤' });
+          continue;
+        }
+
+        try {
+          const existing = await findActiveImageByContentHash(
+            db,
+            contentHash,
+            file.size || file.buffer.length,
+            file.mimetype || 'image/jpeg',
+          );
+          if (existing) {
+            const skipped: ImageAssetUploadResult = {
+              status: 'skipped',
+              fileName,
+              imageId: existing.id,
+              imageUrl: '/api/images/' + existing.id,
+              thumbnailUrl: '/api/images/' + existing.id + '/thumbnail',
+              reason: '素材库中已存在，已自动过滤',
+            };
+            seen.set(contentHash, skipped);
+            results.push({ index, ...skipped });
+            continue;
+          }
+
+          const saved = await persistImageAsset(db, file, contentHash);
+          seen.set(contentHash, saved);
+          results.push({ index, ...saved });
+        } catch (err: any) {
+          results.push({ index, status: 'failed', fileName, error: '图片保存失败: ' + (err?.message || err) });
+        }
+      }
+
+      const uploadedCount = results.filter((result) => result.status === 'uploaded').length;
+      const skippedCount = results.filter((result) => result.status === 'skipped').length;
+      const failedCount = results.filter((result) => result.status === 'failed').length;
+      return res.status(200).json({
+        results,
+        summary: { total: results.length, uploadedCount, skippedCount, failedCount },
+        storageAuthority: 'firestore',
+        artifactAuthority: 'gcs',
+      });
+    } catch (err: any) {
+      console.error('[Image Batch Upload Error]:', err);
+      return res.status(500).json({ error: '批量上传失败: ' + (err?.message || err) });
     }
   });
 
