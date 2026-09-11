@@ -14,6 +14,17 @@ describe('simple image-to-video failure and duplicate-submit UX contract', () =>
     expect(workspace).toContain('submissionLockRef.current = false');
   });
 
+  it('turns the simple workspace into an upload-only batch page with server-side deduplication', () => {
+    expect(workspace).toContain('multiple');
+    expect(workspace).toContain('/api/images/batch');
+    expect(workspace).not.toContain('const [prompt');
+    expect(workspace).not.toContain("fetch('/api/videos/start'");
+    expect(server).toContain("app.post('/api/images/batch'");
+    expect(server).toContain('calculateImageContentHash');
+    expect(server).toContain('contentHash');
+    expect(server).toContain('本批次重复图片，已自动过滤');
+  });
+
   it('keeps the legacy studio submission locked until the pipeline is terminal', () => {
     expect(studio).toContain('let pipelineStarted = false;');
     expect(studio).toContain('pipelineStarted = true;');

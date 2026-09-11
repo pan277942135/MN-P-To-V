@@ -1,13 +1,26 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 
-type ImageAsset = {
-  id: string;
-  mimeType: string;
-  sizeBytes: number;
-  createdAt: number;
-  imageUrl: string;
-  isDeleted?: boolean;
+type UploadStatus = 'ready' | 'uploaded' | 'skipped' | 'failed';
+
+type PendingImage = {
+  file: File;
+  hash: string;
+  previewUrl: string;
+  status: UploadStatus;
+  reason?: string;
+  imageId?: string;
 };
+
+type UploadResult = {
+  index: number;
+  status: 'uploaded' | 'skipped' | 'failed';
+  fileName: string;
+  imageId?: string;
+  reason?: string;
+  error?: string;
+};
+
+const MAX_BATCH_FILES = 10;
 
 const headers = () => {
   const id = window.localStorage.getItem('selectedConnectionId') || '';
@@ -27,151 +40,201 @@ const json = async (response: Response) => {
   return body;
 };
 
+async function fingerprint(file: File) {
+  try {
+    const digest = await window.crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+    return Array.from(new Uint8Array(digest)).map((value) => value.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return [file.name, file.size, file.lastModified].join(':');
+  }
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024 * 1024) return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+function statusText(image: PendingImage) {
+  if (image.status === 'uploaded') return '已上传';
+  if (image.status === 'skipped') return image.reason || '已过滤';
+  if (image.status === 'failed') return image.reason || '上传失败';
+  return '待上传';
+}
+
 export function ImageVideoWorkspacePage() {
-  const [images, setImages] = useState<ImageAsset[]>([]);
-  const [selectedImageId, setSelectedImageId] = useState('');
-  const [sourceMode, setSourceMode] = useState<'existing' | 'upload'>('existing');
-  const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState('');
-  const [prompt, setPrompt] = useState('');
-  const [duration, setDuration] = useState<4 | 6 | 8>(4);
+  const [files, setFiles] = useState<PendingImage[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const submissionLockRef = useRef(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
-  const selectedImage = useMemo(() => images.find((image) => image.id === selectedImageId), [images, selectedImageId]);
+  const chooseFiles = async (selected: File[]) => {
+    if (busy || selected.length === 0) return;
+    setBusy(true);
+    setError('');
+    setMessage('');
 
-  const loadRecentImages = async () => {
-    const body = await json(await fetch('/api/images?limit=24&includeVideoCounts=false', { headers: headers() }));
-    setImages((body.images || []).filter((image: ImageAsset) => image.isDeleted !== true));
+    try {
+      const currentHashes = new Set(files.map((item) => item.hash));
+      const next: PendingImage[] = [];
+      const seen = new Set(currentHashes);
+      const limited = selected.slice(0, MAX_BATCH_FILES);
+
+      for (const file of limited) {
+        const hash = await fingerprint(file);
+        const previewUrl = URL.createObjectURL(file);
+        if (!file.type.startsWith('image/')) {
+          next.push({ file, hash, previewUrl, status: 'failed', reason: '不是图片文件' });
+          continue;
+        }
+        if (seen.has(hash)) {
+          next.push({ file, hash, previewUrl, status: 'skipped', reason: '重复图片，已自动过滤' });
+          continue;
+        }
+        seen.add(hash);
+        next.push({ file, hash, previewUrl, status: 'ready' });
+      }
+
+      setFiles((current) => [...current, ...next]);
+      if (selected.length > MAX_BATCH_FILES) {
+        setMessage('单批最多选择 ' + MAX_BATCH_FILES + ' 张，超出部分未加入。');
+      }
+    } catch (e: any) {
+      setError(e?.message || '读取图片失败');
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = '';
+    }
   };
 
-  useEffect(() => {
-    void loadRecentImages().catch((e) => setError(e?.message || '图片列表读取失败'));
-  }, []);
+  const removeFile = (hash: string, previewUrl: string) => {
+    URL.revokeObjectURL(previewUrl);
+    setFiles((current) => current.filter((item) => item.hash !== hash || item.previewUrl !== previewUrl));
+  };
 
-  const chooseFile = (next: File | null) => {
-    if (preview) URL.revokeObjectURL(preview);
-    setFile(next);
-    setPreview(next ? URL.createObjectURL(next) : '');
+  const clearFiles = () => {
+    files.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+    setFiles([]);
     setMessage('');
     setError('');
-    if (next) {
-      setSourceMode('upload');
-      setSelectedImageId('');
-    }
   };
 
-  const chooseExistingImage = (imageId: string) => {
-    if (preview) URL.revokeObjectURL(preview);
-    setFile(null);
-    setPreview('');
-    setSourceMode('existing');
-    setSelectedImageId(imageId);
-    setMessage('已明确选择已有图片。');
+  const uploadBatch = async () => {
+    const uploadable = files.filter((item) => item.status === 'ready');
+    if (uploadable.length === 0) {
+      setError('没有待上传的新图片。重复图片和已处理图片已自动过滤。');
+      return;
+    }
+
+    setBusy(true);
     setError('');
-  };
+    setMessage('正在上传并检查重复图片…');
 
-  const uploadImage = async () => {
-    if (!file) return;
-    submissionLockRef.current = true;
-    setBusy(true); setError(''); setMessage('');
     try {
-      const requestTaskId = `vtask_client_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const form = new FormData();
-      form.append('taskId', requestTaskId);
-      form.append('image', file);
-      const body = await json(await fetch('/api/images', { method: 'POST', headers: headers(), body: form }));
-      setImages((current) => [body, ...current].slice(0, 24));
-      setSelectedImageId(body.id);
-      setFile(null);
-      setSourceMode('upload');
-      setMessage('图片已保存，并已作为本次生成图片。');
+      uploadable.forEach((item) => form.append('images', item.file));
+      const body = await json(await fetch('/api/images/batch', {
+        method: 'POST',
+        headers: headers(),
+        body: form,
+      }));
+
+      const results = (body.results || []) as UploadResult[];
+      setFiles((current) => current.map((item) => {
+        const uploadIndex = uploadable.findIndex((candidate) => candidate.hash === item.hash);
+        const result = results[uploadIndex];
+        if (!result) return item;
+        return {
+          ...item,
+          status: result.status,
+          reason: result.status === 'uploaded'
+            ? '上传成功'
+            : result.reason || result.error || '已过滤',
+          imageId: result.imageId,
+        };
+      }));
+
+      const summary = body.summary || {};
+      setMessage(
+        '处理完成：上传 ' + (summary.uploadedCount || 0) +
+        ' 张，过滤 ' + (summary.skippedCount || 0) +
+        ' 张，失败 ' + (summary.failedCount || 0) + ' 张。',
+      );
     } catch (e: any) {
-      setError(e?.message || '图片保存失败');
+      setError(e?.message || '批量上传失败');
+      setMessage('');
     } finally {
       setBusy(false);
     }
   };
 
-  const generate = async () => {
-    if (submissionLockRef.current) return;
-    if (file) return setError('本地图片尚未保存，请先点击“保存图片”，或切换到“选择已有图片”。');
-    if (!selectedImageId) return setError('请先在第一步明确选择一张已保存图片。');
-    if (!images.some((image) => image.id === selectedImageId)) return setError('当前图片不可用，请重新选择已保存图片。');
-    if (!prompt.trim()) return setError('请输入 Prompt。');
+  const readyCount = files.filter((item) => item.status === 'ready').length;
+  const uploadedCount = files.filter((item) => item.status === 'uploaded').length;
+  const skippedCount = files.filter((item) => item.status === 'skipped').length;
 
-    setBusy(true); setError(''); setMessage('');
-    try {
-      const form = new FormData();
-      form.append('imageId', selectedImageId);
-      form.append('workspaceMode', 'simple_image_to_video');
-      form.append('rawUserPrompt', prompt.trim());
-      form.append('compiledPrompt', prompt.trim());
-      form.append('durationSeconds', String(duration));
-      form.append('sceneMode', 'animate_existing_character');
-      form.append('imageIsTargetCharacter', 'true');
-      const body = await json(await fetch('/api/videos/start', { method: 'POST', headers: headers(), body: form }));
-      setMessage('视频任务已提交：' + (body.taskId || '') + '。可前往视频素材库查看进度。');
-    } catch (e: any) {
-      setError(e?.message || '视频任务提交失败');
-    } finally {
-      submissionLockRef.current = false;
-      setBusy(false);
-    }
-  };
-
-  return <div className="min-h-full bg-zinc-950 px-5 py-8 text-zinc-100 sm:px-8">
-    <div className="mx-auto max-w-3xl">
-      <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
+  return <div className='min-h-full bg-zinc-950 px-5 py-8 text-zinc-100 sm:px-8'>
+    <div className='mx-auto max-w-5xl'>
+      <div className='mb-8 flex flex-wrap items-end justify-between gap-4'>
         <div>
-          <p className="text-xs uppercase tracking-[0.24em] text-indigo-300">Zaojing Workspace V1</p>
-          <h1 className="mt-2 text-3xl font-semibold">图片生成视频</h1>
-          <p className="mt-2 text-sm text-zinc-400">选择一张图片，输入 Prompt，生成 4 / 6 / 8 秒视频。</p>
+          <p className='text-xs uppercase tracking-[0.24em] text-indigo-300'>Zaojing Workspace V1</p>
+          <h1 className='mt-2 text-3xl font-semibold'>图片批量上传</h1>
+          <p className='mt-2 text-sm text-zinc-400'>本页面只负责保存图片，不生成视频。系统按图片内容自动过滤重复上传。</p>
         </div>
-        <div className="flex gap-2">
-          <a href="/assets" className="rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-300">图片与视频素材库</a>
-          <a href="/projects" className="rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-300">Director Console</a>
+        <div className='flex gap-2'>
+          <a href='/assets' className='rounded-lg bg-indigo-500 px-3 py-2 text-xs text-white'>图片素材库</a>
+          <a href='/projects' className='rounded-lg border border-white/10 px-3 py-2 text-xs text-zinc-300'>Director Console</a>
         </div>
       </div>
 
-      <section className="rounded-2xl border border-white/10 bg-white/[0.035] p-5">
-        <h2 className="text-lg font-medium">第一步：选择视频起始图片</h2>
-        <p className="mt-2 text-xs leading-5 text-zinc-500">未保存的本地图片不会参与生成，也不会自动沿用上一张图片。完整图片列表请进入素材库查看。</p>
-        <div className="mt-4 grid grid-cols-2 gap-2">
-          <button type="button" onClick={() => { setSourceMode('existing'); setFile(null); if (preview) URL.revokeObjectURL(preview); setPreview(''); setError(''); }} className={sourceMode === 'existing' ? 'rounded-lg bg-indigo-500 px-3 py-2 text-sm' : 'rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm'}>选择已有照片</button>
-          <button type="button" onClick={() => { setSourceMode('upload'); setSelectedImageId(''); setError(''); }} className={sourceMode === 'upload' ? 'rounded-lg bg-indigo-500 px-3 py-2 text-sm' : 'rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm'}>本地上传照片</button>
+      <section className='rounded-2xl border border-white/10 bg-white/[0.035] p-5'>
+        <div className='flex flex-wrap items-center justify-between gap-3'>
+          <div>
+            <h2 className='text-lg font-medium'>选择图片</h2>
+            <p className='mt-1 text-xs leading-5 text-zinc-500'>可一次选择最多 {MAX_BATCH_FILES} 张。相同文件内容只保留一份；已存在于素材库的图片不会再次上传。</p>
+          </div>
+          <span className='text-xs text-zinc-500'>待上传 {readyCount} · 已上传 {uploadedCount} · 已过滤 {skippedCount}</span>
         </div>
 
-        {sourceMode === 'existing' && <div className="mt-3">
-          <select className="w-full rounded-lg border border-white/10 bg-zinc-900 p-2 text-sm" value={selectedImageId} onChange={(e) => chooseExistingImage(e.target.value)}>
-            <option value="">请选择已保存照片（显示最近 24 张）</option>
-            {images.map((image) => <option key={image.id} value={image.id}>{image.id}</option>)}
-          </select>
-          <a href="/assets" className="mt-2 inline-block text-xs text-indigo-300">查看全部图片并按页选择 →</a>
+        <input
+          ref={inputRef}
+          className='mt-5 block w-full rounded-lg border border-white/10 bg-zinc-900 p-3 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-indigo-500 file:px-3 file:py-2 file:text-white'
+          type='file'
+          accept='image/*'
+          multiple
+          onChange={(event) => void chooseFiles(Array.from(event.target.files || []))}
+        />
+
+        {files.length > 0 && <div className='mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5'>
+          {files.map((item) => <article key={item.hash + item.previewUrl} className='overflow-hidden rounded-xl border border-white/10 bg-zinc-900'>
+            <img src={item.previewUrl} alt={item.file.name} className='h-32 w-full object-cover' />
+            <div className='p-3'>
+              <p className='truncate text-xs text-zinc-200' title={item.file.name}>{item.file.name}</p>
+              <p className='mt-1 text-[11px] text-zinc-500'>{formatBytes(item.file.size)}</p>
+              <p className={item.status === 'failed' ? 'mt-2 text-xs text-rose-300' : item.status === 'skipped' ? 'mt-2 text-xs text-amber-300' : item.status === 'uploaded' ? 'mt-2 text-xs text-emerald-300' : 'mt-2 text-xs text-indigo-300'}>
+                {statusText(item)}
+              </p>
+              <button type='button' onClick={() => removeFile(item.hash, item.previewUrl)} className='mt-3 text-xs text-zinc-500 hover:text-zinc-200'>移除</button>
+            </div>
+          </article>)}
         </div>}
 
-        {sourceMode === 'upload' && <>
-          <input className="mt-3 block w-full rounded-lg border border-white/10 bg-zinc-900 p-2 text-sm" type="file" accept="image/*" onChange={(e) => chooseFile(e.target.files?.[0] || null)} />
-          {preview && <img src={preview} alt="待保存预览" className="mt-3 max-h-48 w-full rounded-lg object-cover" />}
-          <button type="button" disabled={!file || busy} onClick={() => void uploadImage()} className="mt-3 w-full rounded-lg bg-indigo-500 px-4 py-2 text-sm disabled:opacity-40">保存并选择这张照片</button>
-          {file && <p className="mt-2 text-xs text-amber-300">这张照片尚未保存，暂时不能生成视频。</p>}
-        </>}
+        {files.length === 0 && <div className='mt-5 rounded-xl border border-dashed border-white/10 px-5 py-12 text-center text-sm text-zinc-500'>还没有选择图片</div>}
 
-        {selectedImage && <p className="mt-4 text-xs text-zinc-500">已选择：{selectedImage.id}</p>}
-
-        <label className="mt-6 block text-sm text-zinc-300">Prompt</label>
-        <textarea className="mt-2 min-h-28 w-full rounded-lg border border-white/10 bg-zinc-900 p-3 text-sm" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="镜头缓慢推进，人物自然眨眼，头发被微风轻轻吹动。" />
-
-        <label className="mt-5 block text-sm text-zinc-300">时长</label>
-        <div className="mt-2 grid grid-cols-3 gap-2">
-          {[4, 6, 8].map((seconds) => <button type="button" key={seconds} onClick={() => setDuration(seconds as 4 | 6 | 8)} className={duration === seconds ? 'rounded-lg bg-indigo-500 px-3 py-2 text-sm' : 'rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-sm'}>{seconds}秒</button>)}
+        <div className='mt-6 flex flex-wrap gap-3'>
+          <button type='button' disabled={busy || readyCount === 0} onClick={() => void uploadBatch()} className='rounded-lg bg-emerald-500 px-5 py-3 text-sm font-semibold text-zinc-950 disabled:opacity-40'>
+            {busy ? '处理中…' : '开始上传图片'}
+          </button>
+          <button type='button' disabled={busy || files.length === 0} onClick={clearFiles} className='rounded-lg border border-white/10 px-5 py-3 text-sm text-zinc-300 disabled:opacity-40'>清空</button>
         </div>
 
-        <button type="button" disabled={busy || !selectedImageId} onClick={() => void generate()} className="mt-6 w-full rounded-lg bg-emerald-500 px-4 py-3 text-sm font-semibold text-zinc-950 disabled:opacity-40">{busy ? '处理中…' : '生成视频'}</button>
-        {error && <p className="mt-4 rounded-lg bg-rose-500/10 p-3 text-sm text-rose-300">{error}</p>}
-        {message && <p className="mt-4 rounded-lg bg-emerald-500/10 p-3 text-sm text-emerald-300">{message}</p>}
+        {error && <p className='mt-4 rounded-lg bg-rose-500/10 p-3 text-sm text-rose-300'>{error}</p>}
+        {message && <p className='mt-4 rounded-lg bg-emerald-500/10 p-3 text-sm text-emerald-300'>{message}</p>}
+      </section>
+
+      <section className='mt-5 rounded-2xl border border-indigo-400/20 bg-indigo-500/5 p-5'>
+        <h2 className='text-base font-medium text-indigo-200'>下一步：生成视频</h2>
+        <p className='mt-2 text-sm leading-6 text-zinc-400'>上传完成后，打开图片素材库，点击任意图片进入详情，再选择“生成新视频版本”。Prompt 和时长只在图片详情页使用。</p>
+        <a href='/assets' className='mt-4 inline-block rounded-lg border border-indigo-300/30 px-4 py-2 text-sm text-indigo-200'>打开图片素材库 →</a>
       </section>
     </div>
   </div>;
