@@ -1904,7 +1904,7 @@ ${userMotionContext ? `- ${userMotionContext}` : ''}
         if (imageAsset.isDeleted === true) return res.status(410).json({ error: 'source image has been deleted', imageId });
         const imageConnectionId = String(req.headers['x-connection-id'] || '');
         const imageSession = imageConnectionId ? CredentialService.getSession(imageConnectionId) : undefined;
-        sourceImageBuffer = await gcsArtifactStore.fetchArtifactBuffer(String(imageAsset.bucket || getVeoBucketName()), String(imageAsset.objectPath || ''), imageSession ? { session: imageSession } : undefined);
+        sourceImageBuffer = await gcsArtifactStore.fetchImageArtifactBuffer(String(imageAsset.bucket || getVeoBucketName()), String(imageAsset.objectPath || ''), imageSession ? { session: imageSession } : undefined);
         sourceImageMime = String(imageAsset.mimeType || 'image/jpeg');
       }
       if (!ffFile && !sceneFile && !sourceImageBuffer) return res.status(400).json({ error: '缺少首帧图、场景输入图或 source image' });
