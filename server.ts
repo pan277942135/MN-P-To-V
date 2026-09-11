@@ -1002,7 +1002,7 @@ export async function createApp(dependencies: { s01ProductionService?: S01Produc
       const artifact = await durableCharacterService.getReferenceBuffer(req.params.id, req.params.referenceId);
       if (!artifact) return res.status(404).json({ error: '角色母板不存在', storageAuthority: 'firestore' });
       res.setHeader('Content-Type', artifact.mimeType);
-      res.setHeader('Cache-Control', 'private, max-age=900, stale-while-revalidate=60');
+      res.setHeader('Cache-Control', 'private, max-age=300');
       return res.send(artifact.buffer);
     } catch (err: any) {
       return res.status(503).json({ error: err?.message || '读取角色母板失败', storageAuthority: 'gcs' });
