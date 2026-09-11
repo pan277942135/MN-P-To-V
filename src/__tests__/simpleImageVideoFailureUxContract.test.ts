@@ -30,6 +30,8 @@ describe('simple image-to-video failure and duplicate-submit UX contract', () =>
     expect(assets).toContain("const query = new URLSearchParams({ limit: '12' });");
     expect(assets).toContain('imageObjectUrlCache');
     expect(assets).toContain('imageObjectUrlInflight');
+    expect(assets).toContain('IntersectionObserver');
+    expect(assets).toContain("rootMargin: '320px'");
   });
 
   it('returns detailed failure context with related videos', () => {

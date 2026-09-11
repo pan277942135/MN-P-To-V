@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 type ImageAsset = {
   id: string;
@@ -183,10 +183,31 @@ function loadImageObjectUrl(src: string) {
 }
 
 function AuthenticatedImage({ src, alt, className }: { src: string; alt: string; className?: string }) {
+  const anchorRef = useRef<HTMLDivElement | null>(null);
   const [objectUrl, setObjectUrl] = useState('');
   const [failed, setFailed] = useState(false);
+  const [shouldLoad, setShouldLoad] = useState(false);
 
   useEffect(() => {
+    const anchor = anchorRef.current;
+    if (!anchor || !('IntersectionObserver' in window)) {
+      setShouldLoad(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setShouldLoad(true);
+        observer.disconnect();
+      }
+    }, { rootMargin: '320px' });
+
+    observer.observe(anchor);
+    return () => observer.disconnect();
+  }, [src]);
+
+  useEffect(() => {
+    if (!shouldLoad) return;
     let active = true;
     setObjectUrl('');
     setFailed(false);
@@ -200,10 +221,10 @@ function AuthenticatedImage({ src, alt, className }: { src: string; alt: string;
     return () => {
       active = false;
     };
-  }, [src]);
+  }, [src, shouldLoad]);
 
   if (!objectUrl) {
-    return <div className={className + ' flex items-center justify-center bg-zinc-900 text-xs text-zinc-500'}>{failed ? '图片暂时无法读取' : '图片加载中…'}</div>;
+    return <div ref={anchorRef} className={className + ' flex items-center justify-center bg-zinc-900 text-xs text-zinc-500'}>{shouldLoad ? (failed ? '图片暂时无法读取' : '图片加载中…') : '滚动后加载图片…'}</div>;
   }
   return <img src={objectUrl} alt={alt} className={className} />;
 }
