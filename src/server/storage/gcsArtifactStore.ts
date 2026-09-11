@@ -737,6 +737,46 @@ export class GcsArtifactStore {
     throw new Error(`Cloud Storage 视频产物不存在或读取失败: gs://${bucketName}/${objectPath}`);
   }
 
+
+  /**
+   * Fetch an image artifact using the exact object path.
+   *
+   * Images must not use fetchArtifactBuffer(): that method intentionally
+   * probes video/MP4 candidates and can fan out into many invalid GCS
+   * requests for JPEG/PNG assets.
+   */
+  public async fetchImageArtifactBuffer(
+    bucketName: string,
+    objectPath: string,
+    options?: { accessToken?: string; apiKey?: string; session?: any }
+  ): Promise<Buffer> {
+    const candidateBuckets = Array.from(
+      new Set([bucketName, getVeoBucketName(), EXPECTED_PRODUCTION_VEO_BUCKET].filter(Boolean))
+    );
+    const storageClients = await getStorageClientsForSessions({
+      session: options?.session,
+      accessToken: options?.accessToken,
+    });
+    let lastError = '';
+
+    for (const storage of storageClients) {
+      for (const bucket of candidateBuckets) {
+        try {
+          const [buffer] = await storage.bucket(bucket).file(objectPath).download();
+          if (buffer && buffer.length > 0) {
+            return buffer;
+          }
+        } catch (err: any) {
+          lastError = sanitizeGcsError(err?.message || String(err));
+        }
+      }
+    }
+
+    throw new Error(
+      `从 GCS 读取图片失败: gs://${bucketName}/${objectPath}${lastError ? ` (${lastError})` : ''}`
+    );
+  }
+
   public async migrateArtifactToGcs(params: {
     taskId: string;
     videoUri: string;
