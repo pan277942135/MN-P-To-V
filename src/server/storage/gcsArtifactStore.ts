@@ -89,6 +89,34 @@ function sanitizeGcsError(msg: string): string {
   return cleaned;
 }
 
+const GCS_UPLOAD_MAX_ATTEMPTS = 5;
+const GCS_UPLOAD_INITIAL_DELAY_MS = 1500;
+
+function isTransientGcsUploadError(error: unknown): boolean {
+  const errObj = error as any;
+  const code = String(errObj?.code || errObj?.cause?.code || '').toUpperCase();
+  const message = String(errObj?.message || error || '').toLowerCase();
+
+  return [
+    'socket hang up',
+    'econnreset',
+    'econnaborted',
+    'etimedout',
+    'epipe',
+    'eai_again',
+    'fetch failed',
+    'network error',
+    'connection reset',
+    'connection aborted',
+    'timeout',
+    'aborted',
+  ].some((token) => code === token.toUpperCase() || message.includes(token));
+}
+
+function waitForGcsUploadRetry(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 function createTokenAuthClient(accessToken: string, projectId?: string) {
   const oauthClient = new OAuth2Client();
   oauthClient.setCredentials({
@@ -297,51 +325,18 @@ export class GcsArtifactStore {
     }
   }
 
-  public async uploadVideoArtifact(params: {
-    taskId: string;
-    videoBuffer: Buffer;
-    contentType?: string;
-  }): Promise<ArtifactMetadata> {
-    const { taskId, videoBuffer, contentType = 'video/mp4' } = params;
+  private async saveVideoFileWithRetry(
+    file: any,
+    videoBuffer: Buffer,
+    contentType: string,
+    taskId: string,
+    objectPath: string
+  ): Promise<void> {
+    let lastError: unknown = null;
 
-    if (!videoBuffer || videoBuffer.length < 1000 || !VideoGenerator.isMp4Valid(videoBuffer)) {
-      throw new Error(`[GcsArtifactStore] Cannot upload invalid video buffer (size ${videoBuffer?.length || 0} bytes) for task ${taskId}`);
-    }
-
-    if (this.mockUploadFailure) {
-      throw new Error(`[GcsArtifactStore Mock] Simulated GCS upload failure for task ${taskId}`);
-    }
-
-    const storageConfig = assertProductionStorageConfig();
-    if (!storageConfig.valid) {
-      throw new Error(`[GcsArtifactStore Guard Error] ${storageConfig.error}`);
-    }
-    const bucketName = storageConfig.effectiveBucket;
-    const objectPath = getVeoObjectPath(taskId);
-    const key = `${bucketName}/${objectPath}`;
-
-    if (this.useMock || process.env.NODE_ENV === 'test') {
-      this.mockStore.set(key, { buffer: videoBuffer, contentType });
-      return {
-        outputBucket: bucketName,
-        outputObjectPath: objectPath,
-        videoUri: `gs://${bucketName}/${objectPath}`,
-        sizeBytes: videoBuffer.length,
-        contentType,
-        artifactPersisted: true,
-        artifactPersistedAt: Date.now(),
-      };
-    }
-
-    try {
-      const storage = getStorageClient();
-      const file = storage.bucket(bucketName).file(objectPath);
-      await file.save(videoBuffer, {
-        metadata: {
-          contentType,
-        },
-        resumable: false,
-      });
+    for (let attempt = 1; attempt <= GCS_UPLOAD_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        await this.saveVideoFileWithRetry(file, videoBuffer, contentType, taskId, objectPath);
 
       const [exists] = await file.exists();
       if (!exists) {
