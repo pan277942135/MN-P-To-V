@@ -226,7 +226,7 @@ function AuthenticatedImage({ src, alt, className }: { src: string; alt: string;
   if (!objectUrl) {
     return <div ref={anchorRef} className={className + ' flex items-center justify-center bg-zinc-900 text-xs text-zinc-500'}>{shouldLoad ? (failed ? '图片暂时无法读取' : '图片加载中…') : '滚动后加载图片…'}</div>;
   }
-  return <div ref={anchorRef} className={className}><img src={objectUrl} alt={alt} className="h-full w-full object-contain" /></div>;
+  return <img src={objectUrl} alt={alt} className={className} />;
 }
 
 function imageIdFromPath() {
