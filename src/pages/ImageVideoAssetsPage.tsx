@@ -170,9 +170,14 @@ function loadImageObjectUrl(src: string) {
   });
 
   imageObjectUrlInflight.set(src, pending);
-  void pending.finally(() => {
-    if (imageObjectUrlInflight.get(src) === pending) imageObjectUrlInflight.delete(src);
-  });
+  void pending.then(
+    () => {
+      if (imageObjectUrlInflight.get(src) === pending) imageObjectUrlInflight.delete(src);
+    },
+    () => {
+      if (imageObjectUrlInflight.get(src) === pending) imageObjectUrlInflight.delete(src);
+    },
+  );
   return pending;
 }
 
