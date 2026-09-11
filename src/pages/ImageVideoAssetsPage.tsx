@@ -145,13 +145,14 @@ function evictImageObjectUrls() {
 }
 
 function loadImageObjectUrl(src: string) {
-  const cached = imageObjectUrlCache.get(src);
+  const cacheKey = (window.localStorage.getItem('selectedConnectionId') || 'default') + ':' + src;
+  const cached = imageObjectUrlCache.get(cacheKey);
   if (cached) {
     cached.lastUsedAt = Date.now();
     return Promise.resolve(cached.objectUrl);
   }
 
-  const inflight = imageObjectUrlInflight.get(src);
+  const inflight = imageObjectUrlInflight.get(cacheKey);
   if (inflight) return inflight;
 
   const pending = new Promise<string>((resolve, reject) => {
@@ -159,7 +160,7 @@ function loadImageObjectUrl(src: string) {
       run: async () => {
         const response = await fetchImageWithRetry(src);
         const objectUrl = URL.createObjectURL(await response.blob());
-        imageObjectUrlCache.set(src, { objectUrl, lastUsedAt: Date.now() });
+        imageObjectUrlCache.set(cacheKey, { objectUrl, lastUsedAt: Date.now() });
         evictImageObjectUrls();
         return objectUrl;
       },
@@ -169,13 +170,13 @@ function loadImageObjectUrl(src: string) {
     drainImageFetchQueue();
   });
 
-  imageObjectUrlInflight.set(src, pending);
+  imageObjectUrlInflight.set(cacheKey, pending);
   void pending.then(
     () => {
-      if (imageObjectUrlInflight.get(src) === pending) imageObjectUrlInflight.delete(src);
+      if (imageObjectUrlInflight.get(cacheKey) === pending) imageObjectUrlInflight.delete(cacheKey);
     },
     () => {
-      if (imageObjectUrlInflight.get(src) === pending) imageObjectUrlInflight.delete(src);
+      if (imageObjectUrlInflight.get(cacheKey) === pending) imageObjectUrlInflight.delete(cacheKey);
     },
   );
   return pending;
