@@ -18,6 +18,7 @@ describe('simple image-to-video failure and duplicate-submit UX contract', () =>
     expect(studio).toContain('pipelineStarted = true;');
     expect(studio).toContain('void continueTaskVideoPipeline(');
     expect(studio).toContain('if (!pipelineStarted)');
+    expect((studio.match(/safeFetchApi\\('\\/api\\/videos\\/start'/g) || []).length).toBe(1);
     expect(studio).not.toContain('isSubmittingRef.current = false;\n      setIsExecuting(false);\n\n      if (onNavigateToHistory)');
   });
 
